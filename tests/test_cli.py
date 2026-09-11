@@ -66,6 +66,25 @@ def test_check_runs_without_crashing(config_path: Path):
     assert "Host" in result.stdout
 
 
+def test_check_creates_missing_allowlist_file(tmp_path: Path, config_path: Path):
+    allowlist_file = tmp_path / "allowlist.yaml"
+    assert not allowlist_file.exists()
+
+    result = runner.invoke(app, ["check", "--config", str(config_path)])
+    assert "(created)" in result.output
+    assert allowlist_file.is_file()
+    assert "allow: []" in allowlist_file.read_text()
+
+
+def test_check_reports_existing_allowlist_file_unchanged(tmp_path: Path, config_path: Path):
+    allowlist_file = tmp_path / "allowlist.yaml"
+    allowlist_file.write_text("allow:\n  - mac: aa:bb:cc:dd:ee:ff\n    name: Router\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", "--config", str(config_path)])
+    assert "(exists)" in result.output
+    assert "Router" in allowlist_file.read_text()
+
+
 def test_report_empty_db_json(config_path: Path):
     result = runner.invoke(app, ["report", "--since", "24h", "--format", "json", "--config", str(config_path)])
     assert result.exit_code == 0

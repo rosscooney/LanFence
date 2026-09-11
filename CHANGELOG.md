@@ -15,6 +15,12 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Changed
+
+- `lanfence check` now creates an empty allowlist file (`allow: []`) if none
+  exists yet, instead of just reporting "not created yet" - matching what it
+  already does for the device database.
+
 ### Fixed
 
 - `lanfence link` no longer refuses a normal pipx install on Debian /

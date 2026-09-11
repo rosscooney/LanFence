@@ -634,7 +634,16 @@ def check(
         db_ok = False
 
     allowlist_file = cfg.resolved_allowlist_file()
-    typer.echo(f"  allowlist:   {allowlist_file} ({'exists' if allowlist_file.is_file() else 'not created yet'})")
+    if not allowlist_file.is_file():
+        allowlist = Allowlist.load(allowlist_file)
+        allowlist.path = allowlist_file
+        try:
+            allowlist.save()
+            typer.echo(f"  allowlist:   {allowlist_file} (created)")
+        except OSError as exc:
+            typer.secho(f"  allowlist:   {allowlist_file} (could not create: {exc})", fg="yellow")
+    else:
+        typer.echo(f"  allowlist:   {allowlist_file} (exists)")
 
     if not _is_root():
         typer.echo("")
