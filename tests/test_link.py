@@ -5,11 +5,77 @@ import stat
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+import typer
 from typer.testing import CliRunner
 
-from lanfence.cli import _sudo_hints, _trusted_to_run_as_root, app
+from lanfence.cli import _reexec_with_sudo, _sudo_hints, _trusted_to_run_as_root, app
 
 runner = CliRunner()
+
+
+def test_reexec_with_sudo_fails_clean_instead_of_looping_if_still_not_root():
+    """Regression test: a `sudo` that "succeeds" without actually elevating
+    (a non-standard wrapper, misconfiguration, etc.) must not cause an
+    infinite re-exec / password-prompt loop - it should fail once with a
+    clear error instead."""
+
+    with patch("lanfence.cli._is_root", return_value=False), \
+         patch.dict(os.environ, {"LANFENCE_SUDO_REEXEC_ATTEMPTED": "1"}), \
+         patch("lanfence.cli.os.execvpe") as exec_mock:
+        with pytest.raises(typer.Exit) as excinfo:
+            _reexec_with_sudo()
+    assert excinfo.value.exit_code == 1
+    exec_mock.assert_not_called()
+
+
+def test_reexec_with_sudo_execs_sudo_with_marker_env(tmp_path: Path):
+    launcher = tmp_path / "lanfence"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+
+    with patch("lanfence.cli._is_root", return_value=False), \
+         patch.dict(os.environ, {}, clear=False), \
+         patch("lanfence.cli.shutil.which", return_value="/usr/bin/sudo"), \
+         patch("lanfence.cli.sys.stdin.isatty", return_value=True), \
+         patch("lanfence.cli._launcher_path", return_value=launcher), \
+         patch("lanfence.cli.os.execvpe") as exec_mock:
+        os.environ.pop("LANFENCE_SUDO_REEXEC_ATTEMPTED", None)
+        _reexec_with_sudo()
+
+    exec_mock.assert_called_once()
+    args, kwargs = exec_mock.call_args
+    program, argv, env = args
+    assert program == "sudo"
+    assert argv[0] == "sudo"
+    assert str(launcher) in argv
+    assert env.get("LANFENCE_SUDO_REEXEC_ATTEMPTED") == "1"
+
+
+def test_reexec_with_sudo_noop_when_already_root():
+    with patch("lanfence.cli._is_root", return_value=True), \
+         patch("lanfence.cli.os.execvpe") as exec_mock:
+        _reexec_with_sudo()
+    exec_mock.assert_not_called()
+
+
+def test_reexec_with_sudo_noop_when_opted_out():
+    with patch("lanfence.cli._is_root", return_value=False), \
+         patch.dict(os.environ, {"LANFENCE_NO_SUDO_REEXEC": "1"}), \
+         patch("lanfence.cli.os.execvpe") as exec_mock:
+        _reexec_with_sudo()
+    exec_mock.assert_not_called()
+
+
+def test_reexec_with_sudo_noop_when_no_tty():
+    with patch("lanfence.cli._is_root", return_value=False), \
+         patch.dict(os.environ, {}, clear=False), \
+         patch("lanfence.cli.shutil.which", return_value="/usr/bin/sudo"), \
+         patch("lanfence.cli.sys.stdin.isatty", return_value=False), \
+         patch("lanfence.cli.os.execvpe") as exec_mock:
+        os.environ.pop("LANFENCE_SUDO_REEXEC_ATTEMPTED", None)
+        _reexec_with_sudo()
+    exec_mock.assert_not_called()
 
 
 def test_trusted_to_run_as_root_true_for_owner_only_paths(tmp_path: Path):

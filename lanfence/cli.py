@@ -442,6 +442,13 @@ def allow(
     typer.secho(f"added: {entry.name}  ({entry.mac})", fg="green")
 
 
+#: Set in the child's environment across the ``execvpe`` below so a second
+#: attempt (still not root after ``sudo`` supposedly ran - wrong password,
+#: a wrapped/non-standard ``sudo``, or similar) reports an error instead of
+#: re-prompting forever.
+_SUDO_REEXEC_MARKER = "LANFENCE_SUDO_REEXEC_ATTEMPTED"
+
+
 def _reexec_with_sudo() -> None:
     """Re-run this exact command under ``sudo`` (which prompts for a password).
 
@@ -451,6 +458,13 @@ def _reexec_with_sudo() -> None:
 
     if _is_root() or os.environ.get("LANFENCE_NO_SUDO_REEXEC"):
         return
+    if os.environ.get(_SUDO_REEXEC_MARKER):
+        typer.secho(
+            "error: still not root after re-running under sudo - check your "
+            "sudo configuration and try again with an explicit `sudo`.",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=1)
     if shutil.which("sudo") is None or not sys.stdin.isatty():
         return
     launcher = _launcher_path()
@@ -465,8 +479,9 @@ def _reexec_with_sudo() -> None:
         return
     argv = ["sudo", str(launcher), *sys.argv[1:]]
     typer.secho(f"re-running with sudo: {shlex.join(argv)}", fg="bright_black")
+    env = {**os.environ, _SUDO_REEXEC_MARKER: "1"}
     try:
-        os.execvp("sudo", argv)  # noqa: S606 - deliberate privilege escalation
+        os.execvpe("sudo", argv, env)  # noqa: S606 - deliberate privilege escalation
     except OSError:
         return
 

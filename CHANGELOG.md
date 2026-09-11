@@ -15,6 +15,18 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-11
+
+### Fixed
+
+- `lanfence link`'s self-elevation (`sudo lanfence link`) could loop forever
+  - repeatedly re-invoking `sudo` and re-prompting for a password - if the
+  re-exec'd process still wasn't root afterward (a non-standard/wrapped
+  `sudo`, an unusual configuration). It now marks the re-exec attempt via an
+  environment variable and fails once with a clear error instead of retrying
+  indefinitely. Found via a simulated-`sudo` test while verifying the
+  escalation flow end-to-end, not reported from a real install.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added
@@ -113,7 +125,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/rosscooney/lanfence/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rosscooney/lanfence/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rosscooney/lanfence/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/rosscooney/lanfence/compare/v0.1.0...v0.1.1
