@@ -59,6 +59,7 @@ See [RELEASING.md](RELEASING.md) for the full step-by-step. In short:
 - [ ] `pip install dist/*.whl` in a clean venv; `lanfence --version` works
 - [ ] `CHANGELOG.md` has a dated section for this version
 - [ ] tag `vX.Y.Z`; publish to PyPI as `lanfence`
-- [ ] `LICENSE`, `CONTRIBUTING.md`, `CHANGELOG.md`, `DISTRIBUTING.md` present in
-      the sdist (`LICENSE` via `license-files` in `pyproject.toml`; the rest
-      via [`MANIFEST.in`](MANIFEST.in)) - check with `tar tzf dist/*.tar.gz`
+- [ ] `LICENSE`, `CONTRIBUTING.md`, `CHANGELOG.md`, `DISTRIBUTING.md`,
+      `SECURITY.md` present in the sdist (`LICENSE` via `license-files` in
+      `pyproject.toml`; the rest via [`MANIFEST.in`](MANIFEST.in)) - check
+      with `tar tzf dist/*.tar.gz`

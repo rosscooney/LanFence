@@ -71,5 +71,5 @@ thin module that talks to raw sockets.
 ## Reporting bugs and security issues
 
 - Normal bugs: open a GitHub issue.
-- Security vulnerabilities in LAN Fence itself: open a GitHub issue marked
-  `security`, or email contributors@lanfence.com.
+- Security vulnerabilities: please follow [SECURITY.md](SECURITY.md) and do
+  not open a public issue.

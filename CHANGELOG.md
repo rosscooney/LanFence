@@ -15,6 +15,17 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-11
+
+### Added
+
+- `SECURITY.md` - private vulnerability reporting via GitHub's Security
+  advisories or contributors@lanfence.com, and a scope statement specific to
+  LAN Fence's attack surface (sanitisation of device-supplied hostnames/
+  vendor strings, the observation-only guarantee, database/allowlist file
+  handling, no unconfigured network calls, and `lanfence link`'s `sudo`
+  self-elevation). Now bundled in the sdist via `MANIFEST.in`.
+
 ## [0.3.2] - 2026-09-11
 
 ### Changed
@@ -132,7 +143,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/rosscooney/lanfence/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/rosscooney/lanfence/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/rosscooney/lanfence/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rosscooney/lanfence/compare/v0.2.0...v0.3.0
