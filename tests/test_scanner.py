@@ -56,6 +56,47 @@ def test_local_subnet_returns_none_when_scanner_unavailable(monkeypatch):
     assert scanner.default_interface() is None
 
 
+def test_local_mac_returns_none_when_scanner_unavailable(monkeypatch):
+    def _boom():
+        raise scanner.ScannerUnavailable("no scapy")
+
+    monkeypatch.setattr(scanner, "_require_scapy", _boom)
+    assert scanner.local_mac("eth0") is None
+
+
+def test_local_mac_returns_the_interfaces_hardware_address(monkeypatch):
+    class _FakeScapy:
+        @staticmethod
+        def get_if_hwaddr(iface):
+            assert iface == "eth0"
+            return "AA:BB:CC:DD:EE:FF"
+
+    monkeypatch.setattr(scanner, "_require_scapy", lambda: _FakeScapy())
+    assert scanner.local_mac("eth0") == "AA:BB:CC:DD:EE:FF"
+
+
+def test_local_mac_treats_all_zero_mac_as_unknown(monkeypatch):
+    class _FakeScapy:
+        @staticmethod
+        def get_if_hwaddr(iface):
+            return "00:00:00:00:00:00"
+
+    monkeypatch.setattr(scanner, "_require_scapy", lambda: _FakeScapy())
+    assert scanner.local_mac("eth0") is None
+
+
+def test_local_mac_falls_back_to_default_interface(monkeypatch):
+    class _FakeScapy:
+        @staticmethod
+        def get_if_hwaddr(iface):
+            assert iface == "wlan0"
+            return "11:22:33:44:55:66"
+
+    monkeypatch.setattr(scanner, "_require_scapy", lambda: _FakeScapy())
+    monkeypatch.setattr(scanner, "default_interface", lambda: "wlan0")
+    assert scanner.local_mac(None) == "11:22:33:44:55:66"
+
+
 def test_resolve_hostname_returns_none_on_failure():
     # 192.0.2.0/24 is TEST-NET-1 (RFC 5737) - guaranteed not to resolve.
     assert scanner.resolve_hostname("192.0.2.123", timeout=0.5) is None
@@ -221,6 +262,36 @@ def test_passive_sniff_dispatches_dhcp_hostname_sighting(monkeypatch):
     assert sightings[0].mac == "aa:bb:cc:dd:ee:ff"
     assert sightings[0].ip == "192.168.1.77"
     assert sightings[0].hostname == "Georges-iPhone"
+
+
+def test_passive_sniff_decodes_bytes_hostname_option(monkeypatch):
+    """Regression test: on at least some scapy versions/platforms, the
+    "hostname" DHCP option (a plain string type) comes back as raw ``bytes``
+    rather than an already-decoded ``str`` - passing that straight through
+    used to crash downstream (`fingerprint.py`'s `kw.match in hostname.lower()`
+    raised TypeError comparing str to the bytes' own .lower())."""
+
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    sightings = []
+    scanner.passive_sniff(on_sighting=sightings.append, interface="eth0")
+    handler = captured["prn"]
+
+    request = _dhcp_packet(options=[
+        ("message-type", "request"), ("requested_addr", "192.168.1.77"),
+        ("hostname", b"Georges-iPhone"), "end",
+    ])
+    handler(request)
+
+    assert len(sightings) == 1
+    assert sightings[0].hostname == "Georges-iPhone"
+    assert isinstance(sightings[0].hostname, str)
 
 
 def test_passive_sniff_ignores_dhcp_discover_with_no_address_hint(monkeypatch):

@@ -15,6 +15,29 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- **LAN Fence now identifies and trusts itself.** The host running
+  `scan`/`monitor`/`devices`/`device`/`review` is inevitably on the network
+  it's watching - its own MAC shows up in its own active-sweep ARP request,
+  and in whatever a concurrent passive capture sees. Its own MAC on the
+  interface it's using is now detected automatically (via the OS, not a
+  network probe) and trusted the same way an `allow`-ed device is - findings
+  about it are downgraded to `info`, and it never occupies the `review`
+  queue. Computed fresh each run and never written to the allowlist file, so
+  moving to different hardware never leaves a stale entry; an operator's own
+  explicit `allow` entry for the same MAC is never overwritten.
+
+### Fixed
+
+- **`lanfence monitor` could crash on a real DHCP hostname.** On at least
+  some scapy versions/platforms, the DHCP "hostname" option (option 12)
+  comes back as raw `bytes` rather than an already-decoded `str`, which
+  crashed fingerprint matching (`TypeError: a bytes-like object is required,
+  not 'str'`) the moment a real device's hostname was compared against a
+  rogue-device signature keyword. DHCP-sourced hostnames are now decoded
+  defensively (UTF-8, invalid bytes replaced) before use.
+
 ## [0.3.7] - 2026-09-11
 
 ### Added

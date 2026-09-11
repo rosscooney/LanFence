@@ -20,6 +20,7 @@ from lanfence.db import DeviceStore
 from lanfence.fingerprint import SignatureMatch, SignatureSet, fingerprint_device
 from lanfence.logging_config import get_logger
 from lanfence.models import Device, DeviceEvent, EventType, Finding, ScanResult
+from lanfence.netutil import normalize_mac
 
 log = get_logger("engine")
 
@@ -282,6 +283,31 @@ def filter_snoozed(findings: list[Finding], store: DeviceStore, *, now: datetime
     """
 
     return [f for f in findings if not store.is_snoozed(f.mac, now=now)]
+
+
+def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
+    """Make LAN Fence trust its own MAC address on ``interface``, so its own
+    ARP/ND traffic - inevitably visible to a passive capture, and sometimes
+    even to its own active sweep - is never treated as an unknown device.
+
+    In-memory only: mutates ``allowlist.entries`` directly and never touches
+    ``allowlist.path`` or calls :meth:`Allowlist.save`, so this is never
+    written into the operator's own curated allowlist file - if the host's
+    interface or MAC changes later (new hardware, a different NIC), nothing
+    stale is left behind. If the operator has *already* explicitly trusted
+    this exact MAC themselves (their own entry, their own name), that choice
+    is left alone rather than overwritten.
+    """
+
+    self_mac = scanner.local_mac(interface)
+    if self_mac is None:
+        return
+    try:
+        norm = normalize_mac(self_mac)
+    except ValueError:
+        return
+    if allowlist.match(norm) is None:
+        allowlist.add(norm, "This host (running LAN Fence)", "auto-detected - LAN Fence trusts itself")
 
 
 def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:

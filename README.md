@@ -55,7 +55,10 @@ routinely) and never touches, blocks, deauthenticates or spoofs anything.
    allowlist produces a plain-language **finding** with a severity
    (`high`/`medium`/`info`), a rationale, and a recommendation; an allowlisted
    device is downgraded to `info` so your own hardware stops shouting every
-   time it reconnects.
+   time it reconnects. LAN Fence also automatically identifies and trusts
+   **itself** - its own MAC address on the interface it's using - so its own
+   ARP traffic during a sweep, or its own frames a passive capture inevitably
+   sees, is never mistaken for an unknown device (see below).
 6. Findings can be dispatched to **syslog, email, a generic webhook, Slack,
    Discord, Microsoft Teams, ntfy, or Twilio SMS**, and everything is
    available as a CLI table or JSON for automation.
@@ -79,6 +82,22 @@ Heuristics, not proof - a match is a lead to check by hand:
 Extend or override these with your own `rogue_signatures_file:` (same YAML
 shape as `lanfence/data/rogue_signatures.yaml`) and `vendor_file:` (same
 tab-separated shape as `lanfence/data/oui_vendors.txt`) in config.
+
+## LAN Fence trusts itself
+
+The host running `lanfence scan`/`monitor` is on the network it's watching,
+so its own MAC address inevitably shows up - in its own ARP request during
+an active sweep, and in whatever a concurrent passive capture sees. LAN
+Fence detects its own MAC on the interface it's using (via the OS, not a
+network probe) and treats it as trusted automatically, the same way an
+`lanfence allow`-ed device is: findings about it are downgraded to `info`,
+and it never occupies the `lanfence review` queue.
+
+This self-trust is **never written to your allowlist file** - it's computed
+fresh each run from the live interface, so moving LAN Fence to different
+hardware or a different NIC never leaves a stale entry behind. If you've
+already explicitly `lanfence allow`-ed this same MAC yourself under your own
+name, that choice is left alone rather than overwritten.
 
 ## Vendor lookups
 

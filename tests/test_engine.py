@@ -11,6 +11,7 @@ from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.engine import (
+    apply_self_trust,
     build_findings,
     build_inventory,
     filter_rate_limited,
@@ -456,6 +457,68 @@ def test_filter_snoozed_does_not_consume_alert_cooldown(tmp_path: Path):
     # the cooldown was never touched by the (correctly) suppressed finding
     assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "high", now=now, cooldown_seconds=900) is True
     store.close()
+
+
+# --- apply_self_trust ---------------------------------------------------
+
+
+def test_apply_self_trust_adds_own_mac_when_detected():
+    allowlist = Allowlist.load(None)
+    with patch("lanfence.engine.scanner.local_mac", return_value="aa:bb:cc:dd:ee:ff"):
+        apply_self_trust(allowlist, interface="eth0")
+
+    entry = allowlist.match("aa:bb:cc:dd:ee:ff")
+    assert entry is not None
+    assert "lanfence" in entry.name.lower() or "host" in entry.name.lower()
+
+
+def test_apply_self_trust_is_a_noop_when_mac_cannot_be_determined():
+    allowlist = Allowlist.load(None)
+    with patch("lanfence.engine.scanner.local_mac", return_value=None):
+        apply_self_trust(allowlist, interface="eth0")
+
+    assert len(allowlist) == 0
+
+
+def test_apply_self_trust_never_overrides_an_existing_operator_entry():
+    allowlist = Allowlist.load(None)
+    allowlist.add("aa:bb:cc:dd:ee:ff", "My Own Custom Name", "operator-chosen")
+    with patch("lanfence.engine.scanner.local_mac", return_value="aa:bb:cc:dd:ee:ff"):
+        apply_self_trust(allowlist, interface="eth0")
+
+    entry = allowlist.match("aa:bb:cc:dd:ee:ff")
+    assert entry.name == "My Own Custom Name"
+
+
+def test_apply_self_trust_never_saves_to_disk(tmp_path: Path):
+    allowlist_path = tmp_path / "allowlist.yaml"
+    allowlist = Allowlist.load(allowlist_path)
+    allowlist.path = allowlist_path
+    with patch("lanfence.engine.scanner.local_mac", return_value="aa:bb:cc:dd:ee:ff"):
+        apply_self_trust(allowlist, interface="eth0")
+
+    assert not allowlist_path.exists()  # in-memory only - apply_self_trust itself never calls save()
+
+
+def test_apply_self_trust_makes_own_findings_info_severity(tmp_path: Path, monkeypatch):
+    """End-to-end: once trusted, LAN Fence's own MAC produces the same
+    downgraded-to-info finding any other allowlisted device would."""
+
+    monkeypatch.setattr("lanfence.engine.scanner.resolve_hostname", lambda ip, timeout=1.0: None)
+    allowlist = Allowlist.load(None)
+    with patch("lanfence.engine.scanner.local_mac", return_value="aa:bb:cc:dd:ee:ff"):
+        apply_self_trust(allowlist, interface="eth0")
+
+    store = DeviceStore(tmp_path / "db.sqlite")
+    device, event_type, findings = process_sighting(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=_now(),
+        store=store, allowlist=allowlist, signatures=SignatureSet.load(), cfg=Config(),
+    )
+    store.close()
+
+    assert event_type == "new_device"
+    assert device.allowlisted is True
+    assert findings[0].severity == "info"
 
 
 # --- build_inventory / is_review_needed -------------------------------------

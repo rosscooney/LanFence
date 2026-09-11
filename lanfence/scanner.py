@@ -132,6 +132,28 @@ def local_subnet(interface: str | None = None) -> str | None:
         return None
 
 
+def local_mac(interface: str | None = None) -> str | None:
+    """This host's own MAC address on ``interface`` (or the default one).
+
+    Lets LAN Fence recognize its own network traffic - its own ARP requests
+    during an active sweep, or its own frames a passive capture inevitably
+    sees too - as itself rather than an unknown device (see
+    :func:`lanfence.engine.apply_self_trust`).
+    """
+
+    try:
+        scapy_module = _require_scapy()
+        iface = interface or default_interface()
+        if iface is None:
+            return None
+        mac = scapy_module.get_if_hwaddr(iface)
+        return mac if mac and mac.lower() != "00:00:00:00:00:00" else None
+    except ScannerUnavailable:
+        return None
+    except Exception:  # noqa: BLE001 - best-effort guess
+        return None
+
+
 def active_scan(
     *,
     subnet: str,
@@ -278,6 +300,23 @@ def passive_sniff(
     from scapy.layers.dhcp import DHCP, BOOTP
     from scapy.layers.inet6 import ICMPv6ND_NA, ICMPv6ND_NS, IPv6
 
+    def _decode_dhcp_string(value: object) -> str | None:
+        """Normalize a DHCP option value to ``str``.
+
+        Despite carrying a plain string type (option 12), scapy hands this
+        back as ``bytes`` rather than an already-decoded ``str`` on at least
+        some scapy versions/platforms - decode defensively rather than
+        assume either. The bytes are untrusted network input (a hostname a
+        DHCP client can set to anything), so a malformed/non-UTF-8 value is
+        replaced rather than raising.
+        """
+
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace") or None
+        if isinstance(value, str):
+            return value or None
+        return None
+
     def _handle_dhcp(packet) -> None:
         if not packet.haslayer(BOOTP):
             return
@@ -299,7 +338,7 @@ def passive_sniff(
             ArpSighting(
                 mac=_mac_from_chaddr(bytes(bootp.chaddr)),
                 ip=ip,
-                hostname=options.get("hostname"),
+                hostname=_decode_dhcp_string(options.get("hostname")),
                 seen_at=datetime.now(timezone.utc),
             )
         )

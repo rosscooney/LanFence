@@ -29,6 +29,7 @@ from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.engine import (
+    apply_self_trust,
     build_findings,
     build_inventory,
     filter_rate_limited,
@@ -322,6 +323,7 @@ def scan(
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=interface or cfg.scan.interface)
 
     with DeviceStore(cfg.resolved_db_path()) as store:
         result = run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
@@ -403,6 +405,7 @@ def monitor(
 
     iface = interface or cfg.scan.interface or scanner.default_interface()
     net = subnet or cfg.scan.subnet
+    apply_self_trust(allowlist, interface=iface)
 
     typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
     dhcp_active = cfg.scan.passive and cfg.scan.dhcp_snooping
@@ -463,6 +466,7 @@ def monitor(
                 # from the database on every finding via filter_snoozed.
                 try:
                     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+                    apply_self_trust(allowlist, interface=iface)
                 except Exception as exc:  # noqa: BLE001 - a bad edit must not crash monitoring
                     typer.secho(f"warning: could not reload allowlist: {exc}", fg="yellow", err=True)
                 result = run_active_sweep(cfg, store, allowlist, signatures, interface=iface, subnet=net)
@@ -613,6 +617,7 @@ def devices(
 
     cfg = _load_config(config)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interface)
     now = utcnow()
 
     with DeviceStore(cfg.resolved_db_path()) as store:
@@ -660,6 +665,7 @@ def device(
     cfg = _load_config(config)
     since_dt = _parse_since(since)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interface)
     now = utcnow()
 
     with DeviceStore(cfg.resolved_db_path()) as store:
@@ -718,11 +724,19 @@ def _run_interactive_review(cfg: Config) -> None:
 
     with DeviceStore(cfg.resolved_db_path()) as store:
         now = utcnow()
+        # A separate copy (never saved) just for building the queue, so
+        # self-trust never leaks into the file if the operator goes on to
+        # trust some *other* device in this same session - `allowlist`
+        # itself (the one .save() is called on below) stays exactly what
+        # was on disk plus whatever the operator explicitly chooses here.
+        display_allowlist = Allowlist(list(allowlist.entries), allowlist_path)
+        apply_self_trust(display_allowlist, interface=cfg.scan.interface)
+
         # A stable snapshot taken once at the start - a decision made on one
         # device (trust/snooze/investigate) never reshuffles or reintroduces
         # others later in the same session.
         queue = sorted(
-            (d for d in build_inventory(store, allowlist) if is_review_needed(d, now=now)),
+            (d for d in build_inventory(store, display_allowlist) if is_review_needed(d, now=now)),
             key=lambda d: d.mac,
         )
 

@@ -128,6 +128,28 @@ def test_run_is_an_alias_for_scan(config_path: Path):
     sweep_mock.assert_called_once()
 
 
+def test_scan_trusts_its_own_mac(config_path: Path, monkeypatch):
+    """LAN Fence's own MAC - inevitably visible to its own active sweep or a
+    concurrent passive capture - must never be treated as an unknown device."""
+
+    from lanfence import scanner as scanner_module
+
+    self_mac = "aa:bb:cc:dd:ee:ff"
+    sighting = scanner_module.ArpSighting(mac=self_mac, ip="10.0.0.9", seen_at=_now())
+
+    monkeypatch.setattr("lanfence.cli.scanner.local_mac", lambda iface=None: self_mac)
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: [sighting])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+
+    result = runner.invoke(app, ["scan", "--no-ipv6", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Unknown device" not in result.output
+
+    by_mac = _devices_json(config_path)
+    assert by_mac[self_mac]["allowlisted"] is True
+
+
 def test_scan_no_ipv6_flag_disables_ipv6_scanning(config_path: Path):
     with patch("lanfence.cli.run_active_sweep") as sweep_mock:
         sweep_mock.return_value.findings = []
