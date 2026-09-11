@@ -15,6 +15,28 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-11
+
+### Added
+
+- `lanfence link` - symlinks the launcher into a directory on root's `PATH`
+  (default `/usr/local/bin`, `--bin-dir` to choose) so a bare
+  `sudo lanfence scan` / `sudo lanfence monitor` works. Without it, a pipx /
+  `pip install --user` install (launcher in `~/.local/bin`) fails under
+  `sudo` with "command not found", since `sudo` resets `PATH` to a fixed
+  `secure_path`. Re-execs itself under `sudo` (prompting for a password) when
+  writing to the target directory needs root; `--no-sudo` skips that,
+  `--remove` undoes the link. Refuses to link (or self-escalate through) a
+  launcher whose file or containing directory is group-/world-writable.
+
+### Changed
+
+- The "not running as root" warning on `scan`/`monitor`/`check` now prints
+  copy-pasteable `sudo` commands that actually work for a pipx / `--user`
+  install (`sudo <full path> …` or `sudo env "PATH=$PATH" lanfence …`,
+  matching whichever `sudo lanfence …` alone would fail with "command not
+  found" for), plus a pointer to `lanfence link` for a permanent fix.
+
 ## [0.2.0] - 2026-09-11
 
 ### Added
@@ -91,7 +113,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rosscooney/lanfence/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rosscooney/lanfence/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/rosscooney/lanfence/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/rosscooney/lanfence/releases/tag/v0.1.0

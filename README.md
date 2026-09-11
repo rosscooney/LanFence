@@ -103,7 +103,17 @@ lanfence report --since 24h     # summarize events/findings from the database
 lanfence check                  # verify permissions, scapy, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
 lanfence upgrade --check        # only report whether an update is available
+lanfence link                   # make `sudo lanfence` work (pipx/--user installs)
 ```
+
+`scan`/`monitor` warn (and show copy-pasteable fixes) if not run as root, since
+ARP scanning needs raw-socket access. A pipx / `pip install --user` install
+puts the `lanfence` launcher in `~/.local/bin`, which `sudo` does not see by
+default - `sudo lanfence scan` then fails with "command not found". Run
+`lanfence link` once (no `sudo` needed up front - it re-execs itself under
+`sudo` and prompts for your password) to symlink the launcher onto root's
+`PATH`; after that, a bare `sudo lanfence scan` / `sudo lanfence monitor`
+works. `lanfence link --remove` undoes it.
 
 ### Example: an unknown device joins
 

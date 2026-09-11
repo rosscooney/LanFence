@@ -10,6 +10,8 @@ import os
 import queue
 import re
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -77,6 +79,114 @@ def _is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+#: Directories on root's default ``secure_path`` (see ``sudo -V``). If the
+#: launcher lives here, a bare ``sudo lanfence`` works; otherwise (pipx /
+#: ``pip install --user`` put it in ``~/.local/bin``) it does not.
+_ROOT_SECURE_PATH = (
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+    "/snap/bin",
+)
+
+
+def _launcher_path() -> Optional[Path]:
+    """Absolute path to the installed ``lanfence`` launcher script, if any.
+
+    Ignores ``sys.argv[0]`` when it is not actually the ``lanfence`` console
+    script (e.g. ``python -m lanfence.cli`` during development).
+    """
+
+    argv0 = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    candidates = []
+    if argv0 is not None and argv0.name == "lanfence":
+        candidates.append(argv0)
+    which = shutil.which("lanfence")
+    candidates.append(Path(which) if which else None)
+    for path in candidates:
+        if path is not None and path.is_absolute() and path.exists():
+            # resolve symlinks so callers see (and can vet) the real target
+            try:
+                return Path(os.path.realpath(path))
+            except OSError:
+                return path
+    return None
+
+
+def _trusted_to_run_as_root(path: Path) -> bool:
+    """True if ``path`` and its directory are writable only by their owner.
+
+    ``_launcher_path()`` can fall back to ``$PATH`` (``shutil.which``), which is
+    the *invoking* user's ``PATH``. Before we ask ``sudo`` to run that file as
+    root - or symlink it onto root's ``PATH`` - make sure a third party could
+    not have swapped it out via a group-/world-writable file or parent dir.
+    """
+
+    try:
+        for target in (path, path.parent):
+            mode = target.stat().st_mode
+            if mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _sudo_hints(subcommand: str) -> list[str]:
+    """Copy-pasteable ways to re-run ``subcommand`` as root, best first.
+
+    ``sudo`` resets ``PATH`` to a fixed ``secure_path``, so a bare
+    ``sudo lanfence`` fails with "command not found" for the common pipx /
+    ``pip install --user`` layout. Detect that and offer commands that work.
+    """
+
+    launcher = _launcher_path()
+    on_root_path = launcher is not None and str(launcher.parent) in _ROOT_SECURE_PATH
+
+    if on_root_path or launcher is None:
+        return [f"sudo lanfence {subcommand}"]
+
+    quoted = shlex.quote(str(launcher))
+    return [
+        f"sudo {quoted} {subcommand}",
+        f'sudo env "PATH=$PATH" lanfence {subcommand}',
+    ]
+
+
+def _permanent_link_hint() -> Optional[str]:
+    """One-liner that makes ``sudo lanfence`` work for good, or None if the
+    launcher is already on root's PATH."""
+
+    launcher = _launcher_path()
+    if launcher is None or str(launcher.parent) in _ROOT_SECURE_PATH:
+        return None
+    return "lanfence link          # prompts for your sudo password"
+
+
+def _warn_not_root(subcommand: str) -> None:
+    """Print a not-root warning with copy-pasteable ways to fix it.
+
+    ARP scanning/sniffing needs raw-socket access (``CAP_NET_RAW``), so
+    ``scan``/``monitor`` see little or nothing without root.
+    """
+
+    hint = "\n    ".join(_sudo_hints(subcommand))
+    typer.secho(
+        "warning: not running as root - ARP scanning needs raw-socket access.\n"
+        f"  re-run as:\n    {hint}",
+        fg="yellow", err=True,
+    )
+    permanent = _permanent_link_hint()
+    if permanent is not None:
+        typer.secho(
+            f"  or, so a bare `sudo lanfence` works from now on:\n    {permanent}",
+            fg="bright_black", err=True,
+        )
+
+
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
@@ -113,11 +223,7 @@ def scan(
     cfg = _load_config(config)
 
     if not _is_root():
-        typer.secho(
-            "warning: not running as root - active ARP scanning needs raw-socket "
-            "access. Re-run with sudo if this returns no devices.",
-            fg="yellow", err=True,
-        )
+        _warn_not_root("scan")
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
@@ -174,11 +280,7 @@ def monitor(
         cfg.scan.passive = passive
 
     if not _is_root():
-        typer.secho(
-            "warning: not running as root - ARP scanning/sniffing needs raw-socket "
-            "access. Re-run with sudo for full monitoring.",
-            fg="yellow", err=True,
-        )
+        _warn_not_root("monitor")
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
@@ -340,6 +442,112 @@ def allow(
     typer.secho(f"added: {entry.name}  ({entry.mac})", fg="green")
 
 
+def _reexec_with_sudo() -> None:
+    """Re-run this exact command under ``sudo`` (which prompts for a password).
+
+    Returns only if that is not possible (no sudo, no TTY, or already elevated);
+    otherwise it replaces the current process and never returns.
+    """
+
+    if _is_root() or os.environ.get("LANFENCE_NO_SUDO_REEXEC"):
+        return
+    if shutil.which("sudo") is None or not sys.stdin.isatty():
+        return
+    launcher = _launcher_path()
+    if launcher is None:
+        return
+    if not _trusted_to_run_as_root(launcher):
+        typer.secho(
+            f"not auto-escalating: {launcher} or its directory is writable by "
+            "other users. Re-run as root explicitly if you trust it.",
+            fg="yellow", err=True,
+        )
+        return
+    argv = ["sudo", str(launcher), *sys.argv[1:]]
+    typer.secho(f"re-running with sudo: {shlex.join(argv)}", fg="bright_black")
+    try:
+        os.execvp("sudo", argv)  # noqa: S606 - deliberate privilege escalation
+    except OSError:
+        return
+
+
+@app.command()
+def link(
+    bin_dir: Path = typer.Option(
+        Path("/usr/local/bin"), "--bin-dir",
+        help="Directory on root's PATH to link the launcher into.",
+    ),
+    remove: bool = typer.Option(False, "--remove", help="Remove the link instead of creating it."),
+    sudo: bool = typer.Option(
+        True, "--sudo/--no-sudo",
+        help="Re-run under sudo (prompting for a password) if writing needs root.",
+    ),
+) -> None:
+    """Make `sudo lanfence` work by symlinking the launcher into root's PATH.
+
+    A pipx / ``pip install --user`` install puts ``lanfence`` in
+    ``~/.local/bin``, which ``sudo`` does not see. Run ``lanfence link`` once
+    (no ``sudo`` needed - it re-runs itself under ``sudo`` and prompts for your
+    password) and afterwards ``sudo lanfence scan`` / ``sudo lanfence monitor``
+    work without a full path. ``--no-sudo`` skips the escalation; ``--remove``
+    deletes the link.
+    """
+
+    target = bin_dir / "lanfence"
+    need_root = not os.access(bin_dir if bin_dir.is_dir() else bin_dir.parent, os.W_OK)
+    if need_root and not _is_root() and sudo:
+        _reexec_with_sudo()  # replaces the process on success
+
+    if remove:
+        if target.is_symlink() or target.exists():
+            try:
+                target.unlink()
+            except OSError as exc:
+                typer.secho(f"error: could not remove {target}: {exc}", fg="red", err=True)
+                raise typer.Exit(code=1) from exc
+            typer.secho(f"removed {target}", fg="green")
+        else:
+            typer.echo(f"nothing to remove at {target}")
+        return
+
+    launcher = _launcher_path()
+    if launcher is None:
+        typer.secho(
+            "error: could not locate the lanfence launcher to link.", fg="red", err=True
+        )
+        raise typer.Exit(code=2)
+
+    if not _trusted_to_run_as_root(launcher):
+        typer.secho(
+            f"error: refusing to link {target} -> {launcher}: the launcher or its "
+            "directory is writable by other users, so the link would let them run "
+            "code as root via `sudo lanfence`.",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if target.is_symlink() and target.resolve() == launcher.resolve():
+        typer.secho(f"{target} already points at {launcher}", fg="green")
+        return
+
+    try:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink() or target.exists():
+            target.unlink()
+        target.symlink_to(launcher)
+    except OSError as exc:
+        typer.secho(f"error: could not write {target}: {exc}", fg="red", err=True)
+        if not _is_root():
+            typer.secho(
+                f"  run it as root:  sudo {shlex.quote(str(launcher))} link",
+                fg="bright_black",
+            )
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(f"linked {target} -> {launcher}", fg="green")
+    typer.echo("`sudo lanfence scan` / `sudo lanfence monitor` now work without a full path.")
+
+
 @app.command()
 def check(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
@@ -384,11 +592,8 @@ def check(
     typer.echo(f"  allowlist:   {allowlist_file} ({'exists' if allowlist_file.is_file() else 'not created yet'})")
 
     if not _is_root():
-        typer.secho(
-            "\nnot running as root: active/passive ARP scanning will likely fail. "
-            "Re-run with sudo for a full check.",
-            fg="yellow",
-        )
+        typer.echo("")
+        _warn_not_root("check")
 
     raise typer.Exit(code=0 if db_ok else 1)
 
