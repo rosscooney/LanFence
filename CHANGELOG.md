@@ -15,6 +15,8 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-11
+
 ### Changed
 
 - `lanfence check` now creates an empty allowlist file (`allow: []`) if none
@@ -160,7 +162,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/rosscooney/lanfence/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/rosscooney/lanfence/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/rosscooney/lanfence/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/rosscooney/lanfence/compare/v0.3.0...v0.3.1
