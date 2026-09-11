@@ -67,6 +67,12 @@ alerts:
     to_numbers: []
     timeout_seconds: 10
 
+digest:
+  channels: []                  # which alerts.<channel> destinations also get a digest, e.g. [email]
+  send_when_empty: false        # `digest --send` skips an empty digest unless this is true (or --send-empty)
+  max_devices_per_section: 20   # cap per section before an explicit "and N more"
+  # SMS (twilio) and syslog are not available for digest delivery.
+
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
 vendor_file: null             # extra OUI table, merged with the packaged one

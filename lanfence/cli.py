@@ -26,8 +26,9 @@ import typer
 
 from lanfence import __version__, alerts, scanner
 from lanfence.allowlist import Allowlist
-from lanfence.config import Config
+from lanfence.config import DIGEST_CHANNELS, Config
 from lanfence.db import DeviceStore
+from lanfence.digest import build_digest, dispatch_digest
 from lanfence.engine import (
     apply_self_trust,
     build_findings,
@@ -49,6 +50,7 @@ from lanfence.report import (
     exit_code_for_findings,
     render_device_detail,
     render_device_inventory,
+    render_digest,
     render_events,
     render_findings,
     render_scan_result,
@@ -542,6 +544,114 @@ def report(
 
     if fail_on_findings:
         raise typer.Exit(code=exit_code_for_findings(findings))
+
+
+@app.command()
+def digest(
+    since: str = typer.Option("24h", "--since", help="Rolling window to summarize, e.g. 24h, 7d."),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    send: bool = typer.Option(
+        False, "--send", help="Also send through configured digest destinations (default: preview only)."
+    ),
+    channel: list[str] = typer.Option(
+        [], "--channel", help=f"Repeatable: limit --send to these channels ({', '.join(DIGEST_CHANNELS)})."
+    ),
+    send_empty: bool = typer.Option(
+        False, "--send-empty", help="With --send, send even if the digest is empty (overrides digest.send_when_empty)."
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Preview - or, with --send, deliver - a summary of recent network activity.
+
+    A rolling window ending now (default 24h): new devices, devices needing
+    review or under investigation, missing always-on devices, and a compact
+    activity summary. A pure database read - never scans the network, and
+    never changes trust, review, snooze, or lifecycle state. Independent of
+    the immediate-alert pipeline (`alerts.min_severity`, per-MAC cooldowns,
+    `scan --alert`) - sending a digest never affects those, and vice versa.
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    cfg = _load_config(config)
+    until = utcnow()
+    duration_seconds = _duration_seconds(since)
+    if duration_seconds is None:
+        typer.secho(
+            f"error: could not parse --since {since!r} (expected e.g. 24h, 30m, 7d)", fg="red", err=True
+        )
+        raise typer.Exit(code=2)
+    since_dt = until - timedelta(seconds=duration_seconds)
+
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interface)
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        digest_obj = build_digest(
+            store, allowlist, since=since_dt, until=until,
+            max_devices_per_section=cfg.digest.max_devices_per_section,
+        )
+
+    if output_format == "json":
+        typer.echo(digest_obj.model_dump_json(indent=2))
+    else:
+        render_digest(digest_obj)
+
+    if not send:
+        return
+
+    requested = list(dict.fromkeys(channel)) if channel else list(cfg.digest.channels)
+    if not requested:
+        typer.secho(
+            "error: --send needs at least one digest channel - configure digest.channels "
+            "or pass --channel explicitly",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+
+    unsupported = [c for c in requested if c not in DIGEST_CHANNELS]
+    if unsupported:
+        if any(c in ("sms", "twilio", "syslog") for c in unsupported):
+            typer.secho(
+                f"error: {', '.join(unsupported)} not supported for digest delivery "
+                f"(SMS and syslog are excluded from digest delivery) - use one of: "
+                f"{', '.join(DIGEST_CHANNELS)}",
+                fg="red", err=True,
+            )
+        else:
+            typer.secho(
+                f"error: unknown digest channel(s): {', '.join(unsupported)} - "
+                f"use one of: {', '.join(DIGEST_CHANNELS)}",
+                fg="red", err=True,
+            )
+        raise typer.Exit(code=2)
+
+    channel_enabled = {
+        "email": cfg.alerts.email.enabled, "webhook": cfg.alerts.webhook.enabled,
+        "slack": cfg.alerts.slack.enabled, "discord": cfg.alerts.discord.enabled,
+        "teams": cfg.alerts.teams.enabled, "ntfy": cfg.alerts.ntfy.enabled,
+    }
+    not_enabled = [c for c in requested if not channel_enabled[c]]
+    if not_enabled:
+        typer.secho(
+            f"error: channel(s) not enabled in config: {', '.join(not_enabled)} "
+            f"(enable under alerts.<channel>.enabled first)",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if digest_obj.is_empty and not (send_empty or cfg.digest.send_when_empty):
+        typer.echo("digest is empty - not sending (use --send-empty to override).")
+        return
+
+    results = dispatch_digest(digest_obj, cfg, channels=requested)
+    failed = [name for name, ok in results.items() if not ok]
+    for name, ok in results.items():
+        typer.secho(f"  {name}: {'sent' if ok else 'FAILED'}", fg="green" if ok else "red")
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @app.command()

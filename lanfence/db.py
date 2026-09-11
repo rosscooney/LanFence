@@ -204,6 +204,34 @@ class DeviceStore:
             for row in rows
         ]
 
+    def events_between(
+        self, start: datetime, end: datetime, *, event_type: str | None = None
+    ) -> list[DeviceEvent]:
+        """Every event with ``start <= timestamp <= end`` (inclusive both
+        ends), oldest first - an explicit, indexed range query (see
+        ``idx_events_timestamp``) rather than loading all history and
+        filtering in Python. Used by ``lanfence digest`` for its window.
+        """
+
+        if event_type is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM events WHERE timestamp >= ? AND timestamp <= ? AND event_type = ? "
+                "ORDER BY timestamp ASC",
+                (_iso(start), _iso(end), event_type),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC",
+                (_iso(start), _iso(end)),
+            ).fetchall()
+        return [
+            DeviceEvent(
+                mac=row["mac"], event_type=row["event_type"], timestamp=_parse_dt(row["timestamp"]),
+                ip=row["ip"], hostname=row["hostname"],
+            )
+            for row in rows
+        ]
+
     def events_for(self, mac: str, *, since: datetime | None = None) -> list[DeviceEvent]:
         """One device's lifecycle timeline, oldest first.
 

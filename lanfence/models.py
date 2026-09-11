@@ -217,3 +217,112 @@ class ScanResult(BaseModel):
 
     def to_json(self, *, indent: int = 2) -> str:
         return self.model_dump_json(indent=indent)
+
+
+class DigestDeviceEntry(BaseModel):
+    """One device's line in a digest section - a snapshot of *current*
+    trust/review/presence state, regardless of which section (new,
+    needs-review, investigating, missing-always-on) it appears in or why."""
+
+    mac: str
+    name: str | None = None
+    ip: str | None = None
+    hostname: str | None = None
+    vendor: str | None = None
+    trusted: bool = False
+    presence_policy: PresencePolicyName = "unspecified"
+    review_state: ReviewStateName = "pending"
+    review_notes: str | None = None
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+    @field_validator("name", "ip", "hostname", "vendor", "review_notes")
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=256) if value is not None else None
+
+
+class DigestSection(BaseModel):
+    """A bounded list of devices for one part of the digest - "and N more"
+    instead of an unbounded dump. ``total_count`` is the true count before
+    truncation, so a caller can tell "20 shown, 20 total" from "20 shown, 45
+    total"."""
+
+    items: list[DigestDeviceEntry] = Field(default_factory=list)
+    total_count: int = 0
+    omitted_count: int = 0
+
+
+class DigestActivity(BaseModel):
+    """A compact, factual summary of lifecycle activity within the digest
+    window - counts of *distinct devices*, not raw event counts, so a
+    device that flapped several times within the window is counted once per
+    activity type rather than inflating the total."""
+
+    reappeared_device_count: int = 0
+    disconnected_device_count: int = 0
+    new_device_count: int = 0
+
+
+class Digest(BaseModel):
+    """A structured, side-effect-free summary of recent network activity -
+    see :func:`lanfence.digest.build_digest`. Distinguishes activity that
+    happened *within* ``window_start``..``window_end`` (``activity``,
+    ``new_devices``) from *current* inventory/review state as of
+    ``generated_at`` (``needs_review``, ``investigating``,
+    ``missing_always_on``, ``counts.known_devices``/``online_devices``) -
+    the latter intentionally includes devices first seen before the window.
+
+    ``monitoring_health`` is deliberately never inferred from the absence of
+    evidence - this codebase has no durable, persisted record of monitor
+    uptime or alert-delivery success/failure to draw on, so it always reads
+    ``"Monitoring health unavailable"`` rather than guessing "healthy". A
+    future version could persist real health evidence and report it here
+    instead.
+    """
+
+    schema_version: int = 1
+    generated_at: datetime
+    window_start: datetime
+    window_end: datetime
+
+    known_devices: int = 0
+    online_devices: int = 0
+
+    new_devices: DigestSection = Field(default_factory=DigestSection)
+    needs_review: DigestSection = Field(default_factory=DigestSection)
+    investigating: DigestSection = Field(default_factory=DigestSection)
+    missing_always_on: DigestSection = Field(default_factory=DigestSection)
+    activity: DigestActivity = Field(default_factory=DigestActivity)
+
+    monitoring_health: str = "Monitoring health unavailable"
+    #: Capabilities this digest could not draw on because the underlying
+    #: data isn't implemented/persisted in this version - e.g. historical
+    #: security-finding storage, or monitor health tracking.
+    omitted_capabilities: list[str] = Field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        """No window activity, no outstanding review/investigation items,
+        and no missing always-on devices. ``known_devices``/``online_devices``
+        are informational only and never affect this - an unchanged
+        inventory alone does not make a digest nonempty, and neither does
+        the other direction: a big inventory with nothing new or
+        outstanding is still an empty digest. ``monitoring_health`` being
+        unavailable is an absence of evidence, not a known problem, so it
+        never makes a digest nonempty either.
+        """
+
+        return (
+            self.new_devices.total_count == 0
+            and self.needs_review.total_count == 0
+            and self.investigating.total_count == 0
+            and self.missing_always_on.total_count == 0
+            and self.activity.reappeared_device_count == 0
+            and self.activity.disconnected_device_count == 0
+        )

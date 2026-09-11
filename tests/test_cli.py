@@ -157,6 +157,258 @@ def test_report_bad_since_value(config_path: Path):
     assert result.exit_code == 2
 
 
+# --- digest ------------------------------------------------------------
+
+
+def test_digest_empty_database_preview(config_path: Path):
+    result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "LAN Fence digest" in result.output
+
+
+def test_digest_json_output_has_schema_version_and_window(config_path: Path):
+    import json
+
+    result = runner.invoke(app, ["digest", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["schema_version"] == 1
+    assert "window_start" in payload and "window_end" in payload and "generated_at" in payload
+
+
+def test_digest_bad_since_value(config_path: Path):
+    result = runner.invoke(app, ["digest", "--since", "nonsense", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_digest_rejects_invalid_format(config_path: Path):
+    result = runner.invoke(app, ["digest", "--format", "xml", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_digest_preview_never_calls_a_transport(config_path: Path):
+    """Default (no --send) must never touch the network - not even to
+    validate destinations."""
+
+    with patch("lanfence.digest.urllib.request.urlopen") as mock_open, \
+         patch("lanfence.digest.smtplib.SMTP") as mock_smtp:
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    mock_open.assert_not_called()
+    mock_smtp.assert_not_called()
+
+
+def test_digest_send_without_any_channel_configured_fails_helpfully(config_path: Path):
+    result = runner.invoke(app, ["digest", "--send", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "channel" in result.output.lower()
+
+
+def test_digest_send_rejects_unknown_channel(config_path: Path):
+    result = runner.invoke(app, ["digest", "--send", "--channel", "carrier-pigeon", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_digest_send_rejects_sms_and_syslog_explicitly(config_path: Path):
+    for bad in ("sms", "syslog"):
+        result = runner.invoke(app, ["digest", "--send", "--channel", bad, "--config", str(config_path)])
+        assert result.exit_code == 2
+        assert "not supported" in result.output.lower() or "sms" in result.output.lower() or "syslog" in result.output.lower()
+
+
+def test_digest_send_rejects_channel_not_enabled_in_config(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {"webhook": {"enabled": False, "url": "https://example.com/hook"}},
+            "digest": {"channels": ["webhook"]},
+        }),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["digest", "--send", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "not enabled" in result.output.lower()
+
+
+def test_digest_send_empty_digest_suppressed_by_default(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {"webhook": {"enabled": True, "url": "https://example.com/hook"}},
+            "digest": {"channels": ["webhook"]},
+        }),
+        encoding="utf-8",
+    )
+    with patch("lanfence.digest.urllib.request.urlopen") as mock_open:
+        result = runner.invoke(app, ["digest", "--send", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "not sending" in result.output.lower()
+    mock_open.assert_not_called()
+
+
+def test_digest_send_empty_flag_overrides_suppression(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {"webhook": {"enabled": True, "url": "https://example.com/hook"}},
+            "digest": {"channels": ["webhook"]},
+        }),
+        encoding="utf-8",
+    )
+
+    class _FakeResp:
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    with patch("lanfence.digest.urllib.request.urlopen", return_value=_FakeResp()) as mock_open:
+        result = runner.invoke(app, ["digest", "--send", "--send-empty", "--config", str(config_path)])
+    assert result.exit_code == 0
+    mock_open.assert_called_once()
+
+
+def test_digest_send_success_reports_per_channel_and_exits_zero(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {"webhook": {"enabled": True, "url": "https://example.com/hook"}},
+            "digest": {"channels": ["webhook"]},
+        }),
+        encoding="utf-8",
+    )
+    store = DeviceStore(str(tmp_path / "lanfence.db"))
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+    store.close()
+
+    class _FakeResp:
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    with patch("lanfence.digest.urllib.request.urlopen", return_value=_FakeResp()) as mock_open:
+        result = runner.invoke(app, ["digest", "--send", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "webhook: sent" in result.output.lower()
+    mock_open.assert_called_once()
+
+
+def test_digest_send_failure_exits_nonzero(tmp_path: Path):
+    import urllib.error
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {"webhook": {"enabled": True, "url": "https://example.com/hook"}},
+            "digest": {"channels": ["webhook"]},
+        }),
+        encoding="utf-8",
+    )
+    store = DeviceStore(str(tmp_path / "lanfence.db"))
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+    store.close()
+
+    with patch("lanfence.digest.urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        result = runner.invoke(app, ["digest", "--send", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "failed" in result.output.lower()
+
+
+def test_digest_channel_flag_limits_to_subset_of_configured_channels(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {
+                "webhook": {"enabled": True, "url": "https://example.com/hook"},
+                "slack": {"enabled": True, "webhook_url": "https://hooks.slack.example/x"},
+            },
+            "digest": {"channels": ["webhook", "slack"]},
+        }),
+        encoding="utf-8",
+    )
+    store = DeviceStore(str(tmp_path / "lanfence.db"))
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+    store.close()
+
+    class _FakeResp:
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    with patch("lanfence.digest.urllib.request.urlopen", return_value=_FakeResp()) as mock_open:
+        result = runner.invoke(
+            app, ["digest", "--send", "--channel", "slack", "--config", str(config_path)]
+        )
+    assert result.exit_code == 0
+    assert "slack: sent" in result.output.lower()
+    assert "webhook" not in result.output.lower()
+    mock_open.assert_called_once()
+
+
+def test_digest_does_not_change_alert_cooldown_state(tmp_path: Path):
+    """Digest delivery must stay independent of the immediate-alert
+    pipeline's per-MAC cooldown bookkeeping."""
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {"webhook": {"enabled": True, "url": "https://example.com/hook"}},
+            "digest": {"channels": ["webhook"]},
+        }),
+        encoding="utf-8",
+    )
+    db_path = str(tmp_path / "lanfence.db")
+    store = DeviceStore(db_path)
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+    store.close()
+
+    class _FakeResp:
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    with patch("lanfence.digest.urllib.request.urlopen", return_value=_FakeResp()):
+        runner.invoke(app, ["digest", "--send", "--config", str(config_path)])
+
+    store = DeviceStore(db_path)
+    still_due = store.due_for_alert("aa:bb:cc:dd:ee:ff", "medium", now=_now(), cooldown_seconds=900)
+    store.close()
+    assert still_due is True  # digest sending never touched alert_log for this mac
+
+
 def test_scan_without_permission_reports_error_gracefully(config_path: Path):
     # No root/CAP_NET_RAW in the test environment - scan should degrade to an
     # error message and a clean (empty) result rather than crashing.

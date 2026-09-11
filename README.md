@@ -163,6 +163,8 @@ lanfence review <MAC> --snooze 24h
 lanfence review <MAC> --investigate --notes "..."
 lanfence review <MAC> --clear
 lanfence report --since 24h     # summarize events/findings from the database
+lanfence digest                 # preview a 24h summary; add --send to deliver it
+lanfence digest --since 7d --send --channel email
 lanfence check                  # verify permissions, scapy, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
 lanfence upgrade --check        # only report whether an update is available
@@ -425,6 +427,88 @@ normal for it to come and go?") - answering is optional and defaults to
 whatever the device's policy already was (`unspecified` if never set);
 exiting that follow-up prompt never undoes the trust decision you just made.
 
+## Digest
+
+`lanfence report` and `scan --alert` are about *every* event as it happens;
+`lanfence digest` is the opposite - one concise summary of a rolling window
+(default 24h) so you can check in without a notification for every routine
+connect/reappear. It never scans the network and never changes trust,
+review, snooze, or lifecycle state - a pure read of what's already in the
+database, same as `lanfence devices`.
+
+```text
+lanfence digest                        # preview only - sends nothing
+lanfence digest --since 7d             # a longer window
+lanfence digest --format json          # machine-readable
+lanfence digest --send                 # also deliver, via digest.channels
+lanfence digest --send --channel email
+lanfence digest --send --channel email --channel ntfy --send-empty
+```
+
+A digest reports, clearly separated:
+
+- **Activity in the window**: new devices (name, MAC, IP, hostname, vendor,
+  *current* trust status, and first-seen time), and a compact count of
+  devices that reappeared or disconnected (each device counted once per
+  activity type, even if it flapped repeatedly).
+- **Current inventory/review state as of generation time** (not scoped to
+  the window - a device flagged for review last month still shows up until
+  it's resolved): devices needing review, current investigations (with
+  notes and last-seen time), and - if presence policies are in use -
+  currently-missing `always-on` devices.
+- **Monitoring health**: this version has no durable record of monitor
+  uptime or alert-delivery success/failure to draw on, so this always reads
+  *"Monitoring health unavailable"* rather than guessing "healthy" - a
+  known, documented gap, not a bug.
+
+A device can legitimately appear in more than one section (e.g. new *and*
+still needing review) since each section states a different fact; within a
+single section a device is never duplicated. Every section is capped at
+`digest.max_devices_per_section` (default 20), with an explicit "and N more"
+rather than an unbounded dump. Historical accuracy matters: "new devices"
+and the activity summary come from the persisted lifecycle event log, not
+from re-deriving security severity out of today's allowlist/signatures - a
+device trusted *after* it was recorded as new-in-window still correctly
+shows as new-in-window, just with its now-current trust status alongside
+it. Security findings themselves aren't persisted anywhere in this version,
+so a digest never claims to show historical finding severity - only
+current trust/review state, exactly what's actually stored.
+
+### Sending a digest
+
+```yaml
+digest:
+  channels: [email]        # which existing alert destinations also get a digest
+  send_when_empty: false
+  max_devices_per_section: 20
+```
+
+Delivery reuses your existing `alerts.<channel>` destinations (email,
+webhook, Slack, Discord, Teams, ntfy) - enabling a channel under `alerts:`
+does **not** by itself add it to digests; list it under `digest.channels`
+(or pass `--channel` explicitly, which limits `--send` to just those,
+still requiring each to already be enabled and configured). SMS (Twilio)
+and syslog are not available for digest delivery and are rejected with a
+clear error if requested. `--send` with no `digest.channels` configured and
+no `--channel` given fails with a helpful error rather than silently doing
+nothing; a preview with no destinations configured still works fine.
+
+A digest is **empty** when there's no window activity, no outstanding
+review/investigation items, no missing always-on devices, and no known
+monitoring/delivery problems - an unchanged device count alone does not
+make it nonempty, and it never invents a problem just because monitoring
+health is unavailable. `--send` on an empty digest is suppressed by default
+(`digest.send_when_empty: false`); pass `--send-empty` to override for one
+run, or set `send_when_empty: true` to always send.
+
+Every requested channel is attempted independently - one failing (a bad
+webhook URL, an SMTP timeout) never stops the others, and `lanfence digest
+--send` exits non-zero if *any* requested channel failed, with a per-channel
+`sent`/`FAILED` line. Digest delivery is entirely independent of the
+immediate-alert pipeline: it ignores `alerts.min_severity` and never reads
+or writes the per-MAC alert cooldown, so sending a digest can never suppress
+(or be suppressed by) an immediate alert for the same device.
+
 ## Running unattended
 
 LAN Fence does not ship its own scheduler; use `systemd` (recommended on a
@@ -456,6 +540,58 @@ sudo systemctl enable --now lanfence
 ```cron
 0 7 * * * /usr/local/bin/lanfence report --since 24h --format json > /var/log/lanfence/daily.json
 ```
+
+**Daily digest** (see [Digest](#digest) below) - `lanfence monitor` already
+runs continuously and writes to the same database `digest` reads from; run
+`digest` as a *separate*, periodic job as whichever user can read that
+database and `config.yaml` (typically the same user/root that runs
+`monitor`). A cron entry (`sudo crontab -e`):
+
+```cron
+0 7 * * * /usr/local/bin/lanfence digest --send --config /etc/lanfence/config.yaml
+```
+
+Or a systemd oneshot service + timer -
+`/etc/systemd/system/lanfence-digest.service`:
+
+```ini
+[Unit]
+Description=LAN Fence daily digest
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lanfence digest --send --config /etc/lanfence/config.yaml
+User=root
+```
+
+`/etc/systemd/system/lanfence-digest.timer`:
+
+```ini
+[Unit]
+Description=Run the LAN Fence daily digest every day at 07:00
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl enable --now lanfence-digest.timer
+```
+
+Two things to keep in mind when scheduling either way: `OnCalendar`/cron
+times are in the **scheduler's local timezone**, while the digest's own
+rolling window (`--since`, default `24h`) is always computed in **UTC**
+ending at the moment `digest` runs - "daily at 07:00 local time" does not
+mean "midnight-to-midnight UTC". And this first version does **not**
+promise exactly-once delivery or automatic catch-up after downtime: if the
+host is off when the timer would have fired, that run is simply skipped
+(no backlog is queued), and running `digest --send` twice sends twice - it
+is not idempotent.
 
 ## Configuration
 

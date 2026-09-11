@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from lanfence.models import Device, DeviceEvent, Finding, ScanResult
+from lanfence.models import Device, DeviceEvent, Digest, DigestSection, Finding, ScanResult
 
 try:  # rich ships with typer, but keep rendering optional
     from rich.console import Console
@@ -383,4 +383,93 @@ def render_device_detail(
         console.print(table)
     else:
         console.print("[dim](no events in this window)[/dim]")
+    return text
+
+
+def _section_lines(title: str, section: DigestSection) -> list[str]:
+    lines = [f"{title} ({section.total_count}):"]
+    if not section.items:
+        lines.append("  (none)")
+    for entry in section.items:
+        label = entry.name or entry.mac
+        lines.append(
+            f"  - {label} ({entry.mac})  {entry.ip or '-':<15}  {entry.hostname or '[unknown]'}"
+        )
+    if section.omitted_count:
+        lines.append(f"  ... and {section.omitted_count} more")
+    return lines
+
+
+def render_digest(digest: Digest, *, plain: bool = False) -> str:
+    """Render `lanfence digest` - a preview of :func:`lanfence.digest.build_digest`'s
+    output. Never scans or mutates anything; a pure display of one already-built
+    :class:`~lanfence.models.Digest`."""
+
+    lines = [
+        f"LAN Fence digest - {digest.window_start.isoformat(timespec='seconds')} "
+        f"to {digest.window_end.isoformat(timespec='seconds')}",
+        f"Generated: {digest.generated_at.isoformat(timespec='seconds')}",
+        "",
+        f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}",
+        f"New in window: {digest.activity.new_device_count}   "
+        f"Reappeared: {digest.activity.reappeared_device_count}   "
+        f"Disconnected: {digest.activity.disconnected_device_count}",
+        f"Needs review: {digest.needs_review.total_count}   "
+        f"Investigating: {digest.investigating.total_count}   "
+        f"Missing always-on: {digest.missing_always_on.total_count}",
+        digest.monitoring_health,
+        "",
+    ]
+    lines += _section_lines("New devices", digest.new_devices)
+    lines.append("")
+    lines += _section_lines("Needs review", digest.needs_review)
+    lines.append("")
+    lines += _section_lines("Investigating", digest.investigating)
+    lines.append("")
+    lines += _section_lines("Missing always-on devices", digest.missing_always_on)
+
+    text = "\n".join(lines)
+    if plain or not _RICH:
+        print(text)
+        return text
+
+    console = Console()
+    console.print(f"[bold]LAN Fence digest[/bold] - {digest.window_start.isoformat(timespec='seconds')} "
+                  f"to {digest.window_end.isoformat(timespec='seconds')}")
+    console.print(f"[dim]Generated: {digest.generated_at.isoformat(timespec='seconds')}[/dim]")
+    console.print(
+        f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}   "
+        f"[dim]{_rich_escape(digest.monitoring_health)}[/dim]"
+    )
+    console.print(
+        f"New: {digest.activity.new_device_count}   Reappeared: {digest.activity.reappeared_device_count}   "
+        f"Disconnected: {digest.activity.disconnected_device_count}   "
+        f"Needs review: {digest.needs_review.total_count}   "
+        f"Investigating: {digest.investigating.total_count}   "
+        f"Missing always-on: {digest.missing_always_on.total_count}"
+    )
+
+    for title, section in (
+        ("New devices", digest.new_devices),
+        ("Needs review", digest.needs_review),
+        ("Investigating", digest.investigating),
+        ("Missing always-on devices", digest.missing_always_on),
+    ):
+        if not section.items:
+            console.print(f"\n[dim]{title}: none[/dim]")
+            continue
+        table = Table(title=f"{title} ({section.total_count})")
+        table.add_column("MAC")
+        table.add_column("Name")
+        table.add_column("IP")
+        table.add_column("Hostname", overflow="fold")
+        for entry in section.items:
+            table.add_row(
+                entry.mac, _rich_escape(entry.name or "-"), entry.ip or "-",
+                _rich_escape(entry.hostname or "[unknown]"),
+            )
+        console.print(table)
+        if section.omitted_count:
+            console.print(f"[dim]... and {section.omitted_count} more[/dim]")
+
     return text

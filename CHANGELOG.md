@@ -17,6 +17,24 @@ Each release is also published to
 
 ### Added
 
+- **`lanfence digest`.** A concise, side-effect-free summary of recent
+  network activity - new devices, devices needing review, current
+  investigations, and (with presence policies) missing always-on devices -
+  as an alternative to a notification for every routine event. Defaults to
+  a rolling 24h window, a preview that sends nothing; `--send` delivers
+  through `digest.channels` (reusing the existing email/webhook/Slack/
+  Discord/Teams/ntfy destinations - SMS and syslog are not available for
+  digests), `--channel` limits one run to a subset, and an empty digest is
+  suppressed unless `digest.send_when_empty`/`--send-empty`. Each requested
+  channel is attempted independently and reported per-channel; delivery is
+  entirely independent of the immediate-alert pipeline (`alerts.min_severity`,
+  per-MAC cooldowns are untouched). Historical accuracy comes from the
+  persisted lifecycle event log, not from re-deriving security severity out
+  of current allowlist/signature state; this version has no durable
+  monitor-health record, so it always reports "Monitoring health
+  unavailable" rather than guessing. See README's "Digest" section for cron
+  and systemd-timer scheduling examples.
+
 - **Per-device presence policies.** `lanfence device <MAC> --presence
   unspecified|intermittent|always-on` lets you tell LAN Fence what "normal"
   looks like for a device - separate from trust. `intermittent` (routine

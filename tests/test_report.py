@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from lanfence.models import Device, DeviceEvent, Finding, ScanResult
+from lanfence.models import Device, DeviceEvent, Digest, DigestActivity, DigestDeviceEntry, DigestSection, Finding, ScanResult
 from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
@@ -10,6 +10,7 @@ from lanfence.report import (
     presence_label,
     render_device_detail,
     render_device_inventory,
+    render_digest,
     render_scan_result,
     review_status_label,
 )
@@ -193,3 +194,48 @@ def test_render_device_detail_shows_presence_line_plain():
     )
     assert "Presence: always-on" in text
     assert "180s" in text
+
+
+# --- render_digest -------------------------------------------------------
+
+
+def _digest(**overrides):
+    now = _now()
+    base = dict(
+        generated_at=now, window_start=now - timedelta(hours=24), window_end=now,
+    )
+    base.update(overrides)
+    return Digest(**base)
+
+
+def test_render_digest_plain_shows_window_and_counts(capsys):
+    entry = DigestDeviceEntry(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname="phone.local")
+    digest = _digest(
+        known_devices=3, online_devices=2,
+        new_devices=DigestSection(items=[entry], total_count=1),
+        activity=DigestActivity(new_device_count=1),
+    )
+    text = render_digest(digest, plain=True)
+    assert "LAN Fence digest" in text
+    assert "Known devices: 3" in text
+    assert "aa:bb:cc:dd:ee:ff" in text
+    assert "phone.local" in text
+
+
+def test_render_digest_shows_monitoring_health_unavailable(capsys):
+    digest = _digest()
+    text = render_digest(digest, plain=True)
+    assert "Monitoring health unavailable" in text
+
+
+def test_render_digest_shows_omitted_count(capsys):
+    entry = DigestDeviceEntry(mac="aa:bb:cc:dd:ee:ff")
+    digest = _digest(needs_review=DigestSection(items=[entry], total_count=5, omitted_count=4))
+    text = render_digest(digest, plain=True)
+    assert "and 4 more" in text
+
+
+def test_render_digest_empty_sections_say_none(capsys):
+    digest = _digest()
+    text = render_digest(digest, plain=True)
+    assert "(none)" in text

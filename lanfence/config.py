@@ -205,11 +205,55 @@ class AlertConfig(BaseModel):
         return value
 
 
+#: Digest delivery reuses these alert destinations. SMS (Twilio) and syslog
+#: are deliberately excluded from the first version of digest delivery - see
+#: ``lanfence/digest.py``.
+DIGEST_CHANNELS: tuple[str, ...] = ("email", "webhook", "slack", "discord", "teams", "ntfy")
+
+
+class DigestConfig(BaseModel):
+    """`lanfence digest` settings - a periodic summary, independent of the
+    immediate-alert pipeline above (its own destinations, no interaction
+    with ``alerts.min_severity`` or per-MAC cooldowns)."""
+
+    model_config = {"extra": "forbid"}
+
+    #: Which of the existing alert destinations also receive a digest when
+    #: `--send` is used with no `--channel` override. Enabling a channel
+    #: under `alerts:` does NOT by itself add it here - a digest is opt-in
+    #: per destination.
+    channels: list[str] = Field(default_factory=list)
+    #: Send even when the digest has no window activity, no outstanding
+    #: review/investigation items, and no missing always-on devices.
+    send_when_empty: bool = False
+    #: Cap on how many devices are listed per digest section before
+    #: truncating with an explicit "and N more".
+    max_devices_per_section: int = 20
+
+    @field_validator("channels")
+    @classmethod
+    def _valid_channels(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if name not in DIGEST_CHANNELS:
+                raise ValueError(
+                    f"unsupported digest channel {name!r}; must be one of {', '.join(DIGEST_CHANNELS)}"
+                )
+        return value
+
+    @field_validator("max_devices_per_section")
+    @classmethod
+    def _positive_section_limit(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("max_devices_per_section must be an integer >= 1")
+        return value
+
+
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
     scan: ScanConfig = Field(default_factory=ScanConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
+    digest: DigestConfig = Field(default_factory=DigestConfig)
     #: Where the persistent device database lives.
     db_path: Path = Path("~/.local/share/lanfence/lanfence.db")
     #: YAML allowlist of trusted devices; findings about them are downgraded to info.
