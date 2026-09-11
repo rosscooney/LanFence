@@ -59,3 +59,112 @@ def test_local_subnet_returns_none_when_scanner_unavailable(monkeypatch):
 def test_resolve_hostname_returns_none_on_failure():
     # 192.0.2.0/24 is TEST-NET-1 (RFC 5737) - guaranteed not to resolve.
     assert scanner.resolve_hostname("192.0.2.123", timeout=0.5) is None
+
+
+# --- IPv6 neighbor discovery ------------------------------------------------
+
+
+def test_has_ipv6_true_when_interface_has_any_v6_address(monkeypatch):
+    import scapy.all as scapy_module
+
+    monkeypatch.setattr(scapy_module, "in6_getifaddr", lambda: [("fe80::1", 32, "eth0")])
+    assert scanner.has_ipv6("eth0") is True
+
+
+def test_has_ipv6_false_when_interface_absent(monkeypatch):
+    import scapy.all as scapy_module
+
+    monkeypatch.setattr(scapy_module, "in6_getifaddr", lambda: [("fe80::1", 32, "wlan0")])
+    assert scanner.has_ipv6("eth0") is False
+
+
+def test_has_ipv6_false_when_scanner_unavailable(monkeypatch):
+    def _boom():
+        raise scanner.ScannerUnavailable("no scapy")
+
+    monkeypatch.setattr(scanner, "_require_scapy", _boom)
+    assert scanner.has_ipv6("eth0") is False
+
+
+def test_active_scan_v6_permission_denied(monkeypatch):
+    import scapy.all as scapy_module
+
+    def fake_srp(*_args, **_kwargs):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    with pytest.raises(scanner.ScannerUnavailable, match="permission denied"):
+        scanner.active_scan_v6(interface="eth0", timeout=1)
+
+
+def test_active_scan_v6_generic_failure(monkeypatch):
+    import scapy.all as scapy_module
+
+    def fake_srp(*_args, **_kwargs):
+        raise OSError("network down")
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    with pytest.raises(scanner.ScannerUnavailable, match="could not send IPv6"):
+        scanner.active_scan_v6(interface="eth0", timeout=1)
+
+
+def test_active_scan_v6_parses_replies(monkeypatch):
+    import scapy.all as scapy_module
+    from scapy.layers.inet6 import ICMPv6EchoReply, IPv6
+
+    reply = scapy_module.Ether(src="aa:bb:cc:dd:ee:ff") / IPv6(src="fe80::1") / ICMPv6EchoReply()
+
+    def fake_srp(pkt, **kwargs):
+        assert kwargs.get("multi") is True
+        return [(pkt, reply)], []
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    sightings = scanner.active_scan_v6(interface="eth0", timeout=1)
+    assert len(sightings) == 1
+    assert sightings[0].mac == "aa:bb:cc:dd:ee:ff"
+    assert sightings[0].ip == "fe80::1"
+
+
+def test_passive_sniff_uses_combined_arp_and_icmp6_filter(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    scanner.passive_sniff(on_sighting=lambda s: None, interface="eth0")
+    assert captured["filter"] == "arp or icmp6"
+
+
+def test_passive_sniff_dispatches_arp_and_ndp_sightings(monkeypatch):
+    import scapy.all as scapy_module
+    from scapy.layers.inet6 import ICMPv6ND_NA, ICMPv6ND_NS, IPv6
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    sightings = []
+    scanner.passive_sniff(on_sighting=sightings.append, interface="eth0")
+    handler = captured["prn"]
+
+    arp_reply = scapy_module.Ether(src="aa:bb:cc:dd:ee:ff") / scapy_module.ARP(
+        op=2, hwsrc="aa:bb:cc:dd:ee:ff", psrc="10.0.0.5"
+    )
+    handler(arp_reply)
+
+    na_packet = scapy_module.Ether(src="11:22:33:44:55:66") / IPv6(src="fe80::1") / ICMPv6ND_NA()
+    handler(na_packet)
+
+    # A DAD probe (unspecified source) carries no live address yet - ignored.
+    dad_probe = scapy_module.Ether(src="77:88:99:aa:bb:cc") / IPv6(src="::") / ICMPv6ND_NS()
+    handler(dad_probe)
+
+    assert [(s.mac, s.ip) for s in sightings] == [
+        ("aa:bb:cc:dd:ee:ff", "10.0.0.5"),
+        ("11:22:33:44:55:66", "fe80::1"),
+    ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -103,6 +104,29 @@ def test_scan_without_permission_reports_error_gracefully(config_path: Path):
     result = runner.invoke(app, ["scan", "--subnet", "192.0.2.0/29", "--config", str(config_path)])
     assert result.exit_code == 0
     assert "No devices responded" in result.stdout or "devices" in result.stdout.lower()
+
+
+def test_check_reports_ipv6_line(config_path: Path):
+    result = runner.invoke(app, ["check", "--config", str(config_path)])
+    assert "ipv6:" in result.output
+
+
+def test_scan_no_ipv6_flag_disables_ipv6_scanning(config_path: Path):
+    with patch("lanfence.cli.run_active_sweep") as sweep_mock:
+        sweep_mock.return_value.findings = []
+        sweep_mock.return_value.errors = []
+        sweep_mock.return_value.to_json.return_value = "{}"
+        runner.invoke(app, ["scan", "--no-ipv6", "--config", str(config_path)])
+    passed_cfg = sweep_mock.call_args.args[0]
+    assert passed_cfg.scan.ipv6 is False
+
+
+def test_monitor_no_ipv6_flag_is_reflected_in_banner(config_path: Path, monkeypatch):
+    # monitor() loops forever; stop it after the startup banner is printed by
+    # making the first thing it does (the scan-interval sleep loop) raise.
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--no-ipv6", "--no-passive", "--config", str(config_path)])
+    assert "ipv6: False" in result.output
 
 
 def test_config_not_found(tmp_path: Path):

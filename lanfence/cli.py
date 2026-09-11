@@ -241,6 +241,9 @@ def _parse_since(value: str) -> datetime:
 def scan(
     interface: Optional[str] = typer.Option(None, "--interface", "-i", help="Network interface to scan."),
     subnet: Optional[str] = typer.Option(None, "--subnet", "-s", help="CIDR subnet to scan (default: auto-detect)."),
+    ipv6: Optional[bool] = typer.Option(
+        None, "--ipv6/--no-ipv6", help="Also discover devices via IPv6 neighbor discovery."
+    ),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
     alert: bool = typer.Option(False, "--alert", help="Dispatch alerts for findings via configured channels."),
@@ -249,10 +252,12 @@ def scan(
     ),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True),
 ) -> None:
-    """One-time active ARP scan; shows connected devices and any findings."""
+    """One-time active scan (ARP + IPv6 neighbor discovery); shows connected devices and any findings."""
 
     setup_logging(verbose)
     cfg = _load_config(config)
+    if ipv6 is not None:
+        cfg.scan.ipv6 = ipv6
 
     if not _is_root():
         _warn_not_root("scan")
@@ -296,7 +301,10 @@ def monitor(
     subnet: Optional[str] = typer.Option(None, "--subnet", "-s", help="CIDR subnet to actively sweep."),
     interval: Optional[float] = typer.Option(None, "--interval", help="Active-sweep interval override (seconds)."),
     passive: Optional[bool] = typer.Option(
-        None, "--passive/--no-passive", help="Also passively sniff ARP traffic between sweeps."
+        None, "--passive/--no-passive", help="Also passively sniff ARP/ND traffic between sweeps."
+    ),
+    ipv6: Optional[bool] = typer.Option(
+        None, "--ipv6/--no-ipv6", help="Also discover devices via IPv6 neighbor discovery."
     ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
     alert: bool = typer.Option(True, "--alert/--no-alert", help="Dispatch alerts for findings as they occur."),
@@ -310,6 +318,8 @@ def monitor(
         cfg.scan.scan_interval_seconds = interval
     if passive is not None:
         cfg.scan.passive = passive
+    if ipv6 is not None:
+        cfg.scan.ipv6 = ipv6
 
     if not _is_root():
         _warn_not_root("monitor")
@@ -324,7 +334,7 @@ def monitor(
     typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
     typer.echo(
         f"interface: {iface or '(auto)'}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
-        f"passive: {cfg.scan.passive}"
+        f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}"
     )
 
     stop_event = threading.Event()
@@ -623,6 +633,8 @@ def check(
     typer.echo(f"  interface:   {iface or '(could not auto-detect)'}")
     net = cfg.scan.subnet or scanner.local_subnet(iface)
     typer.echo(f"  subnet:      {net or '(could not auto-detect)'}")
+    ipv6_ok = scanner.has_ipv6(iface)
+    typer.echo(f"  ipv6:        {'available' if ipv6_ok else 'not available on this interface'}")
 
     typer.secho("\nStorage", fg="cyan", bold=True)
     db_path = cfg.resolved_db_path()

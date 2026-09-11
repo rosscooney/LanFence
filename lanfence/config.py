@@ -37,6 +37,10 @@ class ScanConfig(BaseModel):
     #: that would be missed between sweeps, at the cost of needing a promiscuous
     #: capture).
     passive: bool = True
+    #: Also discover devices via IPv6 neighbor discovery (a multicast ping to
+    #: the link-local all-nodes address), catching an IPv6-only device an
+    #: ARP-only sweep would miss entirely.
+    ipv6: bool = True
     #: Try a reverse-DNS lookup for each device's hostname.
     resolve_hostnames: bool = True
     dns_timeout_seconds: float = 1.0

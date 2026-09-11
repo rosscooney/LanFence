@@ -1,13 +1,22 @@
 # Copyright (c) 2026-present Stable State Consulting Ltd
 # SPDX-License-Identifier: MIT
 
-"""ARP-based device discovery: active sweeps and passive sniffing.
+"""ARP/NDP-based device discovery: active sweeps and passive sniffing.
 
 Observation-only: LAN Fence sends nothing to a target beyond a standard ARP
-"who-has" request (the same thing any device on the LAN does routinely to
-resolve an address) and never sends anything at all in passive mode - it just
-listens. It never sends probe packets to individual hosts, opens connections,
-or touches anything beyond reading ARP traffic.
+"who-has" request or IPv6 multicast ping (the same things any device on the
+LAN does routinely to resolve an address) and never sends anything at all in
+passive mode - it just listens. It never sends probe packets to individual
+hosts, opens connections, or touches anything beyond reading ARP/ND traffic.
+
+IPv6 has no equivalent of "sweep a /24" - a /64 can't be brute-forced - so
+``active_scan_v6`` uses the standard alternative instead: a single ICMPv6 Echo
+Request to the link-local all-nodes multicast address (``ff02::1``), which
+every IPv6-enabled host on the link answers. Discovery is deliberately
+link-local only: a link-local address is stable per-interface (unlike the
+temporary/privacy addresses used at global scope, which rotate and would
+otherwise look like a stream of "new devices"), and it needs no on-link
+prefix knowledge the way an IPv4 subnet does.
 
 Needs raw-socket access (``CAP_NET_RAW`` / root) and ``scapy``, both only
 available on Linux in this project's supported deployment (Raspberry Pi /
@@ -162,6 +171,83 @@ def active_scan(
     return sightings
 
 
+#: Ethernet multicast MAC for the IPv6 all-nodes link-local multicast address
+#: ff02::1 (RFC 2464: 33:33 followed by the low 32 bits of the IPv6 address).
+_ALL_NODES_MULTICAST_MAC = "33:33:00:00:00:01"
+
+
+def active_scan_v6(
+    *,
+    interface: str | None = None,
+    timeout: float = 3.0,
+) -> list[ArpSighting]:
+    """Ping the IPv6 all-nodes multicast address and collect the replies.
+
+    The IPv6 equivalent of an ARP sweep - a /64 can't be brute-forced the way
+    :func:`active_scan` sweeps an IPv4 /24, so every IPv6-enabled host on the
+    link is asked at once via a single Echo Request to ``ff02::1``. Each
+    reply's own Ethernet source MAC and IPv6 source address are both on the
+    captured frame, so - as with ARP - no separate address-resolution
+    round-trip is needed. Raises :class:`ScannerUnavailable` under the same
+    conditions as :func:`active_scan`.
+    """
+
+    scapy_module = _require_scapy()
+    from scapy.layers.inet6 import ICMPv6EchoRequest, IPv6
+
+    kwargs = {"timeout": timeout, "verbose": False, "multi": True}
+    if interface:
+        kwargs["iface"] = interface
+
+    request = (
+        scapy_module.Ether(dst=_ALL_NODES_MULTICAST_MAC)
+        / IPv6(dst="ff02::1")
+        / ICMPv6EchoRequest()
+    )
+    try:
+        answered, _unanswered = scapy_module.srp(request, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - see _looks_like_permission_error
+        if _looks_like_permission_error(exc):
+            raise ScannerUnavailable(
+                "permission denied opening a raw socket - active scanning needs "
+                "root (or CAP_NET_RAW). Re-run with sudo."
+            ) from exc
+        raise ScannerUnavailable(f"could not send IPv6 neighbor discovery pings: {exc}") from exc
+
+    now = datetime.now(timezone.utc)
+    sightings: list[ArpSighting] = []
+    for _sent, received in answered:
+        if not (received.haslayer(scapy_module.Ether) and received.haslayer(IPv6)):
+            continue
+        sightings.append(
+            ArpSighting(
+                mac=received[scapy_module.Ether].src,
+                ip=received[IPv6].src,
+                seen_at=now,
+            )
+        )
+    return sightings
+
+
+def has_ipv6(interface: str | None = None) -> bool:
+    """True if ``interface`` (or the default one) has any IPv6 address.
+
+    A link-local address is enough - that's all :func:`active_scan_v6` and
+    the passive NDP path in :func:`passive_sniff` need.
+    """
+
+    try:
+        scapy_module = _require_scapy()
+        iface = interface or default_interface()
+        if iface is None:
+            return False
+        return any(entry[2] == iface for entry in scapy_module.in6_getifaddr())
+    except ScannerUnavailable:
+        return False
+    except Exception:  # noqa: BLE001 - best-effort guess
+        return False
+
+
 def passive_sniff(
     *,
     on_sighting: Callable[[ArpSighting], None],
@@ -169,7 +255,7 @@ def passive_sniff(
     stop_event: "SupportsIsSet | None" = None,
     packet_count: int = 0,
 ) -> None:
-    """Listen for ARP traffic and call ``on_sighting`` for each packet seen.
+    """Listen for ARP/ND traffic and call ``on_sighting`` for each packet seen.
 
     Blocks until ``stop_event`` is set (checked between packets) or
     ``packet_count`` packets have been processed (0 = unbounded - normal use is
@@ -177,21 +263,36 @@ def passive_sniff(
     """
 
     scapy_module = _require_scapy()
+    from scapy.layers.inet6 import ICMPv6ND_NA, ICMPv6ND_NS, IPv6
 
     def _handle(packet) -> None:
-        if not packet.haslayer(scapy_module.ARP):
+        now = datetime.now(timezone.utc)
+
+        if packet.haslayer(scapy_module.ARP):
+            arp = packet[scapy_module.ARP]
+            # op 1 = who-has (request), op 2 = is-at (reply) - both carry a
+            # live sender MAC/IP pairing worth recording.
+            if arp.op in (1, 2):
+                on_sighting(ArpSighting(mac=arp.hwsrc, ip=arp.psrc, seen_at=now))
             return
-        arp = packet[scapy_module.ARP]
-        # op 1 = who-has (request), op 2 = is-at (reply) - both carry a live
-        # sender MAC/IP pairing worth recording.
-        if arp.op not in (1, 2):
-            return
-        on_sighting(ArpSighting(mac=arp.hwsrc, ip=arp.psrc, seen_at=datetime.now(timezone.utc)))
+
+        if packet.haslayer(ICMPv6ND_NS) or packet.haslayer(ICMPv6ND_NA):
+            if not (packet.haslayer(scapy_module.Ether) and packet.haslayer(IPv6)):
+                return
+            src_ip = packet[IPv6].src
+            # A Neighbor Solicitation sent for Duplicate Address Detection
+            # (probing an address before claiming it) carries the unspecified
+            # address, not a live one - nothing to record yet.
+            if src_ip in ("::", ""):
+                return
+            on_sighting(
+                ArpSighting(mac=packet[scapy_module.Ether].src, ip=src_ip, seen_at=now)
+            )
 
     def _should_stop(_packet) -> bool:
         return bool(stop_event is not None and stop_event.is_set())
 
-    kwargs = {"filter": "arp", "prn": _handle, "store": False, "stop_filter": _should_stop}
+    kwargs = {"filter": "arp or icmp6", "prn": _handle, "store": False, "stop_filter": _should_stop}
     if interface:
         kwargs["iface"] = interface
     if packet_count:

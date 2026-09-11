@@ -10,14 +10,14 @@ other Debian/Ubuntu systems).
 - Package: [`lanfence` on PyPI](https://pypi.org/project/lanfence/)
 
 LAN Fence runs on a small Linux box (a Raspberry Pi is the common case) sitting
-on your network. It continuously scans for connected devices via ARP,
-maintains an allowlist of devices you already trust, and alerts in
-plain language when something unknown joins - a rogue device, unauthorized
-hardware, or a supply-chain implant on your LAN.
+on your network. It continuously scans for connected devices via ARP and IPv6
+neighbor discovery, maintains an allowlist of devices you already trust, and
+alerts in plain language when something unknown joins - a rogue device,
+unauthorized hardware, or a supply-chain implant on your LAN.
 
 LAN Fence **only observes**. It sends nothing beyond a standard ARP "who-has"
-request (the same thing every device on your LAN does routinely) and never
-touches, blocks, deauthenticates or spoofs anything.
+request or IPv6 multicast ping (the same things every device on your LAN does
+routinely) and never touches, blocks, deauthenticates or spoofs anything.
 
 > ⚠️ LAN Fence **cannot prove a device is malicious, or that a MAC address is
 > genuine.** MAC vendor prefixes and hostnames are trivially spoofed by anyone
@@ -26,12 +26,17 @@ touches, blocks, deauthenticates or spoofs anything.
 
 ## How it works
 
-1. **Active scanning** - LAN Fence periodically ARP-sweeps your subnet
-   (`lanfence scan` for one sweep, or on an interval inside `lanfence
-   monitor`), collecting every MAC/IP that answers.
+1. **Active scanning** - LAN Fence periodically ARP-sweeps your IPv4 subnet
+   and, unless disabled, pings the IPv6 all-nodes multicast address to reach
+   every IPv6-enabled host on the link too (`lanfence scan` for one sweep, or
+   on an interval inside `lanfence monitor`) - so a device that's IPv6-only,
+   or deliberately configured off IPv4 to dodge an ARP-only monitor, doesn't
+   go unseen. Every discovered MAC/IP pairing feeds the same pipeline
+   regardless of address family.
 2. **Passive monitoring** - between active sweeps, `lanfence monitor` also
-   listens for ARP traffic on the wire, so a device that joins mid-interval is
-   caught sooner rather than waiting for the next sweep.
+   listens for ARP and IPv6 neighbor-discovery traffic on the wire, so a
+   device that joins mid-interval is caught sooner rather than waiting for
+   the next sweep.
 3. Every sighting is folded into a persistent **SQLite database** keyed by MAC
    address, which tracks each device's lifecycle: `new_device` the first time
    it's ever seen, `reappeared` if it had gone offline and came back, and
@@ -212,7 +217,8 @@ scan:
   subnet: null                 # null = derive from the interface's own address
   scan_interval_seconds: 60    # how often `monitor` repeats an active sweep
   active_scan_timeout_seconds: 3
-  passive: true                # also sniff ARP traffic between sweeps
+  passive: true                # also sniff ARP/ND traffic between sweeps
+  ipv6: true                   # also discover devices via IPv6 neighbor discovery
   resolve_hostnames: true      # try reverse DNS for each device
   dns_timeout_seconds: 1
 

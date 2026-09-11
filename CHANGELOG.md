@@ -15,8 +15,25 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-11
+
 ### Added
 
+- **IPv6 neighbor discovery.** `scan`/`monitor` (`--ipv6/--no-ipv6`, on by
+  default via the new `scan.ipv6` config field) now discover devices over
+  IPv6 as well as ARP: an active sweep pings the link-local all-nodes
+  multicast address (`ff02::1`) - the standard alternative to an ARP-style
+  address sweep, since a /64 can't be brute-forced - and passive monitoring
+  additionally parses Neighbor Solicitation/Advertisement traffic (the
+  ARP/ND capture filter is now `"arp or icmp6"`, one capture stream for
+  both). This closes a real gap: a device that is IPv6-only, or one
+  deliberately configured off IPv4 specifically to evade an ARP-only
+  monitor, was previously invisible. Discovery is link-local only (stable
+  per-interface, unlike rotating global-scope privacy addresses) and needs
+  no on-link prefix/subnet knowledge. Every discovered MAC feeds the exact
+  same allowlist/fingerprint/finding pipeline ARP sightings already do - no
+  changes needed there. `lanfence check` reports IPv6 availability on the
+  scanning interface.
 - New rogue-device vendor signatures, each backed by a real, confirmed
   vendor string in the now-full `oui_vendors.txt`: `hisilicon_camera_soc`
   (HiSilicon Hi3516/Hi3518-family SoCs - the dominant chipset behind cheap
@@ -68,6 +85,16 @@ Each release is also published to
 
 ### Fixed
 
+- `run_active_sweep` no longer marks every known device "disconnected" when
+  a sweep can't run at all (most commonly: `scan`/`monitor` invoked without
+  root). Previously, a scan failure was caught, treated as "zero devices
+  seen", and fed straight into the offline-marking step - so every real,
+  still-connected device in the database got a false `disconnected` event
+  each sweep. It now only marks devices offline when at least one scan
+  mechanism (ARP or IPv6) actually completed; a sweep where everything
+  failed leaves existing device state untouched. Found while reasoning
+  through how a second (IPv6) scan mechanism should interact with the
+  existing offline-marking logic, not reported from a live install.
 - `lanfence upgrade` no longer reports "upgraded" when nothing actually
   changed. Both `pipx upgrade` and `pip install --upgrade` exit `0` even when
   they find nothing newer than what's already installed - which can happen
@@ -228,7 +255,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/rosscooney/lanfence/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/rosscooney/lanfence/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/rosscooney/lanfence/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/rosscooney/lanfence/compare/v0.3.1...v0.3.2

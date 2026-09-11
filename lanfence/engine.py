@@ -143,36 +143,47 @@ def run_active_sweep(
     interface: str | None = None,
     subnet: str | None = None,
 ) -> ScanResult:
-    """Run one active ARP sweep of the subnet and update the database.
+    """Run one active sweep - ARP, plus IPv6 neighbor discovery if enabled -
+    and update the database.
 
     Unlike a passive sighting, a completed active sweep is authoritative for
-    "what's online right now" - any previously-online device NOT seen in this
-    sweep is marked offline (a ``disconnected`` event).
+    "what's online right now": any previously-online device not seen in this
+    sweep is marked offline (a ``disconnected`` event) - but only if at least
+    one scan mechanism actually ran. If every mechanism failed (e.g. no root
+    this round), we have no information at all, and calling a device offline
+    on the strength of no information would flood the database with false
+    disconnects; ``mark_offline`` is skipped entirely in that case.
     """
 
     started_at = utcnow()
     iface = interface or cfg.scan.interface or scanner.default_interface()
     net = subnet or cfg.scan.subnet or scanner.local_subnet(iface)
     errors: list[str] = []
+    sightings: list[scanner.ArpSighting] = []
+    any_scan_succeeded = False
 
     if net is None:
         errors.append(
             "could not determine a subnet to scan automatically; pass --subnet "
-            "explicitly (e.g. --subnet 192.168.1.0/24)"
+            "explicitly (e.g. --subnet 192.168.1.0/24) - IPv4 discovery skipped this sweep"
         )
-        return ScanResult(
-            started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,
-            mode="active", errors=errors,
-        )
+    else:
+        try:
+            sightings.extend(
+                scanner.active_scan(subnet=net, interface=iface, timeout=cfg.scan.active_scan_timeout_seconds)
+            )
+            any_scan_succeeded = True
+        except (scanner.ScannerUnavailable, ValueError) as exc:
+            errors.append(str(exc))
 
-    try:
-        sightings = scanner.active_scan(subnet=net, interface=iface, timeout=cfg.scan.active_scan_timeout_seconds)
-    except scanner.ScannerUnavailable as exc:
-        errors.append(str(exc))
-        sightings = []
-    except ValueError as exc:
-        errors.append(str(exc))
-        sightings = []
+    if cfg.scan.ipv6:
+        try:
+            sightings.extend(
+                scanner.active_scan_v6(interface=iface, timeout=cfg.scan.active_scan_timeout_seconds)
+            )
+            any_scan_succeeded = True
+        except scanner.ScannerUnavailable as exc:
+            errors.append(str(exc))
 
     latest = scanner.dedupe_latest(sightings)
     devices: list[Device] = []
@@ -194,7 +205,8 @@ def run_active_sweep(
             )
         findings.extend(dev_findings)
 
-    events.extend(store.mark_offline(still_online, as_of=utcnow()))
+    if any_scan_succeeded:
+        events.extend(store.mark_offline(still_online, as_of=utcnow()))
 
     return ScanResult(
         started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,
