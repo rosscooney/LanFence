@@ -17,6 +17,7 @@ scan:
 
 alerts:
   min_severity: medium         # info | medium | high - dispatch threshold
+  rate_limit_seconds: 900      # per-MAC cooldown between alerts; 0 = alert every time
   syslog:
     enabled: false
     address: /dev/log

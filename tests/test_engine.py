@@ -10,9 +10,9 @@ from lanfence import scanner
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
-from lanfence.engine import build_findings, process_sighting, run_active_sweep
+from lanfence.engine import build_findings, filter_rate_limited, process_sighting, run_active_sweep
 from lanfence.fingerprint import SignatureSet
-from lanfence.models import Device
+from lanfence.models import Device, Finding
 
 
 def _now():
@@ -208,3 +208,93 @@ def test_run_active_sweep_partial_success_still_marks_offline(tmp_path: Path):
 
     assert still_online == "offline"
     assert any(e.event_type == "disconnected" for e in result.events)
+
+
+# --- filter_rate_limited ------------------------------------------------
+
+
+def _cfg_with_rate_limit(seconds: float) -> Config:
+    cfg = Config()
+    cfg.alerts.rate_limit_seconds = seconds
+    return cfg
+
+
+def test_filter_rate_limited_keeps_first_alert_for_a_device(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    finding = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="medium")
+    kept = filter_rate_limited([finding], store, _cfg_with_rate_limit(900).alerts, now=_now())
+    store.close()
+    assert kept == [finding]
+
+
+def test_filter_rate_limited_suppresses_repeat_within_cooldown(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_rate_limit(900)
+    t0 = _now()
+    first = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="medium")
+    second = Finding(mac="aa:bb:cc:dd:ee:ff", title="t again", severity="medium")
+
+    kept_first = filter_rate_limited([first], store, cfg.alerts, now=t0)
+    kept_second = filter_rate_limited([second], store, cfg.alerts, now=t0)
+    store.close()
+
+    assert kept_first == [first]
+    assert kept_second == []
+
+
+def test_filter_rate_limited_keeps_escalation_within_cooldown(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_rate_limit(900)
+    t0 = _now()
+    low = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="info")
+    high = Finding(mac="aa:bb:cc:dd:ee:ff", title="t escalated", severity="high")
+
+    filter_rate_limited([low], store, cfg.alerts, now=t0)
+    kept = filter_rate_limited([high], store, cfg.alerts, now=t0)
+    store.close()
+
+    assert kept == [high]
+
+
+def test_filter_rate_limited_zero_disables_rate_limiting(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_rate_limit(0)
+    t0 = _now()
+    finding = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="medium")
+
+    kept_first = filter_rate_limited([finding], store, cfg.alerts, now=t0)
+    kept_second = filter_rate_limited([finding], store, cfg.alerts, now=t0)
+    store.close()
+
+    assert kept_first == [finding]
+    assert kept_second == [finding]
+
+
+def test_filter_rate_limited_processes_highest_severity_first_in_one_batch(tmp_path: Path):
+    """A batch containing both a low- and a high-severity finding for the
+    same MAC (e.g. one finding per matched signature) must not let the low
+    one "claim" the alert slot and suppress the high one processed after it."""
+
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_rate_limit(900)
+    low = Finding(mac="aa:bb:cc:dd:ee:ff", title="low", severity="info")
+    high = Finding(mac="aa:bb:cc:dd:ee:ff", title="high", severity="high")
+
+    kept = filter_rate_limited([low, high], store, cfg.alerts, now=_now())
+    store.close()
+
+    assert kept == [high]
+
+
+def test_filter_rate_limited_independent_per_mac(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_rate_limit(900)
+    t0 = _now()
+    a = Finding(mac="aa:bb:cc:dd:ee:ff", title="a", severity="medium")
+    b = Finding(mac="11:22:33:44:55:66", title="b", severity="medium")
+
+    filter_rate_limited([a], store, cfg.alerts, now=t0)
+    kept = filter_rate_limited([b], store, cfg.alerts, now=t0)
+    store.close()
+
+    assert kept == [b]

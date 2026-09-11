@@ -28,7 +28,7 @@ from lanfence import __version__, alerts, scanner
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
-from lanfence.engine import build_findings, process_sighting, run_active_sweep
+from lanfence.engine import build_findings, filter_rate_limited, process_sighting, run_active_sweep, utcnow
 from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import setup_logging
@@ -267,9 +267,9 @@ def scan(
 
     with DeviceStore(cfg.resolved_db_path()) as store:
         result = run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
-
-    if alert:
-        alerts.dispatch(result.findings, cfg.alerts)
+        if alert:
+            to_send = filter_rate_limited(result.findings, store, cfg.alerts, now=utcnow())
+            alerts.dispatch(to_send, cfg.alerts)
 
     if output_format == "json":
         typer.echo(result.to_json())
@@ -280,7 +280,7 @@ def scan(
         raise typer.Exit(code=exit_code_for(result))
 
 
-def _emit_findings(findings: list[Finding], *, alert: bool, cfg: Config) -> None:
+def _emit_findings(findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore) -> None:
     colour = {"high": "red", "medium": "yellow", "info": "cyan"}
     for finding in findings:
         typer.secho(
@@ -292,7 +292,8 @@ def _emit_findings(findings: list[Finding], *, alert: bool, cfg: Config) -> None
         if finding.recommendation:
             typer.secho(f"    Recommendation: {finding.recommendation}", fg="cyan")
     if alert and findings:
-        alerts.dispatch(findings, cfg.alerts)
+        to_send = filter_rate_limited(findings, store, cfg.alerts, now=utcnow())
+        alerts.dispatch(to_send, cfg.alerts)
 
 
 @app.command()
@@ -360,7 +361,7 @@ def monitor(
                 last_sweep = now
                 for err in result.errors:
                     typer.secho(f"error: {err}", fg="red", err=True)
-                _emit_findings(result.findings, alert=alert, cfg=cfg)
+                _emit_findings(result.findings, alert=alert, cfg=cfg, store=store)
 
             drained = 0
             while drained < 200:
@@ -373,7 +374,7 @@ def monitor(
                     mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
                     store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
                 )
-                _emit_findings(findings, alert=alert, cfg=cfg)
+                _emit_findings(findings, alert=alert, cfg=cfg, store=store)
 
             time.sleep(1.0)
     except KeyboardInterrupt:

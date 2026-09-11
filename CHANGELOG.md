@@ -15,6 +15,23 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Changed
+
+- **Alert dispatch is now rate-limited by default.** New `alerts.rate_limit_seconds`
+  (default 900 - 15 minutes) is a per-MAC cooldown on external alert channels:
+  once a device has triggered a dispatch, further alerts about it are
+  suppressed until the cooldown elapses, unless a new finding's severity is
+  higher than what was last alerted (an escalation always gets through
+  immediately). This is a behavior change for anyone upgrading - previously
+  every qualifying finding was dispatched every time, so a flapping device
+  (a phone's Wi-Fi cycling, a laptop sleeping/waking) could trigger a fresh
+  alert on every scan interval, and now that Twilio SMS is billed per
+  message, that had a real dollar cost with no added security value. Only
+  the external channels are throttled - the CLI table, JSON output, and the
+  database's event history remain complete. Set `rate_limit_seconds: 0` to
+  restore the old "alert every time" behavior. Backed by a new `alert_log`
+  table in the device database and `lanfence.engine.filter_rate_limited`.
+
 ### Added
 
 - Five new alert channels, alongside the existing syslog/email/webhook:

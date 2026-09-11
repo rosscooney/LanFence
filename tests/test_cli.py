@@ -8,6 +8,7 @@ import yaml
 from typer.testing import CliRunner
 
 from lanfence.cli import app
+from lanfence.models import Finding
 
 runner = CliRunner()
 
@@ -127,6 +128,48 @@ def test_monitor_no_ipv6_flag_is_reflected_in_banner(config_path: Path, monkeypa
     monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
     result = runner.invoke(app, ["monitor", "--no-ipv6", "--no-passive", "--config", str(config_path)])
     assert "ipv6: False" in result.output
+
+
+class _FakeUrlopenResponse:
+    def read(self):
+        return b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_scan_alert_rate_limits_repeat_dispatch_for_same_device(tmp_path: Path):
+    """Integration test: `scan --alert` run twice in a row against the same
+    database only dispatches to the configured webhook once for a device
+    whose finding didn't escalate, thanks to the alerts.rate_limit_seconds
+    cooldown (default 900s - well within two back-to-back test runs)."""
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "alerts": {"webhook": {"enabled": True, "url": "https://example.com/hook"}},
+        }),
+        encoding="utf-8",
+    )
+
+    finding = Finding(mac="aa:bb:cc:dd:ee:ff", title="Unknown device connected", severity="high")
+    fake_result = type("R", (), {
+        "findings": [finding],
+        "errors": [],
+        "to_json": lambda self: "{}",
+    })()
+
+    with patch("lanfence.cli.run_active_sweep", return_value=fake_result), \
+         patch("lanfence.alerts.urllib.request.urlopen", return_value=_FakeUrlopenResponse()) as urlopen_mock:
+        runner.invoke(app, ["scan", "--alert", "--config", str(config_path)])
+        runner.invoke(app, ["scan", "--alert", "--config", str(config_path)])
+
+    assert urlopen_mock.call_count == 1
 
 
 def test_config_not_found(tmp_path: Path):

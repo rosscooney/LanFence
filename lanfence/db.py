@@ -3,10 +3,12 @@
 
 """Persistent SQLite store of every device LAN Fence has ever seen.
 
-Two tables: ``devices`` holds the current state of each MAC address (first
+Three tables: ``devices`` holds the current state of each MAC address (first
 seen, last seen, online/offline); ``events`` is an append-only log of
 lifecycle transitions (new / reappeared / disconnected) used by ``lanfence
-report``.
+report``; ``alert_log`` tracks the last external-alert dispatch per MAC, used
+by :meth:`DeviceStore.due_for_alert` to cool down repeated alerts for a
+flapping device.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lanfence.models import Device, DeviceEvent, EventType
+from lanfence.models import SEVERITIES, Device, DeviceEvent, EventType, Severity
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -39,6 +41,12 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_mac ON events (mac);
+
+CREATE TABLE IF NOT EXISTS alert_log (
+    mac TEXT PRIMARY KEY,
+    last_alerted_at TEXT NOT NULL,
+    last_severity TEXT NOT NULL
+);
 """
 
 
@@ -158,6 +166,42 @@ class DeviceStore:
                 DeviceEvent(mac=mac, event_type=event_type, timestamp=seen_at, ip=ip, hostname=hostname)
             )
         return device, event_type
+
+    def due_for_alert(
+        self, mac: str, severity: Severity, *, now: datetime, cooldown_seconds: float
+    ) -> bool:
+        """Whether an external alert for ``mac`` at ``severity`` should fire now.
+
+        Checks and records in one call, so a caller can't race between "may I
+        alert" and "record that I did." Returns ``True`` - and upserts
+        ``alert_log`` - when there is no prior record, the cooldown has
+        elapsed since the last dispatch, or ``severity`` outranks what was
+        last alerted (an escalation always bypasses the cooldown). Returns
+        ``False`` without touching the row otherwise.
+        ``cooldown_seconds <= 0`` always returns ``True`` (rate limiting off).
+        """
+
+        if cooldown_seconds <= 0:
+            return True
+
+        row = self._conn.execute(
+            "SELECT last_alerted_at, last_severity FROM alert_log WHERE mac = ?", (mac,)
+        ).fetchone()
+
+        if row is not None:
+            elapsed = (now - _parse_dt(row["last_alerted_at"])).total_seconds()
+            escalated = SEVERITIES.index(severity) > SEVERITIES.index(row["last_severity"])
+            if elapsed < cooldown_seconds and not escalated:
+                return False
+
+        self._conn.execute(
+            "INSERT INTO alert_log (mac, last_alerted_at, last_severity) VALUES (?, ?, ?) "
+            "ON CONFLICT(mac) DO UPDATE SET last_alerted_at = excluded.last_alerted_at, "
+            "last_severity = excluded.last_severity",
+            (mac, _iso(now), severity),
+        )
+        self._conn.commit()
+        return True
 
     def mark_offline(self, still_online_macs: set[str], *, as_of: datetime) -> list[DeviceEvent]:
         """Mark every currently-online device NOT in ``still_online_macs`` offline.

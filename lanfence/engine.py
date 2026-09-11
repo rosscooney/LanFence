@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from lanfence import scanner
 from lanfence.allowlist import Allowlist
-from lanfence.config import Config
+from lanfence.config import AlertConfig, Config
 from lanfence.db import DeviceStore
 from lanfence.fingerprint import SignatureMatch, SignatureSet, fingerprint_device
 from lanfence.logging_config import get_logger
@@ -212,3 +212,25 @@ def run_active_sweep(
         started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,
         mode="active", devices=devices, events=events, findings=findings, errors=errors,
     )
+
+
+def filter_rate_limited(
+    findings: list[Finding], store: DeviceStore, cfg: AlertConfig, *, now: datetime
+) -> list[Finding]:
+    """Findings actually worth sending to external alert channels right now.
+
+    Throttles only the *push* side (``alerts.dispatch``) via a per-MAC
+    cooldown in the database - the CLI table, JSON output, and the events/
+    findings already written to the database are unaffected. Processes
+    highest severity first so an escalation within the same batch is never
+    itself suppressed by a lower-severity finding for the same MAC processed
+    earlier. See :meth:`lanfence.db.DeviceStore.due_for_alert`.
+    """
+
+    ordered = sorted(findings, key=lambda f: -_SEVERITY_RANK[f.severity])
+    return [
+        finding for finding in ordered
+        if store.due_for_alert(
+            finding.mac, finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds
+        )
+    ]

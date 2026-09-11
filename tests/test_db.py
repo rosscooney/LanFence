@@ -98,3 +98,59 @@ def test_vendor_is_preserved_when_later_observation_has_none(tmp_path: Path):
             seen_at=t0 + timedelta(seconds=1),
         )
         assert device.vendor == "Acme"
+
+
+# --- due_for_alert (alert rate limiting) ------------------------------------
+
+
+def test_due_for_alert_true_on_first_call(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "medium", now=_now(), cooldown_seconds=900) is True
+
+
+def test_due_for_alert_false_within_cooldown_at_same_or_lower_severity(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "medium", now=t0, cooldown_seconds=900) is True
+        # same severity, well within the cooldown
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "medium", now=t0 + timedelta(seconds=30), cooldown_seconds=900
+        ) is False
+        # lower severity, still within the cooldown
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "info", now=t0 + timedelta(seconds=30), cooldown_seconds=900
+        ) is False
+
+
+def test_due_for_alert_true_after_cooldown_elapses(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "medium", now=t0, cooldown_seconds=60) is True
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "medium", now=t0 + timedelta(seconds=61), cooldown_seconds=60
+        ) is True
+
+
+def test_due_for_alert_true_when_severity_escalates_within_cooldown(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "info", now=t0, cooldown_seconds=900) is True
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "high", now=t0 + timedelta(seconds=5), cooldown_seconds=900
+        ) is True
+
+
+def test_due_for_alert_zero_cooldown_always_true(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "high", now=t0, cooldown_seconds=0) is True
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "high", now=t0 + timedelta(seconds=1), cooldown_seconds=0
+        ) is True
+
+
+def test_due_for_alert_is_independent_per_mac(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "medium", now=t0, cooldown_seconds=900) is True
+        assert store.due_for_alert("11:22:33:44:55:66", "medium", now=t0, cooldown_seconds=900) is True

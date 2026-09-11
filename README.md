@@ -225,6 +225,7 @@ scan:
 
 alerts:
   min_severity: medium         # info | medium | high - dispatch threshold
+  rate_limit_seconds: 900      # per-MAC cooldown between alerts; 0 = alert every time
   syslog:
     enabled: false
     address: /dev/log
@@ -277,6 +278,16 @@ Every channel dispatches independently and only when `enabled: true` and fully
 configured; `min_severity` gates all of them at once. Twilio SMS is capped at
 ~480 characters per alert (a compact one-line summary, not the full
 multi-line report the other channels get) since SMS is billed per segment.
+
+`rate_limit_seconds` (default 15 minutes) is a per-MAC cooldown on top of
+that: once a device has triggered a dispatch, further alerts about it are
+suppressed until the cooldown elapses - unless a new finding's severity is
+higher than what was last alerted, which always gets through immediately.
+This only throttles the external channels above; the CLI table, JSON output,
+and the database's event history are always complete, so a flapping device
+(a phone's Wi-Fi cycling, a laptop sleeping/waking) doesn't spam every
+channel - or run up a Twilio bill - once per scan interval. Set it to `0` to
+alert every time, matching earlier versions' behavior.
 
 ## Exit codes (`--fail-on-findings`)
 

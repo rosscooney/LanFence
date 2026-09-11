@@ -140,6 +140,13 @@ class AlertConfig(BaseModel):
 
     #: Minimum severity that triggers an alert dispatch.
     min_severity: Literal["info", "medium", "high"] = "medium"
+    #: Minimum time between alert dispatches for the same MAC, unless a new
+    #: finding's severity is higher than what was last alerted for it (an
+    #: escalation always bypasses the cooldown). 0 disables rate limiting -
+    #: every qualifying finding is dispatched every time. Only throttles
+    #: external channels below; the CLI/JSON output and the database are
+    #: always complete.
+    rate_limit_seconds: float = 900.0
     syslog: SyslogAlertConfig = Field(default_factory=SyslogAlertConfig)
     email: EmailAlertConfig = Field(default_factory=EmailAlertConfig)
     webhook: WebhookAlertConfig = Field(default_factory=WebhookAlertConfig)
@@ -148,6 +155,13 @@ class AlertConfig(BaseModel):
     teams: TeamsAlertConfig = Field(default_factory=TeamsAlertConfig)
     ntfy: NtfyAlertConfig = Field(default_factory=NtfyAlertConfig)
     twilio: TwilioAlertConfig = Field(default_factory=TwilioAlertConfig)
+
+    @field_validator("rate_limit_seconds")
+    @classmethod
+    def _non_negative_rate_limit(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("rate_limit_seconds must be zero or greater")
+        return value
 
 
 class Config(BaseModel):
