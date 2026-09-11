@@ -9,9 +9,84 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from lanfence.cli import _reexec_with_sudo, _sudo_hints, _trusted_to_run_as_root, app
+from lanfence.cli import (
+    _group_write_is_self_only,
+    _reexec_with_sudo,
+    _sudo_hints,
+    _trusted_to_run_as_root,
+    app,
+)
 
 runner = CliRunner()
+
+
+class _FakeGroup:
+    def __init__(self, gr_mem):
+        self.gr_mem = gr_mem
+
+
+class _FakePwEntry:
+    def __init__(self, pw_name, pw_gid):
+        self.pw_name = pw_name
+        self.pw_gid = pw_gid
+
+
+class _FakeStat:
+    def __init__(self, st_gid):
+        self.st_gid = st_gid
+
+
+def test_group_write_is_self_only_true_for_single_member_group():
+    st = _FakeStat(st_gid=1000)
+    with patch("lanfence.cli.os.geteuid", return_value=1000), \
+         patch("grp.getgrgid", return_value=_FakeGroup([])), \
+         patch("pwd.getpwuid", return_value=_FakePwEntry("alice", 1000)), \
+         patch("pwd.getpwall", return_value=[_FakePwEntry("alice", 1000)]):
+        assert _group_write_is_self_only(st) is True
+
+
+def test_group_write_is_self_only_false_when_another_user_shares_group():
+    st = _FakeStat(st_gid=1000)
+    with patch("lanfence.cli.os.geteuid", return_value=1000), \
+         patch("grp.getgrgid", return_value=_FakeGroup([])), \
+         patch("pwd.getpwuid", return_value=_FakePwEntry("alice", 1000)), \
+         patch("pwd.getpwall", return_value=[
+             _FakePwEntry("alice", 1000), _FakePwEntry("bob", 1000),
+         ]):
+        assert _group_write_is_self_only(st) is False
+
+
+def test_group_write_is_self_only_false_for_supplementary_member():
+    st = _FakeStat(st_gid=1000)
+    with patch("lanfence.cli.os.geteuid", return_value=1000), \
+         patch("grp.getgrgid", return_value=_FakeGroup(["bob"])), \
+         patch("pwd.getpwuid", return_value=_FakePwEntry("alice", 1000)), \
+         patch("pwd.getpwall", return_value=[_FakePwEntry("alice", 1000)]):
+        assert _group_write_is_self_only(st) is False
+
+
+def test_trusted_to_run_as_root_true_for_umask_002_self_owned_group(tmp_path: Path):
+    """Regression test: a fresh pipx venv on Debian/Raspberry Pi OS (default
+    umask 002) is group-writable by the user's own primary group, which
+    nobody else belongs to - this must not be treated as untrusted."""
+
+    launcher = tmp_path / "lanfence"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o775)  # group-writable, as umask 002 would produce
+    tmp_path.chmod(0o775)
+    try:
+        with patch("lanfence.cli._group_write_is_self_only", return_value=True):
+            assert _trusted_to_run_as_root(launcher) is True
+    finally:
+        tmp_path.chmod(0o700)
+
+
+def test_trusted_to_run_as_root_still_false_when_world_writable(tmp_path: Path):
+    launcher = tmp_path / "lanfence"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o777)
+    with patch("lanfence.cli._group_write_is_self_only", return_value=True):
+        assert _trusted_to_run_as_root(launcher) is False
 
 
 def test_reexec_with_sudo_fails_clean_instead_of_looping_if_still_not_root():

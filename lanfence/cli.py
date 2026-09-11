@@ -116,19 +116,49 @@ def _launcher_path() -> Optional[Path]:
     return None
 
 
+def _group_write_is_self_only(st: os.stat_result) -> bool:
+    """True if the current user is the *only* account in ``st``'s group.
+
+    Debian and Raspberry Pi OS default new users to ``umask 002``, so a fresh
+    pipx venv (``~/.local/share/pipx/venvs/...``) is group-writable by the
+    user's own primary group - typically a group nobody else belongs to. That
+    is not a real tampering risk the way an arbitrary other account would be,
+    so it should not fail the trust check the way world-writable does.
+    """
+
+    try:
+        import grp
+        import pwd
+
+        me = pwd.getpwuid(os.geteuid()).pw_name
+        members = set(grp.getgrgid(st.st_gid).gr_mem)
+        # anyone whose *primary* group is this one is a member too, even
+        # though getgrgid() only lists supplementary members.
+        members.update(entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == st.st_gid)
+        return members <= {me}
+    except (KeyError, ImportError, OSError):
+        return False
+
+
 def _trusted_to_run_as_root(path: Path) -> bool:
-    """True if ``path`` and its directory are writable only by their owner.
+    """True if a third party could not have swapped out ``path``.
 
     ``_launcher_path()`` can fall back to ``$PATH`` (``shutil.which``), which is
     the *invoking* user's ``PATH``. Before we ask ``sudo`` to run that file as
-    root - or symlink it onto root's ``PATH`` - make sure a third party could
-    not have swapped it out via a group-/world-writable file or parent dir.
+    root - or symlink it onto root's ``PATH`` - make sure another account could
+    not have replaced it. World-writable always fails this; group-writable
+    only fails it when the group actually has other members (see
+    :func:`_group_write_is_self_only`) - otherwise every umask-002 pipx
+    install on Debian/Raspberry Pi OS would be rejected.
     """
 
     try:
         for target in (path, path.parent):
-            mode = target.stat().st_mode
-            if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            st = target.stat()
+            mode = st.st_mode
+            if mode & stat.S_IWOTH:
+                return False
+            if mode & stat.S_IWGRP and not _group_write_is_self_only(st):
                 return False
     except OSError:
         return False

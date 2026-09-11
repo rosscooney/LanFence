@@ -15,6 +15,17 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Fixed
+
+- `lanfence link` no longer refuses a normal pipx install on Debian /
+  Raspberry Pi OS. Those default new users to `umask 002`, so a fresh pipx
+  venv (`~/.local/share/pipx/venvs/lanfence/...`) is group-writable by the
+  user's own primary group - a group nobody else belongs to on a typical
+  single-user Pi, not a real tampering risk. `_trusted_to_run_as_root()` now
+  only rejects group-writability when the group actually has another member;
+  world-writable is unaffected and still rejected outright. Reported from a
+  real pipx install.
+
 ## [0.3.3] - 2026-09-11
 
 ### Added
