@@ -15,6 +15,8 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-09-11
+
 ### Changed
 
 - **Alert dispatch is now rate-limited by default.** New `alerts.rate_limit_seconds`
@@ -48,6 +50,20 @@ Each release is also published to
   characters (a compact one-line summary, not the full multi-line report)
   since SMS is billed per segment. Alert dispatch (previously untested) now
   has full unit test coverage across all eight channels.
+
+### Internal
+
+- Added a CI workflow (`.github/workflows/tests.yml`) running `pytest` on
+  every push to `main` and every pull request, across Python 3.11/3.12/3.13
+  - previously only a publish-on-release workflow existed, so nothing caught
+  a broken test before it was tagged. It immediately caught a real flake:
+  `test_trusted_to_run_as_root_false_for_group_writable_dir` relied on the
+  real test runner's own primary group having other members, true of
+  macOS's default "staff" group but false of Ubuntu's per-user private
+  groups - fixed to mock `_group_write_is_self_only` instead.
+- `CONTRIBUTING.md`/`DISTRIBUTING.md` no longer describe
+  `lanfence/data/oui_vendors.txt` as "a small curated subset" - stale since
+  0.3.5 replaced it with a generated full snapshot of the IEEE MA-L registry.
 
 ## [0.3.5] - 2026-09-11
 
@@ -289,7 +305,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/rosscooney/lanfence/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/rosscooney/lanfence/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/rosscooney/lanfence/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/rosscooney/lanfence/compare/v0.3.2...v0.3.3
