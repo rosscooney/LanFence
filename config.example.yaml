@@ -34,6 +34,30 @@ alerts:
     enabled: false
     url: null
     timeout_seconds: 5
+  slack:
+    enabled: false
+    webhook_url: null            # Slack app settings -> Incoming Webhooks
+    timeout_seconds: 5
+  discord:
+    enabled: false
+    webhook_url: null            # channel settings -> Integrations -> Webhooks
+    timeout_seconds: 5
+  teams:
+    enabled: false
+    webhook_url: null            # incoming webhook / Workflow URL
+    timeout_seconds: 5
+  ntfy:
+    enabled: false
+    url: null                    # e.g. https://ntfy.sh/my-lanfence-topic
+    priority: null               # min | low | default | high | urgent
+    timeout_seconds: 5
+  twilio:
+    enabled: false
+    account_sid: null
+    auth_token: null              # sensitive - treat this file like a credential
+    from_number: null             # E.164, e.g. "+15551234567"
+    to_numbers: []
+    timeout_seconds: 10
 
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml

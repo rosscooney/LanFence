@@ -35,18 +35,23 @@ records what it sees, and reports. Relevant reports include, for example:
   e.g. terminal escape-sequence or command injection via a crafted DHCP
   hostname or ARP reply,
 - a path where LAN Fence sends, spoofs, injects, or modifies network traffic
-  beyond a standard ARP "who-has" request - it is observation-only and should
-  never act as an attacker against devices it discovers,
+  beyond a standard ARP "who-has" request or IPv6 multicast ping - it is
+  observation-only and should never act as an attacker against devices it
+  discovers,
 - unsafe handling of the device database, allowlist file, or JSON reports
   (e.g. a way to corrupt them, or a symlink/permissions issue that exposes
-  their contents to another local user),
-- a way for an alert destination you did *not* configure (syslog, email,
-  webhook) to receive data, or for LAN Fence to make any network call you did
-  not explicitly ask for - it has no telemetry and should never phone home on
-  its own. The only exceptions are `lanfence upgrade` (PyPI) and `lanfence
-  vendor-refresh` (the IEEE OUI registry), and only while that exact command
-  is running - a report that either fetches anything else, or fetches
-  something without the operator having typed that command, is in scope,
+  their contents to another local user), or of a configured alert
+  credential (e.g. a Twilio auth token or SMTP password) being logged,
+  written somewhere other than the config file the operator put it in, or
+  otherwise exposed,
+- a way for an alert destination you did *not* enable (syslog, email,
+  webhook, Slack, Discord, Teams, ntfy, Twilio) to receive data, or for LAN
+  Fence to make any network call you did not explicitly ask for - it has no
+  telemetry and should never phone home on its own. The only exceptions are
+  `lanfence upgrade` (PyPI) and `lanfence vendor-refresh` (the IEEE OUI
+  registry), and only while that exact command is running - a report that
+  either fetches anything else, or fetches something without the operator
+  having typed that command, is in scope,
 - privilege-escalation issues in `lanfence link`'s `sudo` self-elevation.
 
 LAN Fence does not attempt to prove that a device is authorized or that a MAC

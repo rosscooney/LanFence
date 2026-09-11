@@ -15,6 +15,23 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- Five new alert channels, alongside the existing syslog/email/webhook:
+  **Slack** and **Discord** (incoming webhook, posting a text summary -
+  Discord's is truncated to its 2000-character message cap), **Microsoft
+  Teams** (a `MessageCard`-shaped webhook payload), **ntfy**
+  (`alerts.ntfy.url`/`priority`, posted as plain text with a `Title`
+  header), and **Twilio SMS** (`account_sid`/`auth_token`/`from_number`/
+  `to_numbers`, authenticated via HTTP Basic Auth against Twilio's REST
+  API - one message per recipient). All five are disabled by default, gated
+  by the same `alerts.min_severity` threshold as every other channel, and
+  each is its own opt-in exception to "no network calls" the same way
+  webhook/email already were. Twilio's message body is capped at ~480
+  characters (a compact one-line summary, not the full multi-line report)
+  since SMS is billed per segment. Alert dispatch (previously untested) now
+  has full unit test coverage across all eight channels.
+
 ## [0.3.5] - 2026-09-11
 
 ### Added

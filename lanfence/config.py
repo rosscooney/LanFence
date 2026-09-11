@@ -82,14 +82,72 @@ class WebhookAlertConfig(BaseModel):
     timeout_seconds: float = 5.0
 
 
+class SlackAlertConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    #: Slack "Incoming Webhook" URL (Slack app settings -> Incoming Webhooks).
+    webhook_url: str | None = None
+    timeout_seconds: float = 5.0
+
+
+class DiscordAlertConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    #: Discord channel webhook URL (channel settings -> Integrations -> Webhooks).
+    webhook_url: str | None = None
+    timeout_seconds: float = 5.0
+
+
+class TeamsAlertConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    #: Microsoft Teams incoming webhook URL (a channel connector or Workflow
+    #: configured to accept a MessageCard-shaped POST body).
+    webhook_url: str | None = None
+    timeout_seconds: float = 5.0
+
+
+class NtfyAlertConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    #: Full topic URL, e.g. "https://ntfy.sh/my-lanfence-topic" or a
+    #: self-hosted server's equivalent.
+    url: str | None = None
+    #: ntfy priority header: min | low | default | high | urgent.
+    priority: str | None = None
+    timeout_seconds: float = 5.0
+
+
+class TwilioAlertConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    account_sid: str | None = None
+    #: Sensitive - treat this config file like a credential once this is set.
+    auth_token: str | None = None
+    #: A Twilio phone number in E.164 format, e.g. "+15551234567".
+    from_number: str | None = None
+    to_numbers: list[str] = Field(default_factory=list)
+    timeout_seconds: float = 10.0
+
+
 class AlertConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    #: Minimum severity that triggers an alert dispatch (syslog/email/webhook).
+    #: Minimum severity that triggers an alert dispatch.
     min_severity: Literal["info", "medium", "high"] = "medium"
     syslog: SyslogAlertConfig = Field(default_factory=SyslogAlertConfig)
     email: EmailAlertConfig = Field(default_factory=EmailAlertConfig)
     webhook: WebhookAlertConfig = Field(default_factory=WebhookAlertConfig)
+    slack: SlackAlertConfig = Field(default_factory=SlackAlertConfig)
+    discord: DiscordAlertConfig = Field(default_factory=DiscordAlertConfig)
+    teams: TeamsAlertConfig = Field(default_factory=TeamsAlertConfig)
+    ntfy: NtfyAlertConfig = Field(default_factory=NtfyAlertConfig)
+    twilio: TwilioAlertConfig = Field(default_factory=TwilioAlertConfig)
 
 
 class Config(BaseModel):

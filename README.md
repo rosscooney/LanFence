@@ -51,8 +51,9 @@ routinely) and never touches, blocks, deauthenticates or spoofs anything.
    (`high`/`medium`/`info`), a rationale, and a recommendation; an allowlisted
    device is downgraded to `info` so your own hardware stops shouting every
    time it reconnects.
-6. Findings can be dispatched to **syslog, email, or a webhook**, and
-   everything is available as a CLI table or JSON for automation.
+6. Findings can be dispatched to **syslog, email, a generic webhook, Slack,
+   Discord, Microsoft Teams, ntfy, or Twilio SMS**, and everything is
+   available as a CLI table or JSON for automation.
 
 ## Built-in rogue-device signatures
 
@@ -241,12 +242,41 @@ alerts:
     enabled: false
     url: null
     timeout_seconds: 5
+  slack:
+    enabled: false
+    webhook_url: null            # Slack app settings -> Incoming Webhooks
+    timeout_seconds: 5
+  discord:
+    enabled: false
+    webhook_url: null            # channel settings -> Integrations -> Webhooks
+    timeout_seconds: 5
+  teams:
+    enabled: false
+    webhook_url: null            # incoming webhook / Workflow URL
+    timeout_seconds: 5
+  ntfy:
+    enabled: false
+    url: null                    # e.g. https://ntfy.sh/my-lanfence-topic
+    priority: null               # min | low | default | high | urgent
+    timeout_seconds: 5
+  twilio:
+    enabled: false
+    account_sid: null
+    auth_token: null              # sensitive - treat this file like a credential
+    from_number: null             # E.164, e.g. "+15551234567"
+    to_numbers: []
+    timeout_seconds: 10
 
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
 vendor_file: null             # extra OUI table, merged with the packaged one
 rogue_signatures_file: null   # extra signatures, merged with the packaged ones
 ```
+
+Every channel dispatches independently and only when `enabled: true` and fully
+configured; `min_severity` gates all of them at once. Twilio SMS is capped at
+~480 characters per alert (a compact one-line summary, not the full
+multi-line report the other channels get) since SMS is billed per segment.
 
 ## Exit codes (`--fail-on-findings`)
 
@@ -261,12 +291,14 @@ rogue_signatures_file: null   # extra signatures, merged with the packaged ones
 ## Privacy and security
 
 - **No telemetry, no automatic external calls.** LAN Fence never phones home
-  on its own. Alert destinations are ones *you* configure (your own syslog
-  daemon, SMTP relay, or webhook URL), and the only other network access is
+  on its own. Alert destinations are ones *you* configure and enable (your
+  own syslog daemon, SMTP relay, webhook, Slack/Discord/Teams webhook, ntfy
+  topic, or Twilio account) - nothing is contacted unless you set
+  `enabled: true` and fill in its details. The only other network access is
   two commands that exist purely to fetch something *you* asked for, only
   when you run them: `lanfence upgrade` (checks/installs from PyPI) and
   `lanfence vendor-refresh` (downloads the IEEE OUI registry). Every other
-  command touches only your local network (ARP) and disk.
+  command touches only your local network (ARP/ND) and disk.
 - The bundled vendor and signature tables are static snapshots taken when
   this version was built; nothing is fetched automatically to "keep them
   fresh" - that's what `vendor-refresh` is for, on request.

@@ -1,20 +1,22 @@
 # Copyright (c) 2026-present Stable State Consulting Ltd
 # SPDX-License-Identifier: MIT
 
-"""Alert dispatch: syslog, email, webhook.
+"""Alert dispatch: syslog, email, webhook, Slack, Discord, Teams, ntfy, Twilio.
 
 LAN Fence never calls out to any third-party service on its own - the
 operator opts into each channel explicitly in config, and every channel here
-is a destination *they* configured (their own syslog daemon, mail relay, or
-webhook endpoint).
+is a destination *they* configured (their own syslog daemon, mail relay,
+webhook endpoint, or messaging/SMS account).
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import smtplib
 import syslog
 import urllib.error
+import urllib.parse
 import urllib.request
 from email.message import EmailMessage
 
@@ -66,14 +68,13 @@ def send_syslog(findings: list[Finding], cfg: AlertConfig) -> None:
         syslog.closelog()
 
 
-def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
-    if not cfg.email.enabled or not findings:
-        return
-    if not cfg.email.to_addrs or not cfg.email.from_addr:
-        log.warning("email alerts enabled but from_addr/to_addrs not configured; skipping")
-        return
+def _format_findings_text(findings: list[Finding], *, heading: str | None) -> str:
+    """A multi-line human-readable summary, shared by every text-based channel."""
 
-    lines = [f"LAN Fence: {len(findings)} finding(s)\n"]
+    lines: list[str] = []
+    if heading:
+        lines.append(f"{heading}: {len(findings)} finding(s)")
+        lines.append("")
     for finding in findings:
         lines.append(f"[{finding.severity.upper()}] {finding.title}")
         lines.append(f"  MAC: {finding.mac}")
@@ -82,12 +83,47 @@ def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
         if finding.recommendation:
             lines.append(f"  Recommendation: {finding.recommendation}")
         lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_findings_compact(findings: list[Finding], *, max_len: int) -> str:
+    """A single-line, length-capped summary for channels billed per message
+    (SMS) or with tight size limits."""
+
+    parts = [f"LAN Fence: {len(findings)} finding(s)"]
+    parts.extend(f"[{f.severity.upper()}] {f.title} (mac={f.mac})" for f in findings)
+    text = " | ".join(parts)
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
+
+
+def _post_json(url: str, payload: dict, *, timeout: float, label: str) -> None:
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "lanfence"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 - https literal
+            resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        log.error("failed to send %s alert: %s", label, exc)
+
+
+def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
+    if not cfg.email.enabled or not findings:
+        return
+    if not cfg.email.to_addrs or not cfg.email.from_addr:
+        log.warning("email alerts enabled but from_addr/to_addrs not configured; skipping")
+        return
 
     msg = EmailMessage()
     msg["Subject"] = f"LAN Fence: {len(findings)} finding(s) on your network"
     msg["From"] = cfg.email.from_addr
     msg["To"] = ", ".join(cfg.email.to_addrs)
-    msg.set_content("\n".join(lines))
+    msg.set_content(_format_findings_text(findings, heading="LAN Fence"))
 
     try:
         with smtplib.SMTP(cfg.email.smtp_host, cfg.email.smtp_port, timeout=10) as smtp:
@@ -106,19 +142,117 @@ def send_webhook(findings: list[Finding], cfg: AlertConfig) -> None:
     if not cfg.webhook.url:
         log.warning("webhook alerts enabled but no url configured; skipping")
         return
+    payload = {"findings": [f.model_dump(mode="json") for f in findings]}
+    _post_json(cfg.webhook.url, payload, timeout=cfg.webhook.timeout_seconds, label="webhook")
 
-    payload = json.dumps({"findings": [f.model_dump(mode="json") for f in findings]}).encode("utf-8")
+
+def send_slack(findings: list[Finding], cfg: AlertConfig) -> None:
+    if not cfg.slack.enabled or not findings:
+        return
+    if not cfg.slack.webhook_url:
+        log.warning("slack alerts enabled but no webhook_url configured; skipping")
+        return
+    text = _format_findings_text(findings, heading="LAN Fence")
+    _post_json(cfg.slack.webhook_url, {"text": text}, timeout=cfg.slack.timeout_seconds, label="Slack")
+
+
+#: Discord hard-caps a webhook message's `content` at 2000 characters; leave
+#: headroom for the truncation suffix itself rather than exceeding the cap.
+_DISCORD_MAX_CONTENT_LEN = 2000
+_DISCORD_TRUNCATION_SUFFIX = "\n… (truncated)"
+
+
+def send_discord(findings: list[Finding], cfg: AlertConfig) -> None:
+    if not cfg.discord.enabled or not findings:
+        return
+    if not cfg.discord.webhook_url:
+        log.warning("discord alerts enabled but no webhook_url configured; skipping")
+        return
+    text = _format_findings_text(findings, heading="LAN Fence")
+    if len(text) > _DISCORD_MAX_CONTENT_LEN:
+        cutoff = _DISCORD_MAX_CONTENT_LEN - len(_DISCORD_TRUNCATION_SUFFIX)
+        text = text[:cutoff].rstrip() + _DISCORD_TRUNCATION_SUFFIX
+    _post_json(cfg.discord.webhook_url, {"content": text}, timeout=cfg.discord.timeout_seconds, label="Discord")
+
+
+def send_teams(findings: list[Finding], cfg: AlertConfig) -> None:
+    if not cfg.teams.enabled or not findings:
+        return
+    if not cfg.teams.webhook_url:
+        log.warning("teams alerts enabled but no webhook_url configured; skipping")
+        return
+    payload = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "summary": f"LAN Fence: {len(findings)} finding(s)",
+        "text": _format_findings_text(findings, heading="LAN Fence"),
+    }
+    _post_json(cfg.teams.webhook_url, payload, timeout=cfg.teams.timeout_seconds, label="Teams")
+
+
+def send_ntfy(findings: list[Finding], cfg: AlertConfig) -> None:
+    if not cfg.ntfy.enabled or not findings:
+        return
+    if not cfg.ntfy.url:
+        log.warning("ntfy alerts enabled but no url configured; skipping")
+        return
+
+    headers = {
+        "Content-Type": "text/plain; charset=utf-8",
+        "User-Agent": "lanfence",
+        "Title": f"LAN Fence: {len(findings)} finding(s)",
+    }
+    if cfg.ntfy.priority:
+        headers["Priority"] = cfg.ntfy.priority
+    text = _format_findings_text(findings, heading=None)
     request = urllib.request.Request(
-        cfg.webhook.url,
-        data=payload,
-        headers={"Content-Type": "application/json", "User-Agent": "lanfence"},
-        method="POST",
+        cfg.ntfy.url, data=text.encode("utf-8"), headers=headers, method="POST"
     )
     try:
-        with urllib.request.urlopen(request, timeout=cfg.webhook.timeout_seconds) as resp:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=cfg.ntfy.timeout_seconds) as resp:  # noqa: S310
             resp.read()
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        log.error("failed to send webhook alert: %s", exc)
+        log.error("failed to send ntfy alert: %s", exc)
+
+
+#: Twilio bills SMS per ~153-character segment; cap the body so one alert
+#: can't silently balloon into a dozen billed segments.
+_TWILIO_MAX_BODY_LEN = 480
+_TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+
+
+def send_twilio(findings: list[Finding], cfg: AlertConfig) -> None:
+    if not cfg.twilio.enabled or not findings:
+        return
+    if not (
+        cfg.twilio.account_sid and cfg.twilio.auth_token
+        and cfg.twilio.from_number and cfg.twilio.to_numbers
+    ):
+        log.warning(
+            "twilio alerts enabled but account_sid/auth_token/from_number/to_numbers "
+            "not fully configured; skipping"
+        )
+        return
+
+    body = _format_findings_compact(findings, max_len=_TWILIO_MAX_BODY_LEN)
+    url = _TWILIO_API_URL.format(sid=cfg.twilio.account_sid)
+    auth = base64.b64encode(f"{cfg.twilio.account_sid}:{cfg.twilio.auth_token}".encode()).decode()
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": f"Basic {auth}",
+        "User-Agent": "lanfence",
+    }
+
+    for to_number in cfg.twilio.to_numbers:
+        payload = urllib.parse.urlencode(
+            {"From": cfg.twilio.from_number, "To": to_number, "Body": body}
+        ).encode("utf-8")
+        request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=cfg.twilio.timeout_seconds) as resp:  # noqa: S310
+                resp.read()
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            log.error("failed to send Twilio SMS to %s: %s", to_number, exc)
 
 
 def dispatch(findings: list[Finding], cfg: AlertConfig) -> list[Finding]:
@@ -131,4 +265,9 @@ def dispatch(findings: list[Finding], cfg: AlertConfig) -> list[Finding]:
     send_syslog(to_send, cfg)
     send_email(to_send, cfg)
     send_webhook(to_send, cfg)
+    send_slack(to_send, cfg)
+    send_discord(to_send, cfg)
+    send_teams(to_send, cfg)
+    send_ntfy(to_send, cfg)
+    send_twilio(to_send, cfg)
     return to_send
