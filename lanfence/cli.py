@@ -8,9 +8,14 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
+import shlex
+import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -386,6 +391,161 @@ def check(
         )
 
     raise typer.Exit(code=0 if db_ok else 1)
+
+
+_PYPI_JSON_URL = "https://pypi.org/pypi/lanfence/json"
+
+
+def _pypi_latest_version(timeout: float = 6.0) -> Optional[str]:
+    """The newest lanfence version on PyPI, queried directly (no local pip
+    index cache involved), or ``None`` if PyPI could not be reached."""
+
+    req = urllib.request.Request(_PYPI_JSON_URL, headers={"User-Agent": f"lanfence/{__version__}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - https literal
+            data = json.load(resp)
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+    return (data.get("info") or {}).get("version")
+
+
+def _version_key(value: str) -> tuple:
+    key: list = []
+    for part in value.replace("-", ".").replace("+", ".").split("."):
+        key.append((0, int(part)) if part.isdigit() else (1, part))
+    return tuple(key)
+
+
+def _is_editable_install() -> bool:
+    try:
+        from importlib.metadata import distribution
+
+        raw = distribution("lanfence").read_text("direct_url.json")
+        if raw:
+            return bool(json.loads(raw).get("dir_info", {}).get("editable"))
+    except (ImportError, OSError, ValueError):  # metadata absent / malformed
+        pass
+    return False
+
+
+#: Conservative POSIX login-name shape; also bounds what we hand to ``sudo -u``.
+_USERNAME_RE = re.compile(r"\A[a-z_][a-z0-9_-]{0,31}\Z")
+
+
+def _valid_local_user(name: Optional[str]) -> Optional[str]:
+    """Return ``name`` (canonicalised) only if it is a well-formed login name
+    of a real local account. Guards values passed to ``sudo -u`` - notably
+    ``$SUDO_USER``, which is attacker-influenceable if root's environment is
+    already tainted."""
+
+    if not name or not _USERNAME_RE.match(name):
+        return None
+    try:
+        import pwd
+
+        return pwd.getpwnam(name).pw_name
+    except (KeyError, ImportError):  # not a local account / non-POSIX
+        return None
+
+
+def _path_owner(path: str) -> Optional[str]:
+    """Login name that owns ``path`` (a pipx venv is owned by its installer)."""
+
+    try:
+        import pwd
+
+        return pwd.getpwuid(Path(path).stat().st_uid).pw_name
+    except (OSError, KeyError, ImportError):  # stat failure / unknown uid / non-POSIX
+        return None
+
+
+def _is_pipx_install() -> bool:
+    prefix = str(Path(sys.prefix).resolve())
+    return "/pipx/" in prefix or os.path.basename(os.path.dirname(prefix)) == "venvs"
+
+
+def _upgrade_command() -> Optional[list[str]]:
+    """The command that upgrades *this* install, or ``None`` if that can't be
+    guessed (a source checkout, or an install this doesn't recognize)."""
+
+    if __version__.endswith("+dev") or _is_editable_install():
+        return None  # source checkout - `git pull`
+    if _is_pipx_install():
+        # `--pip-args=--no-cache-dir` bypasses pip's wheel/index cache for this
+        # one upgrade (rather than purging the shared pip cache outright, which
+        # would affect every other package too) - the point is a release that
+        # just published on PyPI is never masked by a stale cached wheel.
+        cmd = ["pipx", "upgrade", "lanfence", "--pip-args=--no-cache-dir"]
+        # `sudo lanfence upgrade` runs as root, but a pipx install lives in the
+        # *user's* home - pipx as root can't see it. Drop back to the invoking
+        # user. Both candidate names are validated as real local accounts
+        # before they reach `sudo -u`.
+        owner = _valid_local_user(os.environ.get("SUDO_USER")) or _valid_local_user(
+            _path_owner(str(Path(sys.prefix).resolve()))
+        )
+        if _is_root() and owner and owner != "root":
+            return ["sudo", "-u", owner, "-H", *cmd]
+        return cmd
+    return [sys.executable, "-m", "pip", "install", "--upgrade", "--no-cache-dir", "lanfence"]
+
+
+@app.command()
+def upgrade(
+    check: bool = typer.Option(
+        False, "--check", help="Only report whether an update is available; do not install."
+    ),
+) -> None:
+    """Check PyPI for a newer lanfence and (unless --check) install it.
+
+    Queries PyPI directly rather than trusting a local pip index cache, and
+    for a pipx install runs the upgrade with `--pip-args=--no-cache-dir` so a
+    release that just published can't be masked by a stale cached wheel.
+    """
+
+    typer.echo(f"installed: {__version__}")
+    latest = _pypi_latest_version()
+    if latest is None:
+        typer.secho("could not reach PyPI to check for updates.", fg="red", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"latest on PyPI: {latest}")
+
+    if __version__.endswith("+dev") or _is_editable_install():
+        typer.secho(
+            "this is a source / editable checkout - `git pull` to update.",
+            fg="bright_black",
+        )
+        raise typer.Exit(code=0)
+
+    if _version_key(latest) <= _version_key(__version__):
+        typer.secho("lanfence is up to date.", fg="green")
+        raise typer.Exit(code=0)
+
+    typer.secho(f"\nlanfence {latest} is available.", fg="yellow", bold=True)
+    cmd = _upgrade_command()
+    if cmd and cmd[0] == "sudo":
+        typer.secho(
+            f"(this is a pipx install owned by {cmd[2]}; upgrading as that user)",
+            fg="bright_black",
+        )
+    if check or cmd is None:
+        if cmd is None:
+            typer.echo(
+                "this install is managed elsewhere - upgrade it the same way you installed it."
+            )
+        else:
+            typer.echo(f"to upgrade:  {shlex.join(cmd)}")
+        raise typer.Exit(code=10)
+
+    typer.secho(f"running: {shlex.join(cmd)}\n", fg="bright_black")
+    try:
+        result = subprocess.run(cmd, check=False)  # noqa: S603 - argv list, no shell
+    except FileNotFoundError:
+        typer.secho(f"error: {cmd[0]} not found on PATH.", fg="red", err=True)
+        raise typer.Exit(code=1) from None
+    if result.returncode != 0:
+        typer.secho("upgrade command failed - see its output above.", fg="red", err=True)
+        raise typer.Exit(code=result.returncode)
+    typer.secho("\nupgraded. run `lanfence --version` to confirm.", fg="green")
 
 
 def main() -> None:  # pragma: no cover - entry point shim

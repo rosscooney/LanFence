@@ -101,6 +101,8 @@ lanfence allow --list           # show the allowlist
 lanfence allow --remove <MAC>   # untrust a device
 lanfence report --since 24h     # summarize events/findings from the database
 lanfence check                  # verify permissions, scapy, interface, storage
+lanfence upgrade                # check PyPI and install a newer release, if any
+lanfence upgrade --check        # only report whether an update is available
 ```
 
 ### Example: an unknown device joins

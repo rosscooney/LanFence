@@ -15,6 +15,22 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-11
+
+### Added
+
+- `lanfence upgrade` - checks PyPI directly for a newer release (so a stale
+  local pip index cache can't hide it), works out how this copy was installed
+  (`pipx`, plain `pip`/venv, or an editable source checkout) and runs the
+  matching upgrade command. For a `pipx` install this runs
+  `pipx upgrade lanfence --pip-args=--no-cache-dir`, bypassing the cache for
+  that one upgrade so a release that just published on PyPI is never masked
+  by a stale cached wheel. `--check` reports whether an update is available
+  (exit code `10`) without installing it. Running as root against a `pipx`
+  install (e.g. `sudo lanfence upgrade`) correctly drops back to the
+  invoking/owning user via `sudo -u`, since a pipx venv lives in a user's
+  home and is invisible to `pipx` run as root.
+
 ## [0.1.1] - 2026-09-11
 
 ### Changed
@@ -75,6 +91,7 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rosscooney/lanfence/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/rosscooney/lanfence/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/rosscooney/lanfence/releases/tag/v0.1.0
