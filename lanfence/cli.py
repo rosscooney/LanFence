@@ -130,8 +130,29 @@ def _launcher_path() -> Optional[Path]:
     return None
 
 
+def _invoking_uid() -> int:
+    """The UID of the human actually running this command, even once
+    :func:`_reexec_with_sudo` has escalated the process to root.
+
+    ``sudo`` sets ``SUDO_UID`` to the invoking user before exec'ing as root -
+    without consulting it here, a post-escalation check would see euid 0 and
+    (correctly, but for the wrong question) find "root" absent from the
+    original user's own group, wrongly treating a perfectly normal umask-002
+    pipx install as shared with a stranger. Falls back to the real euid when
+    not running under sudo (already root, or invoked directly).
+    """
+
+    sudo_uid = os.environ.get("SUDO_UID")
+    if sudo_uid is not None:
+        try:
+            return int(sudo_uid)
+        except ValueError:
+            pass
+    return os.geteuid()
+
+
 def _group_write_is_self_only(st: os.stat_result) -> bool:
-    """True if the current user is the *only* account in ``st``'s group.
+    """True if the invoking user is the *only* account in ``st``'s group.
 
     Debian and Raspberry Pi OS default new users to ``umask 002``, so a fresh
     pipx venv (``~/.local/share/pipx/venvs/...``) is group-writable by the
@@ -144,7 +165,7 @@ def _group_write_is_self_only(st: os.stat_result) -> bool:
         import grp
         import pwd
 
-        me = pwd.getpwuid(os.geteuid()).pw_name
+        me = pwd.getpwuid(_invoking_uid()).pw_name
         members = set(grp.getgrgid(st.st_gid).gr_mem)
         # anyone whose *primary* group is this one is a member too, even
         # though getgrgid() only lists supplementary members.
@@ -405,6 +426,29 @@ def monitor(
         last_sweep = 0.0
         while True:
             now = time.monotonic()
+
+            # Drain any queued passive sightings *before* this tick's active
+            # sweep gets a chance to evaluate offline transitions - a device
+            # already positively sighted (but not yet drained from the
+            # queue) must not be wrongly counted as a missed sweep and then,
+            # moments later, flagged reappeared once its queued sighting is
+            # finally processed. The passive thread only ever calls
+            # `passive_queue.put` (see `_run_passive` above) - all database
+            # access, here, stays on this single owning thread.
+            drained = 0
+            while drained < 200:
+                try:
+                    sighting = passive_queue.get_nowait()
+                except queue.Empty:
+                    break
+                drained += 1
+                _, _event_type, findings = process_sighting(
+                    mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
+                    store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
+                    hostname_hint=sighting.hostname, interface=iface, subnet=net,
+                )
+                _emit_findings(findings, alert=alert, cfg=cfg, store=store)
+
             if now - last_sweep >= cfg.scan.scan_interval_seconds:
                 # Reload on the same cadence as active sweeps, so a `lanfence
                 # allow` / `review --trust` made while this monitor is
@@ -416,24 +460,15 @@ def monitor(
                 except Exception as exc:  # noqa: BLE001 - a bad edit must not crash monitoring
                     typer.secho(f"warning: could not reload allowlist: {exc}", fg="yellow", err=True)
                 result = run_active_sweep(cfg, store, allowlist, signatures, interface=iface, subnet=net)
+                # Keep using the just-resolved subnet for passive sightings
+                # drained between now and the next sweep, so their coverage
+                # provenance (see DeviceStore.observe) matches what this
+                # sweep actually covered rather than staying unresolved.
+                net = result.subnet or net
                 last_sweep = now
                 for err in result.errors:
                     typer.secho(f"error: {err}", fg="red", err=True)
                 _emit_findings(result.findings, alert=alert, cfg=cfg, store=store)
-
-            drained = 0
-            while drained < 200:
-                try:
-                    sighting = passive_queue.get_nowait()
-                except queue.Empty:
-                    break
-                drained += 1
-                _, _event_type, findings = process_sighting(
-                    mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
-                    store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
-                    hostname_hint=sighting.hostname,
-                )
-                _emit_findings(findings, alert=alert, cfg=cfg, store=store)
 
             time.sleep(1.0)
     except KeyboardInterrupt:

@@ -4,19 +4,29 @@
 """Persistent SQLite store of every device LAN Fence has ever seen.
 
 Four tables: ``devices`` holds the current state of each MAC address (first
-seen, last seen, online/offline); ``events`` is an append-only log of
-lifecycle transitions (new / reappeared / disconnected) used by ``lanfence
-report``; ``alert_log`` tracks the last external-alert dispatch per MAC, used
-by :meth:`DeviceStore.due_for_alert` to cool down repeated alerts for a
-flapping device; ``device_review`` tracks the ``lanfence review`` state
-(snoozed/investigating) per MAC, used by ``lanfence devices``/``device``/
-``review``. Trust itself is *not* stored here - it lives in the YAML
-allowlist (see ``lanfence/allowlist.py``); this table only tracks the
-review workflow around a still-untrusted device.
+seen, last seen, online/offline, and - for the offline-grace-period feature -
+its consecutive-missed-scan count and discovery provenance); ``events`` is an
+append-only log of lifecycle transitions (new / reappeared / disconnected)
+used by ``lanfence report``; ``alert_log`` tracks the last external-alert
+dispatch per MAC, used by :meth:`DeviceStore.due_for_alert` to cool down
+repeated alerts for a flapping device; ``device_review`` tracks the
+``lanfence review`` state (snoozed/investigating) per MAC, used by ``lanfence
+devices``/``device``/``review``. Trust itself is *not* stored here - it lives
+in the YAML allowlist (see ``lanfence/allowlist.py``); this table only tracks
+the review workflow around a still-untrusted device.
+
+``devices``' ``missed_scans``/``seen_via_ipv4``/``seen_via_ipv6``/
+``last_interface``/``ipv4_subnet`` columns are provenance for
+:meth:`DeviceStore.mark_offline` - see its docstring for how they gate an
+offline transition. A row from before this feature existed has all of them
+at their defaults (0/0/0/NULL/NULL), which reads as "no known coverage yet";
+:meth:`mark_offline` treats that conservatively (never a miss) until a fresh
+sighting establishes real provenance, rather than guessing.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +42,12 @@ CREATE TABLE IF NOT EXISTS devices (
     vendor TEXT,
     status TEXT NOT NULL DEFAULT 'online',
     first_seen TEXT NOT NULL,
-    last_seen TEXT NOT NULL
+    last_seen TEXT NOT NULL,
+    missed_scans INTEGER NOT NULL DEFAULT 0,
+    seen_via_ipv4 INTEGER NOT NULL DEFAULT 0,
+    seen_via_ipv6 INTEGER NOT NULL DEFAULT 0,
+    last_interface TEXT,
+    ipv4_subnet TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -71,6 +86,29 @@ def _parse_dt(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+#: Columns added after the initial release of each table, applied to an
+#: existing (pre-upgrade) database idempotently - SQLite has no
+#: ``ADD COLUMN IF NOT EXISTS``, so :func:`_ensure_columns` checks
+#: ``PRAGMA table_info`` itself before altering. A brand-new database
+#: already has every column via ``_SCHEMA`` above, so this is a no-op there.
+_MIGRATED_COLUMNS: dict[str, dict[str, str]] = {
+    "devices": {
+        "missed_scans": "missed_scans INTEGER NOT NULL DEFAULT 0",
+        "seen_via_ipv4": "seen_via_ipv4 INTEGER NOT NULL DEFAULT 0",
+        "seen_via_ipv6": "seen_via_ipv6 INTEGER NOT NULL DEFAULT 0",
+        "last_interface": "last_interface TEXT",
+        "ipv4_subnet": "ipv4_subnet TEXT",
+    },
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, decl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {decl}")
+
+
 def _row_to_device(row: sqlite3.Row) -> Device:
     return Device(
         mac=row["mac"],
@@ -90,6 +128,8 @@ class DeviceStore:
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        for table, columns in _MIGRATED_COLUMNS.items():
+            _ensure_columns(self._conn, table, columns)
         self._conn.commit()
 
     def close(self) -> None:
@@ -240,8 +280,26 @@ class DeviceStore:
         hostname: str | None,
         vendor: str | None,
         seen_at: datetime,
+        interface: str | None = None,
+        subnet: str | None = None,
     ) -> tuple[Device, EventType | None]:
         """Record that ``mac`` was seen alive at ``seen_at``.
+
+        ``interface`` and ``subnet`` (an IPv4 CIDR - ignored for an IPv6
+        sighting) are discovery provenance for :meth:`mark_offline`'s
+        offline-transition eligibility check; they are not reflected on
+        :class:`Device` itself. Address family is inferred from ``ip``, not
+        taken as a parameter, so a device's *known* IPv4/IPv6 coverage
+        (``seen_via_ipv4``/``seen_via_ipv6``) only ever grows - it is never
+        inferred solely from whichever address happens to be stored most
+        recently, since IPv4 and IPv6 sightings of the same MAC overwrite
+        the same ``ip`` column.
+
+        Any positive sighting - even one older than the device's current
+        ``last_seen`` (e.g. a delayed passive-queue entry) - is live proof
+        the device isn't absent: it always resets the missed-sweep count to
+        zero and widens known coverage. It only ever guards against moving
+        ``last_seen``/``ip``/``hostname`` *backwards* in time.
 
         Returns the updated :class:`Device` and, if this observation is a
         lifecycle transition, the corresponding event type (``new_device`` the
@@ -252,20 +310,52 @@ class DeviceStore:
         existing = self.get_device(mac)
         event_type: EventType | None = None
 
+        is_ipv4 = False
+        is_ipv6 = False
+        if ip:
+            try:
+                is_ipv4 = ipaddress.ip_address(ip).version == 4
+                is_ipv6 = not is_ipv4
+            except ValueError:
+                pass
+        ipv4_subnet = subnet if is_ipv4 else None
+
         if existing is None:
             event_type = "new_device"
             self._conn.execute(
-                "INSERT INTO devices (mac, ip, hostname, vendor, status, first_seen, last_seen) "
-                "VALUES (?, ?, ?, ?, 'online', ?, ?)",
-                (mac, ip, hostname, vendor, _iso(seen_at), _iso(seen_at)),
+                "INSERT INTO devices (mac, ip, hostname, vendor, status, first_seen, last_seen, "
+                "missed_scans, seen_via_ipv4, seen_via_ipv6, last_interface, ipv4_subnet) "
+                "VALUES (?, ?, ?, ?, 'online', ?, ?, 0, ?, ?, ?, ?)",
+                (mac, ip, hostname, vendor, _iso(seen_at), _iso(seen_at),
+                 int(is_ipv4), int(is_ipv6), interface, ipv4_subnet),
             )
         else:
             if existing.status == "offline":
                 event_type = "reappeared"
+            advance = seen_at >= existing.last_seen
             self._conn.execute(
-                "UPDATE devices SET ip = ?, hostname = ?, vendor = COALESCE(?, vendor), "
-                "status = 'online', last_seen = ? WHERE mac = ?",
-                (ip, hostname, vendor, _iso(seen_at), mac),
+                "UPDATE devices SET "
+                "ip = CASE WHEN ? THEN ? ELSE ip END, "
+                "hostname = CASE WHEN ? THEN ? ELSE hostname END, "
+                "vendor = COALESCE(?, vendor), "
+                "status = 'online', "
+                "last_seen = CASE WHEN ? THEN ? ELSE last_seen END, "
+                "missed_scans = 0, "
+                "seen_via_ipv4 = seen_via_ipv4 OR ?, "
+                "seen_via_ipv6 = seen_via_ipv6 OR ?, "
+                "last_interface = COALESCE(?, last_interface), "
+                "ipv4_subnet = COALESCE(?, ipv4_subnet) "
+                "WHERE mac = ?",
+                (
+                    advance, ip,
+                    advance, hostname,
+                    vendor,
+                    advance, _iso(seen_at),
+                    int(is_ipv4), int(is_ipv6),
+                    interface,
+                    ipv4_subnet,
+                    mac,
+                ),
             )
         self._conn.commit()
 
@@ -313,24 +403,98 @@ class DeviceStore:
         self._conn.commit()
         return True
 
-    def mark_offline(self, still_online_macs: set[str], *, as_of: datetime) -> list[DeviceEvent]:
-        """Mark every currently-online device NOT in ``still_online_macs`` offline.
+    def mark_offline(
+        self,
+        still_online_macs: set[str],
+        *,
+        as_of: datetime,
+        grace_seconds: float = 0.0,
+        missed_after: int = 1,
+        ipv4_covered: bool = True,
+        ipv4_subnet: str | None = None,
+        ipv6_covered: bool = True,
+        interface: str | None = None,
+    ) -> list[DeviceEvent]:
+        """Evaluate every currently-online device NOT in ``still_online_macs``
+        for an offline transition; call this once per completed active-scan
+        sweep.
 
-        Call this once per completed active-scan sweep so devices that stopped
-        responding are recorded as disconnected.
+        A device is only actually marked offline once BOTH: its consecutive
+        *eligible* missed-sweep count reaches ``missed_after``, and the time
+        elapsed since its ``last_seen`` reaches ``grace_seconds``. The
+        defaults (0 seconds, 1 missed scan) reproduce the pre-grace-period
+        behavior of disconnecting on the very first miss - callers that want
+        the grace period pass ``cfg.scan.offline_grace_seconds``/
+        ``offline_after_missed_scans`` explicitly (see
+        :func:`lanfence.engine.run_active_sweep`).
+
+        A "miss" only counts as eligible evidence of absence when this sweep
+        actually covered the device's *known* discovery path(s):
+
+        - A device with no recorded provenance at all (``seen_via_ipv4`` and
+          ``seen_via_ipv6`` both false - e.g. a row from before this feature
+          existed) is skipped entirely and conservatively: we don't know
+          what this sweep did or didn't cover for it, so it is left alone
+          until a fresh sighting establishes real coverage.
+        - A device known via IPv4 only counts a miss when ``ipv4_covered``
+          is true (the IPv4 sweep actually ran and succeeded, even if it
+          found nothing - a successful empty scan is real evidence) AND, if
+          both the device's recorded ``ipv4_subnet``/``interface`` and this
+          sweep's are known, they match - a scan of a different subnet or
+          interface says nothing about this device.
+        - A device known via IPv6 only is the mirror of the above with
+          ``ipv6_covered``/``interface``.
+        - A device known via *both* requires both paths covered - any
+          positive sighting (on either path) already keeps it online via
+          :meth:`observe`, so reaching here at all means neither path saw it
+          this sweep; conservatively, that only counts as absence if this
+          sweep examined both of its known paths.
+
+        Marking a device offline never advances ``last_seen`` - it stays the
+        timestamp of the device's actual last sighting, not of the moment its
+        absence was confirmed (that moment is the emitted event's own
+        ``timestamp``).
         """
 
         events: list[DeviceEvent] = []
-        for device in self.online_devices():
-            if device.mac in still_online_macs:
+        rows = self._conn.execute(
+            "SELECT mac, ip, hostname, last_seen, missed_scans, seen_via_ipv4, seen_via_ipv6, "
+            "last_interface, ipv4_subnet FROM devices WHERE status = 'online'"
+        ).fetchall()
+
+        for row in rows:
+            mac = row["mac"]
+            if mac in still_online_macs:
                 continue
-            self._conn.execute(
-                "UPDATE devices SET status = 'offline', last_seen = ? WHERE mac = ?",
-                (_iso(as_of), device.mac),
+
+            seen_via_ipv4 = bool(row["seen_via_ipv4"])
+            seen_via_ipv6 = bool(row["seen_via_ipv6"])
+            if not (seen_via_ipv4 or seen_via_ipv6):
+                continue  # no known coverage yet - conservative no-op
+
+            interface_ok = (
+                interface is None or row["last_interface"] is None or row["last_interface"] == interface
             )
-            event = DeviceEvent(mac=device.mac, event_type="disconnected", timestamp=as_of,
-                                 ip=device.ip, hostname=device.hostname)
-            self.record_event(event)
-            events.append(event)
+            subnet_ok = (
+                ipv4_subnet is None or row["ipv4_subnet"] is None or row["ipv4_subnet"] == ipv4_subnet
+            )
+            ipv4_ok = (not seen_via_ipv4) or (ipv4_covered and interface_ok and subnet_ok)
+            ipv6_ok = (not seen_via_ipv6) or (ipv6_covered and interface_ok)
+            if not (ipv4_ok and ipv6_ok):
+                continue  # this sweep didn't examine (all of) this device's known paths
+
+            missed = row["missed_scans"] + 1
+            elapsed = (as_of - _parse_dt(row["last_seen"])).total_seconds()
+            if missed >= missed_after and elapsed >= grace_seconds:
+                self._conn.execute(
+                    "UPDATE devices SET status = 'offline', missed_scans = 0 WHERE mac = ?", (mac,)
+                )
+                event = DeviceEvent(mac=mac, event_type="disconnected", timestamp=as_of,
+                                     ip=row["ip"], hostname=row["hostname"])
+                self.record_event(event)
+                events.append(event)
+            else:
+                self._conn.execute("UPDATE devices SET missed_scans = ? WHERE mac = ?", (missed, mac))
+
         self._conn.commit()
         return events

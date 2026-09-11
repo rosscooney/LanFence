@@ -622,7 +622,14 @@ def test_monitor_picks_up_trust_change_without_restart(tmp_path: Path, monkeypat
         yaml.safe_dump({
             "db_path": str(db_path),
             "allowlist_file": str(allowlist_path),
-            "scan": {"scan_interval_seconds": 0.001, "resolve_hostnames": False},
+            "scan": {
+                "scan_interval_seconds": 0.001, "resolve_hostnames": False,
+                # Compatibility settings: disconnect on the device's very
+                # first missed sweep (sweep 2 below), rather than waiting out
+                # the default grace period/miss threshold - this test is
+                # about trust-reload timing, not the grace period itself.
+                "offline_grace_seconds": 0, "offline_after_missed_scans": 1,
+            },
         }),
         encoding="utf-8",
     )
@@ -701,3 +708,82 @@ def test_monitor_picks_up_trust_change_without_restart(tmp_path: Path, monkeypat
     # made between sweeps 1 and 2, without restarting the monitor process.
     assert findings_seen[2][0].severity == "info"
     assert findings_seen[2][0].mac == sighting_mac
+
+
+def test_monitor_queued_passive_sighting_prevents_false_disconnect_reappear(
+    tmp_path: Path, monkeypatch
+):
+    """Regression test for the ordering fix: a passive sighting sitting in
+    the queue at the moment an active sweep's absence check runs must be
+    incorporated first - otherwise a device that never actually left would
+    get a spurious disconnected event immediately followed by a reappeared
+    one, in the same tick, once the queue is finally drained."""
+
+    from lanfence import scanner as scanner_module
+
+    db_path = tmp_path / "lanfence.db"
+    allowlist_path = tmp_path / "allowlist.yaml"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(db_path),
+            "allowlist_file": str(allowlist_path),
+            "scan": {
+                "scan_interval_seconds": 0.001, "resolve_hostnames": False,
+                "interface": "eth0", "subnet": "10.0.0.0/24",
+                "offline_grace_seconds": 180, "offline_after_missed_scans": 1,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    sighting_mac = "00:11:22:33:44:55"
+
+    # Seeded as already online but last positively seen an hour ago (well
+    # past the 180s grace period) and with a clean miss count - if the
+    # active sweep's absence check ran *before* the queued passive sighting
+    # below were incorporated, this alone would be enough to disconnect it.
+    old = _now() - timedelta(hours=1)
+    with DeviceStore(db_path) as store:
+        store.observe(
+            mac=sighting_mac, ip="10.0.0.5", hostname=None, vendor=None, seen_at=old,
+            interface="eth0", subnet="10.0.0.0/24",
+        )
+
+    class _SyncThread:
+        """Runs the passive-sniff "thread" inline, synchronously, before the
+        monitor loop starts - so the queued sighting below is deterministically
+        present for the very first drain, with no real thread-scheduling race."""
+
+        def __init__(self, target=None, **_kwargs):
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    def fake_passive_sniff(*, on_sighting, interface=None, stop_event=None, dhcp=True):
+        on_sighting(scanner_module.ArpSighting(mac=sighting_mac, ip="10.0.0.5", seen_at=_now()))
+
+    monkeypatch.setattr("lanfence.cli.threading.Thread", _SyncThread)
+    monkeypatch.setattr("lanfence.cli.scanner.passive_sniff", fake_passive_sniff)
+    monkeypatch.setattr(
+        "lanfence.cli.scanner.active_scan",
+        lambda *, subnet, interface=None, timeout=3.0: [],  # the active sweep itself misses it
+    )
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr(
+        "lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+
+    result = runner.invoke(app, ["monitor", "--no-ipv6", "--config", str(config_path)])
+    assert result.exit_code == 0
+
+    with DeviceStore(db_path) as store:
+        device = store.get_device(sighting_mac)
+        events = store.events_for(sighting_mac)
+
+    assert device.status == "online"
+    # Only the original seeding event - no spurious disconnected/reappeared
+    # pair generated within this tick.
+    assert [e.event_type for e in events] == ["new_device"]

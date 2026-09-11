@@ -216,6 +216,16 @@ def test_run_active_sweep_total_failure_does_not_mark_devices_offline(tmp_path: 
     assert len(result.errors) == 2
 
 
+def _cfg_immediate_offline() -> Config:
+    """Compatibility settings that restore pre-grace-period behavior:
+    disconnect on the very first eligible missed sweep."""
+
+    cfg = Config()
+    cfg.scan.offline_grace_seconds = 0
+    cfg.scan.offline_after_missed_scans = 1
+    return cfg
+
+
 def test_run_active_sweep_partial_success_still_marks_offline(tmp_path: Path):
     """When at least one mechanism succeeds, a device not seen by it is a
     real disconnect, even if the other mechanism failed."""
@@ -227,7 +237,7 @@ def test_run_active_sweep_partial_success_still_marks_offline(tmp_path: Path):
          patch.object(scanner, "active_scan", return_value=[v4]), \
          patch.object(scanner, "active_scan_v6", return_value=[]):
         store = DeviceStore(db_path)
-        run_active_sweep(Config(), store, Allowlist.load(None), SignatureSet.load(),
+        run_active_sweep(_cfg_immediate_offline(), store, Allowlist.load(None), SignatureSet.load(),
                           interface="eth0", subnet="192.168.1.0/24")
         store.close()
 
@@ -235,13 +245,84 @@ def test_run_active_sweep_partial_success_still_marks_offline(tmp_path: Path):
          patch.object(scanner, "active_scan", return_value=[]), \
          patch.object(scanner, "active_scan_v6", side_effect=scanner.ScannerUnavailable("no root v6")):
         store = DeviceStore(db_path)
-        result = run_active_sweep(Config(), store, Allowlist.load(None), SignatureSet.load(),
+        result = run_active_sweep(_cfg_immediate_offline(), store, Allowlist.load(None), SignatureSet.load(),
                                    interface="eth0", subnet="192.168.1.0/24")
         still_online = store.get_device("aa:bb:cc:dd:ee:ff").status
         store.close()
 
     assert still_online == "offline"
     assert any(e.event_type == "disconnected" for e in result.events)
+
+
+def test_run_active_sweep_respects_grace_period_across_multiple_sweeps(tmp_path: Path):
+    """Integration test: with the default-shaped grace config, a device
+    misses two sweeps and stays online, then a third eligible miss (with the
+    grace period also elapsed) actually disconnects it."""
+
+    db_path = tmp_path / "db.sqlite"
+    v4 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    cfg = Config()
+    cfg.scan.ipv6 = False
+    cfg.scan.offline_grace_seconds = 0
+    cfg.scan.offline_after_missed_scans = 3
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[v4]):
+        store = DeviceStore(db_path)
+        run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                          interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]):
+        store = DeviceStore(db_path)
+        for _ in range(2):
+            result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                       interface="eth0", subnet="192.168.1.0/24")
+            assert result.events == []
+            assert store.get_device("aa:bb:cc:dd:ee:ff").status == "online"
+
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+
+    assert any(e.event_type == "disconnected" for e in result.events)
+
+
+def test_run_active_sweep_records_ipv4_and_ipv6_coverage_independently(tmp_path: Path):
+    """A device seen via both IPv4 and IPv6 in one sweep, then missed by
+    IPv6 only in the next, must not be disconnected - both known paths are
+    required (see DeviceStore.mark_offline)."""
+
+    db_path = tmp_path / "db.sqlite"
+    v4 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    v6 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="fe80::1", seen_at=_now())
+    cfg = Config()
+    cfg.scan.offline_grace_seconds = 0
+    cfg.scan.offline_after_missed_scans = 1
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[v4]), \
+         patch.object(scanner, "active_scan_v6", return_value=[v6]):
+        store = DeviceStore(db_path)
+        run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                          interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+
+    # Next sweep: IPv4 still sees it, IPv6 sweep runs but doesn't - since the
+    # active-scan merge treats "seen at all" as online for this tick, no miss
+    # is recorded regardless (any positive sighting keeps a device online).
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[v4]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]):
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        status = store.get_device("aa:bb:cc:dd:ee:ff").status
+        store.close()
+
+    assert status == "online"
+    assert result.events == []
 
 
 # --- filter_rate_limited ------------------------------------------------

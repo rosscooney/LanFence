@@ -15,6 +15,12 @@ scan:
   dhcp_snooping: true          # snoop DHCP for a self-reported hostname (needs passive: true)
   resolve_hostnames: true      # try reverse DNS for each device
   dns_timeout_seconds: 1
+  offline_grace_seconds: 180   # how long a missed device stays "online" (not yet confirmed absent)
+  offline_after_missed_scans: 3 # ...AND this many consecutive eligible misses, before going offline
+  # Both conditions above must be reached before a device is marked offline -
+  # and only an active sweep can reach them; elapsed time alone never does.
+  # offline_grace_seconds: 0 and offline_after_missed_scans: 1 restores the
+  # old immediate-disconnect-on-first-miss behavior.
 
 alerts:
   min_severity: medium         # info | medium | high - dispatch threshold

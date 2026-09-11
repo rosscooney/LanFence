@@ -65,6 +65,22 @@ def test_group_write_is_self_only_false_for_supplementary_member():
         assert _group_write_is_self_only(st) is False
 
 
+def test_group_write_is_self_only_true_after_sudo_reexec_via_sudo_uid():
+    """Regression test: `lanfence link` re-execs itself under sudo, so this
+    check runs with euid 0 (root) by the time it's called. Without honoring
+    SUDO_UID, "me" would resolve to "root" - which the invoking user's own
+    private group never contains - and a perfectly normal umask-002 pipx
+    install would be wrongly refused as "writable by other users"."""
+
+    st = _FakeStat(st_gid=1000)
+    with patch("lanfence.cli.os.geteuid", return_value=0), \
+         patch.dict(os.environ, {"SUDO_UID": "1000"}), \
+         patch("grp.getgrgid", return_value=_FakeGroup([])), \
+         patch("pwd.getpwuid", return_value=_FakePwEntry("alice", 1000)), \
+         patch("pwd.getpwall", return_value=[_FakePwEntry("alice", 1000)]):
+        assert _group_write_is_self_only(st) is True
+
+
 def test_trusted_to_run_as_root_true_for_umask_002_self_owned_group(tmp_path: Path):
     """Regression test: a fresh pipx venv on Debian/Raspberry Pi OS (default
     umask 002) is group-writable by the user's own primary group, which

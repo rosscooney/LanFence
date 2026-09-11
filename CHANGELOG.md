@@ -17,6 +17,32 @@ Each release is also published to
 
 ### Added
 
+- **Configurable offline grace periods.** A device is no longer marked
+  offline the instant one active sweep misses it. New `scan.offline_grace_seconds`
+  (default `180`) and `scan.offline_after_missed_scans` (default `3`) require
+  BOTH a consecutive-miss threshold and an elapsed-time grace period before a
+  `disconnected` event fires - "online" during that window means "not yet
+  confirmed absent." Only a completed active sweep ever evaluates an offline
+  transition (elapsed wall time alone never does), and only a sweep that
+  actually covered a device's known discovery path (interface, address
+  family, and IPv4 subnet) counts as an eligible miss - a failed, skipped, or
+  out-of-scope sweep never does, so a successful IPv6 scan can't disconnect
+  an IPv4-only device whose IPv4 scan failed (and vice versa), and switching
+  interface/subnet can't disconnect devices from another network. Any
+  positive sighting (active or passive) resets the miss counter and always
+  keeps a device online; `last_seen` is never advanced by an offline
+  transition itself. Discovery provenance (missed-scan count, address
+  family, interface, IPv4 subnet) is tracked in new, backward-compatible
+  `devices` table columns, added idempotently to an existing database; a
+  pre-upgrade device record with no provenance yet is treated conservatively
+  (never counted as missed) until a fresh sighting establishes real
+  coverage. `lanfence monitor`'s passive-sighting queue is now drained
+  before each tick's active-sweep absence check, so a device already
+  positively (but not yet drained) sighted can't be wrongly marked
+  disconnected and then immediately reappeared in the same tick. Set
+  `offline_grace_seconds: 0` and `offline_after_missed_scans: 1` to restore
+  the previous immediate-disconnect-on-first-miss behavior.
+
 - **Device inventory and review.** Three new commands work the database
   without touching the network: `lanfence devices` lists every previously
   observed device (`--status online|offline`, `--untrusted`,
@@ -52,6 +78,16 @@ Each release is also published to
   DHCPDISCOVER for me" active probe. Deliberately scoped to option 12 only:
   DHCP option 55 (parameter-request-list OS fingerprinting) would need a
   maintained mapping table this project has no authoritative source for.
+
+### Fixed
+
+- **`lanfence link` falsely refused a normal pipx install.** Its
+  writable-by-others check ran *after* `link` had already re-exec'd itself
+  under `sudo`, so it asked "is this file's group just me?" while running as
+  root - and root is never a member of the original user's own private
+  group, so a completely standard umask-002 pipx venv was rejected as
+  "writable by other users." The check now resolves the actual invoking
+  user via `SUDO_UID` (set by `sudo`) instead of the post-escalation euid.
 
 ## [0.3.6] - 2026-09-11
 

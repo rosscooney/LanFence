@@ -43,7 +43,9 @@ routinely) and never touches, blocks, deauthenticates or spoofs anything.
 3. Every sighting is folded into a persistent **SQLite database** keyed by MAC
    address, which tracks each device's lifecycle: `new_device` the first time
    it's ever seen, `reappeared` if it had gone offline and came back, and
-   `disconnected` when an active sweep no longer sees it.
+   `disconnected` once an active sweep has confirmed it's actually gone (see
+   "Offline detection and grace periods" below - one missed reply doesn't
+   mean gone).
 4. Each device is **fingerprinted**: an offline OUI → vendor lookup, a set of
    built-in rogue-device signatures (see below), and a check of whether its
    MAC is locally administered (randomized/spoofed rather than
@@ -256,6 +258,67 @@ allowlist on its normal sweep cadence, so a `review --trust` or `allow` made
 from another terminal takes effect without restarting it; review/snooze
 state itself is read fresh from the database on every finding, so it needs
 no such reload.
+
+## Offline detection and grace periods
+
+```yaml
+scan:
+  offline_grace_seconds: 180     # default
+  offline_after_missed_scans: 3  # default
+```
+
+By default, LAN Fence does not mark a device offline the moment one active
+sweep misses it - a single missed ARP reply is normal noise (a device asleep,
+a busy Wi-Fi channel, a dropped packet), not proof a device disconnected. A
+device is only actually marked offline once **both** conditions are true:
+
+1. It has been missed by this many **consecutive eligible** active sweeps in
+   a row (`offline_after_missed_scans`, default `3`); and
+2. At least this much time has passed since it was last actually seen
+   (`offline_grace_seconds`, default `180`).
+
+"Online" during that window means **"not yet confirmed absent," not
+necessarily still connected** - and only an active sweep ever confirms
+absence; elapsed wall-clock time alone never disconnects a device, no matter
+how long `monitor` has been running. That also means **scan cadence sets the
+floor**: with the defaults, a device can't be confirmed offline sooner than
+`offline_after_missed_scans` x `scan_interval_seconds` (3 x the default 60s =
+3 minutes), even though `offline_grace_seconds` is also 180s - raise
+`scan_interval_seconds` and the wait grows accordingly. Any positive sighting
+(from an active sweep *or* passive ARP/ND/DHCP traffic) immediately resets
+the missed-sweep count back to zero and keeps the device online; only a
+completed active sweep is ever authoritative for absence.
+
+A sweep only counts as a genuine "miss" for a device when it actually
+examined that device's known network path - interface, address family, and
+(for IPv4) subnet. A failed, skipped, or out-of-scope sweep never counts:
+
+- If every scan mechanism failed this round (e.g. no root), there is no
+  information at all, and no device is ever marked offline on that basis.
+- A **successful but empty** scan still counts as real evidence of absence
+  for devices within its coverage.
+- If IPv4 scanning failed but IPv6 succeeded (or vice versa), only a device
+  known through the *failed* family is spared - a device known through both
+  needs both covered before a miss counts at all.
+- Switching `--interface`/`--subnet` (or moving to a different network)
+  never marks devices from the *other* network offline - it's simply outside
+  what the current sweep examined.
+- A device's own `last_seen` timestamp is never advanced by going offline -
+  it stays the time it was actually last seen; the `disconnected` event's own
+  timestamp records when the absence was confirmed instead.
+
+**Compatibility**: set `offline_grace_seconds: 0` and
+`offline_after_missed_scans: 1` to restore the pre-grace-period behavior of
+disconnecting on the very first eligible missed sweep.
+
+**Upgrading an existing database**: devices recorded before this feature
+existed have no discovery-path information on file yet. LAN Fence treats
+that conservatively - such a device is never marked offline via the
+missed-scan logic until a fresh sighting (from either an active sweep or
+passive traffic) establishes its real coverage; from then on, normal
+grace-period rules apply. The database schema itself is upgraded
+automatically and idempotently the next time it's opened - no data is lost
+or reset.
 
 ## Running unattended
 

@@ -116,6 +116,8 @@ def process_sighting(
     signatures: SignatureSet,
     cfg: Config,
     hostname_hint: str | None = None,
+    interface: str | None = None,
+    subnet: str | None = None,
 ) -> tuple[Device, EventType | None, list[Finding]]:
     """Fold one MAC/IP sighting into the database and return what changed.
 
@@ -124,13 +126,20 @@ def process_sighting(
     its own name moments ago is at least as trustworthy as a PTR record (both
     are equally spoofable), and skips a DNS round-trip. ``None`` (every ARP/
     NDP sighting) falls back to reverse-DNS exactly as before.
+
+    ``interface``/``subnet`` are passed straight through to
+    :meth:`lanfence.db.DeviceStore.observe` as discovery provenance for the
+    offline-grace-period feature - see its docstring.
     """
 
     hostname = hostname_hint
     if not hostname and cfg.scan.resolve_hostnames:
         hostname = scanner.resolve_hostname(ip, timeout=cfg.scan.dns_timeout_seconds)
     vendor, matches = fingerprint_device(mac, hostname, signatures=signatures, vendor_file=cfg.vendor_file)
-    device, event_type = store.observe(mac=mac, ip=ip, hostname=hostname, vendor=vendor, seen_at=seen_at)
+    device, event_type = store.observe(
+        mac=mac, ip=ip, hostname=hostname, vendor=vendor, seen_at=seen_at,
+        interface=interface, subnet=subnet,
+    )
 
     allow_entry = allowlist.match(mac)
     device = device.model_copy(
@@ -156,13 +165,19 @@ def run_active_sweep(
     """Run one active sweep - ARP, plus IPv6 neighbor discovery if enabled -
     and update the database.
 
-    Unlike a passive sighting, a completed active sweep is authoritative for
-    "what's online right now": any previously-online device not seen in this
-    sweep is marked offline (a ``disconnected`` event) - but only if at least
-    one scan mechanism actually ran. If every mechanism failed (e.g. no root
-    this round), we have no information at all, and calling a device offline
-    on the strength of no information would flood the database with false
-    disconnects; ``mark_offline`` is skipped entirely in that case.
+    Unlike a passive sighting, a completed active sweep is the only place an
+    offline transition is ever evaluated - elapsed wall time alone never
+    disconnects a device. A previously-online device not seen in this sweep
+    only actually goes offline (a ``disconnected`` event) once BOTH
+    ``cfg.scan.offline_after_missed_scans`` consecutive *eligible* misses and
+    ``cfg.scan.offline_grace_seconds`` of elapsed time since its last
+    sighting have been reached; see :meth:`lanfence.db.DeviceStore.mark_offline`
+    for exactly what makes a miss "eligible" (this sweep must have actually
+    covered that device's known discovery path - interface, address family,
+    and IPv4 subnet). If every scan mechanism failed this round (e.g. no root),
+    there is no information at all, and ``mark_offline`` is skipped entirely -
+    calling a device offline on the strength of no information would flood
+    the database with false disconnects.
     """
 
     started_at = utcnow()
@@ -170,7 +185,8 @@ def run_active_sweep(
     net = subnet or cfg.scan.subnet or scanner.local_subnet(iface)
     errors: list[str] = []
     sightings: list[scanner.ArpSighting] = []
-    any_scan_succeeded = False
+    ipv4_covered = False
+    ipv6_covered = False
 
     if net is None:
         errors.append(
@@ -182,7 +198,7 @@ def run_active_sweep(
             sightings.extend(
                 scanner.active_scan(subnet=net, interface=iface, timeout=cfg.scan.active_scan_timeout_seconds)
             )
-            any_scan_succeeded = True
+            ipv4_covered = True
         except (scanner.ScannerUnavailable, ValueError) as exc:
             errors.append(str(exc))
 
@@ -191,7 +207,7 @@ def run_active_sweep(
             sightings.extend(
                 scanner.active_scan_v6(interface=iface, timeout=cfg.scan.active_scan_timeout_seconds)
             )
-            any_scan_succeeded = True
+            ipv6_covered = True
         except scanner.ScannerUnavailable as exc:
             errors.append(str(exc))
 
@@ -205,6 +221,7 @@ def run_active_sweep(
         device, event_type, dev_findings = process_sighting(
             mac=mac, ip=sighting.ip, seen_at=sighting.seen_at,
             store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
+            interface=iface, subnet=net,
         )
         still_online.add(mac)
         devices.append(device)
@@ -215,8 +232,16 @@ def run_active_sweep(
             )
         findings.extend(dev_findings)
 
-    if any_scan_succeeded:
-        events.extend(store.mark_offline(still_online, as_of=utcnow()))
+    if ipv4_covered or ipv6_covered:
+        events.extend(
+            store.mark_offline(
+                still_online, as_of=utcnow(),
+                grace_seconds=cfg.scan.offline_grace_seconds,
+                missed_after=cfg.scan.offline_after_missed_scans,
+                ipv4_covered=ipv4_covered, ipv4_subnet=net,
+                ipv6_covered=ipv6_covered, interface=iface,
+            )
+        )
 
     return ScanResult(
         started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,

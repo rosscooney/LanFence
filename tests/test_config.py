@@ -14,7 +14,47 @@ def test_defaults():
     assert cfg.scan.passive is True
     assert cfg.scan.ipv6 is True
     assert cfg.scan.dhcp_snooping is True
+    assert cfg.scan.offline_grace_seconds == 180.0
+    assert cfg.scan.offline_after_missed_scans == 3
     assert cfg.alerts.min_severity == "medium"
+
+
+def test_offline_grace_seconds_rejects_negative(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"scan": {"offline_grace_seconds": -1}}), encoding="utf-8")
+    with pytest.raises(Exception):
+        Config.load(path)
+
+
+def test_offline_grace_seconds_rejects_non_finite(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"scan": {"offline_grace_seconds": float("inf")}}), encoding="utf-8")
+    with pytest.raises(Exception):
+        Config.load(path)
+
+
+def test_offline_grace_seconds_zero_is_allowed():
+    cfg = Config(scan={"offline_grace_seconds": 0})
+    assert cfg.scan.offline_grace_seconds == 0
+
+
+def test_offline_after_missed_scans_rejects_zero(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"scan": {"offline_after_missed_scans": 0}}), encoding="utf-8")
+    with pytest.raises(Exception):
+        Config.load(path)
+
+
+def test_offline_after_missed_scans_rejects_negative(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"scan": {"offline_after_missed_scans": -1}}), encoding="utf-8")
+    with pytest.raises(Exception):
+        Config.load(path)
+
+
+def test_offline_after_missed_scans_one_is_allowed():
+    cfg = Config(scan={"offline_after_missed_scans": 1})
+    assert cfg.scan.offline_after_missed_scans == 1
 
 
 def test_load_none_returns_defaults():

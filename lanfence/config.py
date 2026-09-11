@@ -12,6 +12,7 @@ Configuration is layered:
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -50,12 +51,46 @@ class ScanConfig(BaseModel):
     #: Try a reverse-DNS lookup for each device's hostname.
     resolve_hostnames: bool = True
     dns_timeout_seconds: float = 1.0
+    #: How long a previously-online device may go unconfirmed before it can
+    #: be marked offline, once ``offline_after_missed_scans`` consecutive
+    #: *eligible* active sweeps have also missed it - both conditions must
+    #: hold (see :func:`lanfence.db.DeviceStore.mark_offline`). "Online"
+    #: during this window means "not yet confirmed absent," not necessarily
+    #: still connected - a transition can only happen when an active sweep
+    #: actually runs, so scan cadence (``scan_interval_seconds``) sets the
+    #: soonest a device can ever be confirmed gone. ``0`` restores immediate
+    #: eligibility on the elapsed-time side (pair with
+    #: ``offline_after_missed_scans: 1`` for the old one-miss-and-you're-out
+    #: behavior).
+    offline_grace_seconds: float = 180.0
+    #: Consecutive eligible missed active sweeps required before a device
+    #: can be marked offline. A sweep only counts as a "miss" for a device
+    #: if it actually covered that device's known discovery path(s)
+    #: (interface, address family, and - for IPv4 - subnet); a failed,
+    #: skipped, or out-of-scope sweep never counts, and any positive
+    #: sighting (active or passive) resets the count to zero. ``1`` restores
+    #: the old immediate-disconnect-on-first-miss behavior.
+    offline_after_missed_scans: int = 3
 
     @field_validator("scan_interval_seconds", "active_scan_timeout_seconds", "dns_timeout_seconds")
     @classmethod
     def _positive(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("must be greater than zero seconds")
+        return value
+
+    @field_validator("offline_grace_seconds")
+    @classmethod
+    def _finite_non_negative_grace(cls, value: float) -> float:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("offline_grace_seconds must be a finite number >= 0")
+        return value
+
+    @field_validator("offline_after_missed_scans")
+    @classmethod
+    def _at_least_one_missed_scan(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("offline_after_missed_scans must be an integer >= 1")
         return value
 
 
