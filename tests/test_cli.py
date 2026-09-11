@@ -68,6 +68,58 @@ def test_allow_remove_existing(config_path: Path):
     assert "removed" in result.stdout
 
 
+def test_reset_noninteractive_without_yes_fails_helpfully(config_path: Path):
+    _seed_devices(config_path)
+    # No mock of _stdin_is_interactive - CliRunner's stdin is never a tty,
+    # matching real noninteractive use (cron/systemd) - must fail helpfully,
+    # not hang waiting for confirmation that will never come.
+    result = runner.invoke(app, ["reset", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "--yes" in result.output
+    by_mac = _devices_json(config_path)
+    assert by_mac  # nothing was deleted
+
+
+def test_reset_yes_flag_clears_devices_and_allowlist(config_path: Path):
+    _seed_devices(config_path)  # includes an allowlisted device
+    result = runner.invoke(app, ["reset", "--yes", "--config", str(config_path)])
+    assert result.exit_code == 0
+
+    assert _devices_json(config_path) == {}
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "allowlist is empty" in listing.output.lower()
+
+
+def test_reset_keep_allowlist_flag_leaves_trust_decisions_intact(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["reset", "--yes", "--keep-allowlist", "--config", str(config_path)])
+    assert result.exit_code == 0
+
+    assert _devices_json(config_path) == {}
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "allowlist is empty" not in listing.output.lower()
+
+
+def test_reset_interactive_confirm_yes(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["reset", "--config", str(config_path)], input="y\n")
+    assert result.exit_code == 0
+    assert _devices_json(config_path) == {}
+
+
+def test_reset_interactive_confirm_no_aborts_without_changes(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["reset", "--config", str(config_path)], input="n\n")
+    assert result.exit_code == 0
+    assert "aborted" in result.output.lower()
+    by_mac = _devices_json(config_path)
+    assert by_mac  # nothing was deleted
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "allowlist is empty" not in listing.output.lower()
+
+
 def test_check_runs_without_crashing(config_path: Path):
     result = runner.invoke(app, ["check", "--config", str(config_path)])
     assert result.exit_code in (0, 1)

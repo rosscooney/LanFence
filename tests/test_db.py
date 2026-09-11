@@ -707,3 +707,28 @@ def test_devices_table_migration_adds_offline_tracking_columns(tmp_path: Path):
         )
         assert events == []
         assert store.get_device("aa:bb:cc:dd:ee:ff").status == "online"
+
+
+# --- reset_all -----------------------------------------------------------
+
+
+def test_reset_all_clears_devices_events_alerts_and_review(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=t0)
+        store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=t0)
+        store.due_for_alert("aa:bb:cc:dd:ee:ff", "high", now=t0, cooldown_seconds=900)
+        store.set_investigating("11:22:33:44:55:66", notes="hmm", updated_at=t0)
+
+        store.reset_all()
+
+        assert store.all_devices() == []
+        assert store.events_since(t0 - timedelta(days=1)) == []
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "high", now=t0, cooldown_seconds=900) is True
+        assert store.get_review("11:22:33:44:55:66").state == "pending"
+
+
+def test_reset_all_on_empty_database_is_a_noop(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        store.reset_all()  # must not raise
+        assert store.all_devices() == []

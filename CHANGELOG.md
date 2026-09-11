@@ -17,6 +17,12 @@ Each release is also published to
 
 ### Added
 
+- **`lanfence reset`** permanently deletes all previously scanned devices -
+  history, lifecycle events, alert cooldowns, and review/snooze state - and,
+  unless `--keep-allowlist` is given, the allowlist too. Asks for
+  confirmation (requires a terminal) unless `--yes` is passed for
+  noninteractive/scripted use.
+
 - **LAN Fence now identifies and trusts itself.** The host running
   `scan`/`monitor`/`devices`/`device`/`review` is inevitably on the network
   it's watching - its own MAC shows up in its own active-sweep ARP request,

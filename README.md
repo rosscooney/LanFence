@@ -151,6 +151,7 @@ lanfence monitor                # continuous: active sweeps + passive sniffing
 lanfence allow <MAC> --name X   # trust a device; its findings become info
 lanfence allow --list           # show the allowlist
 lanfence allow --remove <MAC>   # untrust a device
+lanfence reset                  # permanently wipe scanned device history (and allowlist)
 lanfence devices                # list previously observed devices - no scan
 lanfence devices --review-needed --format json
 lanfence device <MAC>           # one device's details, trust state, timeline
@@ -278,6 +279,22 @@ allowlist on its normal sweep cadence, so a `review --trust` or `allow` made
 from another terminal takes effect without restarting it; review/snooze
 state itself is read fresh from the database on every finding, so it needs
 no such reload.
+
+## Starting over
+
+```text
+lanfence reset                    # asks for confirmation first
+lanfence reset --yes              # noninteractive - for scripts
+lanfence reset --yes --keep-allowlist
+```
+
+`lanfence reset` permanently deletes every previously scanned device: its
+history, lifecycle events, alert cooldowns, and review/snooze state - and,
+unless `--keep-allowlist` is given, the allowlist too, so trust decisions
+start over from scratch as well. This cannot be undone. It asks for
+confirmation and requires a terminal to do so; pass `--yes` to run it
+noninteractively (e.g. before re-provisioning a device, or in a script).
+Nothing about your configuration (`config.yaml`) is touched.
 
 ## Offline detection and grace periods
 

@@ -590,6 +590,53 @@ def allow(
 
 
 @app.command()
+def reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    keep_allowlist: bool = typer.Option(
+        False, "--keep-allowlist", help="Only clear scanned device history; leave the allowlist untouched."
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Permanently delete all previously scanned devices and their history.
+
+    Clears every device, its lifecycle events, alert-dispatch cooldowns, and
+    review/snooze state from the database - and, unless `--keep-allowlist` is
+    given, the allowlist too, so trust decisions start over from scratch as
+    well. This cannot be undone. Requires a terminal to confirm unless
+    `--yes` is given.
+    """
+
+    cfg = _load_config(config)
+    db_path = cfg.resolved_db_path()
+    allowlist_path = cfg.resolved_allowlist_file()
+
+    if not yes:
+        if not _stdin_is_interactive():
+            typer.secho(
+                "error: `lanfence reset` needs confirmation - pass --yes to run noninteractively.",
+                fg="red", err=True,
+            )
+            raise typer.Exit(code=2)
+        warning = f"This will permanently delete all scanned device history in {db_path}"
+        if not keep_allowlist:
+            warning += f", and the allowlist at {allowlist_path}"
+        typer.secho(warning + ". This cannot be undone.", fg="yellow")
+        if not typer.confirm("Are you sure?", default=False):
+            typer.echo("aborted - nothing changed.")
+            return
+
+    with DeviceStore(db_path) as store:
+        store.reset_all()
+
+    if not keep_allowlist:
+        Allowlist([], allowlist_path).save()
+
+    summary = "erased all scanned device history"
+    summary += "; allowlist untouched." if keep_allowlist else " and cleared the allowlist."
+    typer.secho(summary, fg="green")
+
+
+@app.command()
 def devices(
     status: Optional[str] = typer.Option(None, "--status", help="Filter by status: online | offline."),
     untrusted: bool = typer.Option(False, "--untrusted", help="Only devices not on the allowlist."),

@@ -498,3 +498,15 @@ class DeviceStore:
 
         self._conn.commit()
         return events
+
+    def reset_all(self) -> None:
+        """Permanently delete every device, its lifecycle events, alert-
+        dispatch cooldowns, and review/snooze state - a full wipe back to an
+        empty database. Used by ``lanfence reset``. Cannot be undone; trust
+        (the allowlist) is separate and untouched by this call."""
+
+        self._conn.execute("DELETE FROM devices")
+        self._conn.execute("DELETE FROM events")
+        self._conn.execute("DELETE FROM alert_log")
+        self._conn.execute("DELETE FROM device_review")
+        self._conn.commit()
