@@ -687,6 +687,22 @@ def _is_editable_install() -> bool:
     return False
 
 
+def _installed_version() -> Optional[str]:
+    """The version on disk right now, read fresh from package metadata.
+
+    Used after running an upgrade command to confirm it actually changed
+    anything - `pipx upgrade` / `pip install --upgrade` both exit ``0`` when
+    they find nothing newer to install, which is not the same as success.
+    """
+
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("lanfence")
+    except (ImportError, PackageNotFoundError):
+        return None
+
+
 #: Conservative POSIX login-name shape; also bounds what we hand to ``sudo -u``.
 _USERNAME_RE = re.compile(r"\A[a-z_][a-z0-9_-]{0,31}\Z")
 
@@ -804,7 +820,25 @@ def upgrade(
     if result.returncode != 0:
         typer.secho("upgrade command failed - see its output above.", fg="red", err=True)
         raise typer.Exit(code=result.returncode)
-    typer.secho("\nupgraded. run `lanfence --version` to confirm.", fg="green")
+
+    # A `0` exit code alone doesn't mean the version actually changed - both
+    # `pipx upgrade` and `pip install --upgrade` exit 0 when they find nothing
+    # newer than what's installed (e.g. PyPI's package index, used to resolve
+    # the actual download, can lag a minute or two behind the JSON API this
+    # command checked against above, right after a release). Re-check what's
+    # actually on disk before claiming success.
+    now_installed = _installed_version()
+    if now_installed and _version_key(now_installed) > _version_key(__version__):
+        typer.secho(f"\nupgraded to {now_installed}.", fg="green")
+        return
+    typer.secho(
+        f"\nthe upgrade command ran successfully, but the installed version is "
+        f"still {now_installed or __version__} - not {latest}. PyPI's package "
+        "index can lag a minute or two behind the check above right after a "
+        "release; wait a bit and run `lanfence upgrade` again.",
+        fg="yellow",
+    )
+    raise typer.Exit(code=10)
 
 
 def main() -> None:  # pragma: no cover - entry point shim

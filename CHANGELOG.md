@@ -15,6 +15,21 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Fixed
+
+- `lanfence upgrade` no longer reports "upgraded" when nothing actually
+  changed. Both `pipx upgrade` and `pip install --upgrade` exit `0` even when
+  they find nothing newer than what's already installed - which can happen
+  right after a fresh release, since PyPI's package index (what `pip`
+  actually resolves against) can lag a minute or two behind the JSON API this
+  command checks first. It now re-reads the installed package version after
+  running the upgrade command and only reports success if it actually
+  changed; otherwise it says so plainly and exits `10` (same code as
+  `--check` finding an update) instead of falsely claiming success. Reported
+  from a real pipx install where the first `lanfence upgrade` correctly said
+  "up to date" (stale JSON API) and the second said "upgraded" despite
+  `pipx` itself reporting "already at latest version 0.3.3".
+
 ## [0.3.4] - 2026-09-11
 
 ### Changed
