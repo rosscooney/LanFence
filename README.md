@@ -4,6 +4,7 @@
 (developed and tested on Raspberry Pi OS / Debian, and reasonably portable to
 other Debian/Ubuntu systems).
 
+- Home page: <https://lanfence.com>
 - Source & downloads: <https://github.com/rosscooney/lanfence>
   ([releases](https://github.com/rosscooney/lanfence/releases))
 - Package: [`lanfence` on PyPI](https://pypi.org/project/lanfence/)

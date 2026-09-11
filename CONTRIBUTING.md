@@ -72,4 +72,4 @@ thin module that talks to raw sockets.
 
 - Normal bugs: open a GitHub issue.
 - Security vulnerabilities in LAN Fence itself: open a GitHub issue marked
-  `security`, or email contributors@lanfence.dev.
+  `security`, or email contributors@lanfence.com.

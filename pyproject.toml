@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lanfence"
-version = "0.3.1"
+version = "0.3.2"
 description = "Defensive LAN device monitor - detect and alert on unauthorized devices joining your network"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Stable State Consulting Ltd", email = "contributors@lanfence.dev" }]
-maintainers = [{ name = "Stable State Consulting Ltd", email = "contributors@lanfence.dev" }]
+authors = [{ name = "Stable State Consulting Ltd", email = "contributors@lanfence.com" }]
+maintainers = [{ name = "Stable State Consulting Ltd", email = "contributors@lanfence.com" }]
 keywords = ["network", "security", "defensive", "arp", "raspberry-pi", "monitoring"]
 classifiers = [
     "Environment :: Console",
@@ -45,7 +45,7 @@ scan = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rosscooney/lanfence"
+Homepage = "https://lanfence.com"
 Source = "https://github.com/rosscooney/lanfence"
 Issues = "https://github.com/rosscooney/lanfence/issues"
 

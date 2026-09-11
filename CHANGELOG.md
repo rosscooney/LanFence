@@ -15,6 +15,13 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-11
+
+### Changed
+
+- Project homepage is now <https://lanfence.com> (`pyproject.toml` `Homepage`
+  and the README); contact address is now contributors@lanfence.com.
+
 ## [0.3.1] - 2026-09-11
 
 ### Fixed
@@ -125,7 +132,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/rosscooney/lanfence/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/rosscooney/lanfence/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rosscooney/lanfence/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rosscooney/lanfence/compare/v0.1.1...v0.2.0
