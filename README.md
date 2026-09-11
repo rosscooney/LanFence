@@ -69,12 +69,18 @@ tab-separated shape as `lanfence/data/oui_vendors.txt`) in config.
 ## Install
 
 ```bash
-pipx install lanfence          # isolated, recommended
-# active/passive scanning needs the `scan` extra (scapy):
-pipx inject lanfence 'lanfence[scan]'
+pipx install "lanfence[scan]"     # isolated, recommended - includes scapy for scanning
 ```
 
-or
+`scan`/`monitor` need the `scan` extra (`scapy`) to actually send/receive ARP
+packets; `allow`, `report` and `check` work without it. Already installed
+without the extra? Add it in place:
+
+```bash
+pipx inject lanfence scapy
+```
+
+or, without pipx:
 
 ```bash
 python3 -m venv ~/.venvs/lanfence

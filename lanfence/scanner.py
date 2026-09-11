@@ -68,7 +68,8 @@ def _require_scapy():
         import scapy.all as scapy_module
     except ImportError as exc:  # pragma: no cover - exercised via ScannerUnavailable path
         raise ScannerUnavailable(
-            "scapy is not installed. Install the `scan` extra: pip install 'lanfence[scan]'"
+            "scapy is not installed. Install the `scan` extra: "
+            "pipx inject lanfence scapy (or pip install 'lanfence[scan]')"
         ) from exc
     return scapy_module
 

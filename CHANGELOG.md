@@ -15,6 +15,18 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-11
+
+### Changed
+
+- Recommended install is now the single command `pipx install "lanfence[scan]"`
+  (previously `pipx install lanfence` followed by a separate
+  `pipx inject lanfence 'lanfence[scan]'`, which a real-world install missed -
+  `lanfence check` reported scapy missing after a plain `pipx install
+  lanfence`). The "scapy is not installed" messages in `lanfence check` and
+  the scanner now suggest `pipx inject lanfence scapy` for an existing
+  install, alongside the `pip install` form.
+
 ## [0.1.0] - 2026-09-11
 
 Initial release. MVP scope: ARP scanning (active + passive), MAC tracking, an
@@ -63,5 +75,6 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/rosscooney/lanfence/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/rosscooney/lanfence/releases/tag/v0.1.0

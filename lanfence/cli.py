@@ -354,7 +354,9 @@ def check(
         typer.secho("  ok       scapy is installed", fg="green")
     except ImportError:
         typer.secho(
-            "  MISSING  scapy is not installed (pip install 'lanfence[scan]')", fg="yellow"
+            "  MISSING  scapy is not installed - run: pipx inject lanfence scapy "
+            "(or pip install 'lanfence[scan]')",
+            fg="yellow",
         )
 
     iface = cfg.scan.interface or scanner.default_interface()

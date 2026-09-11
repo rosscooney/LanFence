@@ -21,10 +21,12 @@ from Raspberry Pi Ltd and Debian - this project is not in that supply chain.
 ### 1. pipx (recommended)
 
 ```bash
-pipx install lanfence
+pipx install "lanfence[scan]"
 ```
 
 Isolated from system Python, and puts the `lanfence` launcher on your `PATH`.
+Already installed without the `scan` extra? `pipx inject lanfence scapy` adds
+it in place.
 
 ### 2. pip / venv (any Debian/Ubuntu/RPi OS host)
 
