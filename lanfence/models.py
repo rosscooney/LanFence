@@ -34,8 +34,10 @@ PresencePolicyName = Literal["unspecified", "intermittent", "always-on"]
 #: rather than pattern-matching human-readable titles. "security" (the
 #: default) covers new-device/rogue-signature findings; "lifecycle" is a
 #: routine connect/reappear announcement with no independent security
-#: signal; "availability" is an always-on absence/recovery finding.
-FindingKind = Literal["security", "lifecycle", "availability"]
+#: signal; "availability" is an always-on absence/recovery finding;
+#: "network_service" is about a network role (e.g. a DHCP server) rather
+#: than any one device - see :attr:`Finding.mac` being optional.
+FindingKind = Literal["security", "lifecycle", "availability", "network_service"]
 
 
 def utcnow() -> datetime:
@@ -160,9 +162,14 @@ class DeviceEvent(BaseModel):
 
 
 class Finding(BaseModel):
-    """A plain-language finding about one device."""
+    """A plain-language finding, usually about one device - but not always:
+    ``mac`` is ``None`` for a finding about a network *role* rather than a
+    device (e.g. an unexpected DHCP server - see ``kind="network_service"``
+    and ``lanfence/dhcp_server.py``). Never fabricate a MAC (a placeholder,
+    a client's, or a relay's) to satisfy this field - leave it ``None`` and
+    use ``subject_id`` instead."""
 
-    mac: str
+    mac: str | None = None
     title: str
     severity: Severity
     rationale: str = ""
@@ -173,11 +180,17 @@ class Finding(BaseModel):
     #: every finding this codebase already builds without setting it
     #: explicitly - keeps its existing meaning.
     kind: FindingKind = "security"
+    #: A stable identity for a finding not about one device (``mac is
+    #: None``) - e.g. ``"eth0/192.168.1.9"`` for a DHCP server scoped by
+    #: interface and server identifier. Used for cooldown keying and display
+    #: instead of matching on ``title`` text. ``None`` for an ordinary
+    #: device finding, where ``mac`` already is that identity.
+    subject_id: str | None = None
 
     @field_validator("mac")
     @classmethod
-    def _normalize_mac(cls, value: str) -> str:
-        return normalize_mac(value)
+    def _normalize_mac(cls, value: str | None) -> str | None:
+        return normalize_mac(value) if value is not None else None
 
     @field_validator("title", "rationale", "recommendation")
     @classmethod
@@ -188,6 +201,11 @@ class Finding(BaseModel):
     @classmethod
     def _clean_list_fields(cls, value: list[str]) -> list[str]:
         return [clean_text(v, max_len=1000) for v in value]
+
+    @field_validator("subject_id")
+    @classmethod
+    def _clean_subject_id(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=256) if value is not None else None
 
 
 class ScanResult(BaseModel):
@@ -326,3 +344,50 @@ class Digest(BaseModel):
             and self.activity.reappeared_device_count == 0
             and self.activity.disconnected_device_count == 0
         )
+
+
+class DhcpServerRecord(BaseModel):
+    """One observed DHCP server, coalesced by (interface, server identifier)
+    - not a per-packet log. ``approved`` is computed at read time against
+    current config, never stored, so approving a server later never rewrites
+    the historical evidence already captured in ``last_*``/``first_seen``.
+
+    Scoped by ``interface`` alone - already the OS-level name for a VLAN
+    sub-interface (e.g. ``eth0.20``) where one is configured; this project
+    does not parse raw 802.1Q tags, so no separate VLAN field is claimed.
+    """
+
+    interface: str
+    server_id: str
+    first_seen: datetime
+    last_seen: datetime
+    observation_count: int = 1
+    last_message_type: str | None = None
+    last_source_ip: str | None = None
+    last_source_mac: str | None = None
+    last_relay_ip: str | None = None
+    last_router: str | None = None
+    last_dns: str | None = None
+    #: Computed at read time from current config - see the class docstring.
+    approved: bool = False
+    #: The operator's configured name for this server, if approved and named.
+    name: str | None = None
+
+    @field_validator(
+        "last_message_type", "last_source_ip", "last_relay_ip", "last_router", "last_dns", "name"
+    )
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=256) if value is not None else None
+
+    @field_validator("last_source_mac")
+    @classmethod
+    def _normalize_source_mac(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return normalize_mac(value)
+        except ValueError:
+            # Untrusted wire evidence - keep the raw (sanitized) value
+            # rather than dropping it or crashing, if it's ever malformed.
+            return clean_text(value, max_len=64)

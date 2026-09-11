@@ -712,7 +712,54 @@ def test_filter_rate_limited_still_cools_down_repeated_security_findings_by_mac(
     assert kept_second == []
 
 
+def test_filter_rate_limited_network_service_finding_cooldown_by_subject(tmp_path: Path):
+    """A network-service finding (no MAC) still gets real cooldown
+    bookkeeping, keyed by its subject_id rather than crashing on a missing
+    MAC."""
+
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_rate_limit(900)
+    t0 = _now()
+    first = Finding(
+        mac=None, title="Unexpected DHCP server observed", severity="medium",
+        kind="network_service", subject_id="eth0/192.168.1.66",
+    )
+    second = Finding(
+        mac=None, title="Unexpected DHCP server observed", severity="medium",
+        kind="network_service", subject_id="eth0/192.168.1.66",
+    )
+    different_subject = Finding(
+        mac=None, title="Unexpected DHCP server observed", severity="medium",
+        kind="network_service", subject_id="eth0/10.0.0.5",
+    )
+
+    kept_first = filter_rate_limited([first], store, cfg.alerts, now=t0)
+    kept_second = filter_rate_limited([second], store, cfg.alerts, now=t0 + timedelta(seconds=1))
+    kept_different = filter_rate_limited([different_subject], store, cfg.alerts, now=t0 + timedelta(seconds=1))
+    store.close()
+
+    assert kept_first == [first]
+    assert kept_second == []  # same subject, within cooldown
+    assert kept_different == [different_subject]  # different subject - independent
+
+
 # --- filter_snoozed ------------------------------------------------------
+
+
+def test_filter_snoozed_passes_through_findings_with_no_mac(tmp_path: Path):
+    """Snoozing is a per-device concept and can't apply to a finding that
+    isn't about any one device."""
+
+    store = DeviceStore(tmp_path / "db.sqlite")
+    now = _now()
+    finding = Finding(
+        mac=None, title="Unexpected DHCP server observed", severity="medium",
+        kind="network_service", subject_id="eth0/192.168.1.66",
+    )
+
+    kept = filter_snoozed([finding], store, now=now)
+    store.close()
+    assert kept == [finding]
 
 
 def test_filter_snoozed_removes_findings_for_a_snoozed_mac(tmp_path: Path):

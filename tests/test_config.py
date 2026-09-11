@@ -141,3 +141,82 @@ def test_non_mapping_file_rejected(tmp_path: Path):
     path.write_text("- a\n- b\n", encoding="utf-8")
     with pytest.raises(ValueError):
         Config.load(path)
+
+
+# --- dhcp_servers ------------------------------------------------------
+
+
+def test_dhcp_servers_defaults():
+    cfg = Config()
+    assert cfg.dhcp_servers.enabled is False
+    assert cfg.dhcp_servers.approved == []
+    assert cfg.dhcp_servers.alert_cooldown_seconds == 3600.0
+
+
+def test_dhcp_servers_accepts_valid_approval():
+    cfg = Config(dhcp_servers={
+        "enabled": True,
+        "approved": [{"interface": "eth0", "server_ip": "192.168.1.1", "name": "Router"}],
+    })
+    assert cfg.dhcp_servers.approved[0].interface == "eth0"
+    assert cfg.dhcp_servers.approved[0].server_ip == "192.168.1.1"
+    assert cfg.dhcp_servers.approved[0].name == "Router"
+
+
+def test_dhcp_servers_supports_vlan_subinterface_name():
+    cfg = Config(dhcp_servers={"approved": [{"interface": "eth0.20", "server_ip": "10.20.0.1"}]})
+    assert cfg.dhcp_servers.approved[0].interface == "eth0.20"
+
+
+def test_dhcp_servers_rejects_empty_interface():
+    with pytest.raises(Exception):
+        Config(dhcp_servers={"approved": [{"interface": "", "server_ip": "192.168.1.1"}]})
+
+
+def test_dhcp_servers_rejects_invalid_ip():
+    with pytest.raises(Exception):
+        Config(dhcp_servers={"approved": [{"interface": "eth0", "server_ip": "not-an-ip"}]})
+
+
+def test_dhcp_servers_rejects_ipv6_server_ip():
+    with pytest.raises(Exception):
+        Config(dhcp_servers={"approved": [{"interface": "eth0", "server_ip": "::1"}]})
+
+
+def test_dhcp_servers_rejects_duplicate_entries():
+    with pytest.raises(Exception):
+        Config(dhcp_servers={"approved": [
+            {"interface": "eth0", "server_ip": "192.168.1.1"},
+            {"interface": "eth0", "server_ip": "192.168.1.1"},
+        ]})
+
+
+def test_dhcp_servers_allows_same_ip_on_different_interfaces():
+    cfg = Config(dhcp_servers={"approved": [
+        {"interface": "eth0", "server_ip": "192.168.1.1"},
+        {"interface": "eth1", "server_ip": "192.168.1.1"},
+    ]})
+    assert len(cfg.dhcp_servers.approved) == 2
+
+
+def test_dhcp_servers_allows_multiple_servers_per_interface():
+    cfg = Config(dhcp_servers={"approved": [
+        {"interface": "eth0", "server_ip": "192.168.1.1"},
+        {"interface": "eth0", "server_ip": "192.168.1.2"},
+    ]})
+    assert len(cfg.dhcp_servers.approved) == 2
+
+
+def test_dhcp_servers_rejects_negative_cooldown():
+    with pytest.raises(Exception):
+        Config(dhcp_servers={"alert_cooldown_seconds": -1})
+
+
+def test_dhcp_servers_rejects_non_finite_cooldown():
+    with pytest.raises(Exception):
+        Config(dhcp_servers={"alert_cooldown_seconds": float("inf")})
+
+
+def test_dhcp_servers_cooldown_zero_is_allowed():
+    cfg = Config(dhcp_servers={"alert_cooldown_seconds": 0})
+    assert cfg.dhcp_servers.alert_cooldown_seconds == 0

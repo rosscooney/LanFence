@@ -278,6 +278,89 @@ def _mac_from_chaddr(chaddr: bytes) -> str:
     return ":".join(f"{b:02x}" for b in chaddr[:6])
 
 
+#: DHCP option 53 (message-type) codes that are ever legitimately sent by a
+#: server (RFC 2131 s4.3) - everything else (discover/request/decline/
+#: release/inform) is client-originated and never a server response, no
+#: matter what BOOTP.op claims.
+_DHCP_SERVER_MESSAGE_TYPES = {2: "offer", 5: "ack", 6: "nak"}
+_DHCP_SERVER_MESSAGE_TYPE_NAMES = set(_DHCP_SERVER_MESSAGE_TYPES.values())
+
+
+def _classify_dhcp_message_type(value: object) -> str | None:
+    """Normalize DHCP option 53 to one of "offer"/"ack"/"nak", or ``None``
+    if it's a client message type, missing, or unrecognized.
+
+    Scapy dissects this as a raw ``int`` code in practice (verified against
+    a real serialize/parse round-trip), not the human-readable name a test
+    might construct a packet with - handle both defensively, along with
+    bytes (seen elsewhere in this module for other options) and anything
+    else malformed.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return _DHCP_SERVER_MESSAGE_TYPES.get(value)
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii", errors="ignore").strip().lower()
+        except Exception:  # noqa: BLE001
+            return None
+    if isinstance(value, str):
+        value = value.strip().lower()
+        return value if value in _DHCP_SERVER_MESSAGE_TYPE_NAMES else None
+    return None
+
+
+def _dhcp_ip_option(value: object) -> str | None:
+    """Best-effort IPv4 string from a DHCP option that should be an IPField
+    (server_id, router, name_server) - normally already ``str`` from scapy,
+    but validated (and bytes decoded) defensively rather than trusted, since
+    a malformed/adversarial packet is untrusted input, not a bug to crash on.
+    """
+
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii", errors="ignore")
+        except Exception:  # noqa: BLE001
+            return None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return None
+    return value
+
+
+@dataclass(frozen=True)
+class DhcpServerSighting:
+    """One DHCPOFFER/ACK/NAK reply, attributed to a network scope (the
+    receiving interface - which already names a VLAN sub-interface like
+    ``eth0.20`` at the OS level, so no separate VLAN field is claimed here;
+    this module does not parse raw 802.1Q tags) and a claimed DHCP server
+    identity (option 54) - never a device/client sighting. See
+    ``lanfence/dhcp_server.py`` for why ``source_mac``/``relay_ip``/
+    ``client_mac_evidence`` are evidence only, never treated as the
+    server's identity.
+    """
+
+    interface: str | None
+    server_id: str
+    message_type: str  # "offer" | "ack" | "nak"
+    observed_at: datetime
+    source_ip: str | None = None
+    source_mac: str | None = None
+    relay_ip: str | None = None
+    transaction_id: int | None = None
+    #: BOOTP chaddr, echoed back in the reply - identifies the *client* this
+    #: response was for, kept only as contextual evidence.
+    client_mac_evidence: str | None = None
+    offered_ip: str | None = None
+    router: str | None = None
+    dns: str | None = None
+
+
 def passive_sniff(
     *,
     on_sighting: Callable[[ArpSighting], None],
@@ -285,6 +368,7 @@ def passive_sniff(
     stop_event: "SupportsIsSet | None" = None,
     packet_count: int = 0,
     dhcp: bool = True,
+    on_dhcp_server: "Callable[[DhcpServerSighting], None] | None" = None,
 ) -> None:
     """Listen for ARP/ND/DHCP traffic and call ``on_sighting`` for each
     sighting seen.
@@ -293,7 +377,15 @@ def passive_sniff(
     ``packet_count`` packets have been processed (0 = unbounded - normal use is
     to run this in a background thread and set ``stop_event`` to end it).
     ``dhcp=False`` omits DHCP entirely, from both the capture filter and the
-    packet handler.
+    packet handler - which also disables ``on_dhcp_server`` regardless of
+    whether it's given, since there is no separate DHCP capture to gate
+    only the server side of.
+
+    ``on_dhcp_server``, when given, additionally reports DHCPOFFER/ACK/NAK
+    replies (BOOTP op 2) as :class:`DhcpServerSighting` - a distinct
+    observation type from ``on_sighting``'s client/ARP/NDP sightings, never
+    merged with them. When omitted (the default), no extra parsing for
+    server responses happens at all.
     """
 
     scapy_module = _require_scapy()
@@ -317,6 +409,44 @@ def passive_sniff(
             return value or None
         return None
 
+    def _handle_dhcp_server(packet, bootp, options, message_type) -> None:
+        server_id = _dhcp_ip_option(options.get("server_id"))
+        if server_id is None:
+            # A reply with no valid server identifier is a bounded
+            # diagnostic, not a fabricated identity - drop it rather than
+            # guess (e.g. from the relay/source address).
+            log.warning(
+                "dropping a DHCP %s reply with a missing/invalid server "
+                "identifier (option 54) on %s", message_type, interface or "(default interface)",
+            )
+            return
+        giaddr = getattr(bootp, "giaddr", None)
+        relay_ip = giaddr if giaddr not in (None, "0.0.0.0") else None
+        source_mac = packet[scapy_module.Ether].src if packet.haslayer(scapy_module.Ether) else None
+        source_ip = packet[scapy_module.IP].src if packet.haslayer(scapy_module.IP) else None
+        try:
+            client_mac_evidence = _mac_from_chaddr(bytes(bootp.chaddr))
+        except Exception:  # noqa: BLE001 - malformed chaddr must never crash monitoring
+            client_mac_evidence = None
+        offered_ip = bootp.yiaddr if bootp.yiaddr not in (None, "0.0.0.0") else None
+
+        on_dhcp_server(
+            DhcpServerSighting(
+                interface=interface,
+                server_id=server_id,
+                message_type=message_type,
+                observed_at=datetime.now(timezone.utc),
+                source_ip=source_ip,
+                source_mac=source_mac,
+                relay_ip=relay_ip,
+                transaction_id=int(bootp.xid) if bootp.xid is not None else None,
+                client_mac_evidence=client_mac_evidence,
+                offered_ip=offered_ip,
+                router=_dhcp_ip_option(options.get("router")),
+                dns=_dhcp_ip_option(options.get("name_server")),
+            )
+        )
+
     def _handle_dhcp(packet) -> None:
         if not packet.haslayer(BOOTP):
             return
@@ -325,6 +455,22 @@ def passive_sniff(
         # strings like "end"/"pad" - filter to 2-tuples before unpacking, or
         # unpacking a 3+ char sentinel string raises ValueError.
         options = {opt[0]: opt[1] for opt in packet[DHCP].options if isinstance(opt, tuple) and len(opt) == 2}
+
+        # op 2 (BOOTREPLY) is only ever sent by a server; op 1 (BOOTREQUEST)
+        # is only ever sent by a client (RFC 2131 s2) - branch on that
+        # first so a server's OFFER/ACK/NAK is never merged into client
+        # inventory via chaddr (which identifies the *client*, not the
+        # server), and a client's DISCOVER/REQUEST/DECLINE/RELEASE/INFORM
+        # is never mistaken for a server response.
+        if bootp.op == 2:
+            if on_dhcp_server is not None:
+                message_type = _classify_dhcp_message_type(options.get("message-type"))
+                if message_type is not None:
+                    _handle_dhcp_server(packet, bootp, options, message_type)
+            return
+        if bootp.op != 1:
+            return
+
         ip = options.get("requested_addr")
         if not ip and bootp.yiaddr not in (None, "0.0.0.0"):
             ip = bootp.yiaddr

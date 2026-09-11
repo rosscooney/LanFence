@@ -12,12 +12,13 @@ Configuration is layered:
 
 from __future__ import annotations
 
+import ipaddress
 import math
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ScanConfig(BaseModel):
@@ -248,12 +249,86 @@ class DigestConfig(BaseModel):
         return value
 
 
+class ApprovedDhcpServer(BaseModel):
+    """One DHCP server approved to answer on a given interface.
+
+    ``interface`` is the sole network scope - a VLAN sub-interface (e.g.
+    ``eth0.20``) is just its own interface name at the OS level, so it's
+    already supported with no separate VLAN field; this project does not
+    parse raw 802.1Q tags from captured frames, so it makes no VLAN-isolation
+    claim beyond what the configured interface name itself expresses.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    interface: str
+    #: DHCP option 54 (server identifier) this server answers with.
+    server_ip: str
+    name: str = ""
+
+    @field_validator("interface")
+    @classmethod
+    def _nonempty_interface(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("interface must not be empty")
+        return value
+
+    @field_validator("server_ip")
+    @classmethod
+    def _valid_ipv4(cls, value: str) -> str:
+        try:
+            ipaddress.IPv4Address(value)
+        except ValueError as exc:
+            raise ValueError(f"server_ip must be a valid IPv4 address, got {value!r}") from exc
+        return value
+
+
+class DhcpServerConfig(BaseModel):
+    """`lanfence dhcp-servers` / unexpected-DHCP-server detection settings.
+
+    Purely opt-in and observation-only: enabling this only changes which
+    *already-captured* DHCP replies (passive DHCP capture must itself be on
+    - see ``scan.passive``/``scan.dhcp_snooping``) get checked against
+    ``approved`` and turned into a finding; it never sends DHCP traffic.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    approved: list[ApprovedDhcpServer] = Field(default_factory=list)
+    #: Minimum time between repeated "unexpected DHCP server" findings for
+    #: the same (interface, server identifier) pair, so a flood of replies
+    #: from one unapproved server doesn't flood findings/alerts.
+    alert_cooldown_seconds: float = 3600.0
+
+    @field_validator("alert_cooldown_seconds")
+    @classmethod
+    def _finite_non_negative_cooldown(cls, value: float) -> float:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("alert_cooldown_seconds must be a finite number >= 0")
+        return value
+
+    @model_validator(mode="after")
+    def _no_duplicate_approvals(self) -> "DhcpServerConfig":
+        seen: set[tuple[str, str]] = set()
+        for entry in self.approved:
+            key = (entry.interface, entry.server_ip)
+            if key in seen:
+                raise ValueError(
+                    f"duplicate approved DHCP server entry: interface={entry.interface!r} "
+                    f"server_ip={entry.server_ip!r}"
+                )
+            seen.add(key)
+        return self
+
+
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
     scan: ScanConfig = Field(default_factory=ScanConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)
+    dhcp_servers: DhcpServerConfig = Field(default_factory=DhcpServerConfig)
     #: Where the persistent device database lives.
     db_path: Path = Path("~/.local/share/lanfence/lanfence.db")
     #: YAML allowlist of trusted devices; findings about them are downgraded to info.

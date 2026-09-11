@@ -73,6 +73,13 @@ digest:
   max_devices_per_section: 20   # cap per section before an explicit "and N more"
   # SMS (twilio) and syslog are not available for digest delivery.
 
+dhcp_servers:
+  enabled: false                # opt-in - detects DHCP servers not on the approved list below
+  approved: []                  # e.g. [{interface: eth0, server_ip: 192.168.1.1, name: Main router}]
+  alert_cooldown_seconds: 3600  # per (interface, server) - don't flood findings from one noisy server
+  # Needs scan.passive and scan.dhcp_snooping to actually see any DHCP traffic.
+  # An empty `approved` list with enabled: true means every server seen is unexpected.
+
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
 vendor_file: null             # extra OUI table, merged with the packaged one

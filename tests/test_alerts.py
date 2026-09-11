@@ -33,6 +33,24 @@ def test_format_findings_text_no_heading():
     assert "[HIGH]" in text
 
 
+def test_format_findings_text_handles_finding_with_no_mac():
+    finding = Finding(
+        mac=None, title="Unexpected DHCP server observed", severity="medium",
+        kind="network_service", subject_id="eth0/192.168.1.66",
+    )
+    text = alerts._format_findings_text([finding], heading="LAN Fence")
+    assert "Subject: eth0/192.168.1.66" in text
+    assert "MAC: None" not in text
+
+
+def test_finding_subject_prefers_mac_then_subject_id_then_placeholder():
+    assert alerts._finding_subject(_finding(mac="aa:bb:cc:dd:ee:ff")) == "aa:bb:cc:dd:ee:ff"
+    assert alerts._finding_subject(
+        Finding(mac=None, title="t", severity="medium", subject_id="eth0/1.2.3.4")
+    ) == "eth0/1.2.3.4"
+    assert alerts._finding_subject(Finding(mac=None, title="t", severity="medium")) == "[no device]"
+
+
 def test_format_findings_compact_joins_and_truncates():
     findings = [_finding(title=f"finding {i}") for i in range(20)]
     text = alerts._format_findings_compact(findings, max_len=100)

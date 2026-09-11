@@ -335,3 +335,217 @@ def test_passive_sniff_ignores_dhcp_when_disabled(monkeypatch):
     handler(request)
 
     assert sightings == []
+
+
+# --- DHCP server detection ---------------------------------------------
+
+
+def _dhcp_reply_packet(
+    *, src_mac="11:22:33:44:55:66", src_ip="192.168.1.1", chaddr_mac="aa:bb:cc:dd:ee:ff",
+    yiaddr="0.0.0.0", giaddr="0.0.0.0", xid=0, options,
+):
+    """A BOOTREPLY (op=2), round-tripped through real serialization/parsing
+    - unlike ``_dhcp_packet`` above, server-detection code depends on
+    accurately reproducing what scapy *actually* hands back for a captured
+    reply (e.g. message-type as a raw int, verified separately), not what a
+    test happens to construct an in-memory object with.
+    """
+
+    from scapy.layers.dhcp import DHCP, BOOTP
+    from scapy.layers.inet import IP, UDP
+    from scapy.layers.l2 import Ether
+
+    chaddr = bytes.fromhex(chaddr_mac.replace(":", "")) + b"\x00" * 10
+    pkt = (
+        Ether(src=src_mac, dst="ff:ff:ff:ff:ff:ff")
+        / IP(src=src_ip, dst="255.255.255.255")
+        / UDP(sport=67, dport=68)
+        / BOOTP(op=2, yiaddr=yiaddr, chaddr=chaddr, giaddr=giaddr, xid=xid)
+        / DHCP(options=options)
+    )
+    return Ether(bytes(pkt))
+
+
+def _sniff_dhcp_server(monkeypatch, **passive_sniff_kwargs):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    client_sightings = []
+    server_sightings = []
+    scanner.passive_sniff(
+        on_sighting=client_sightings.append, on_dhcp_server=server_sightings.append,
+        interface="eth0", **passive_sniff_kwargs,
+    )
+    return captured["prn"], client_sightings, server_sightings
+
+
+def test_passive_sniff_dispatches_dhcp_offer_as_server_sighting(monkeypatch):
+    handler, clients, servers = _sniff_dhcp_server(monkeypatch)
+
+    handler(_dhcp_reply_packet(
+        yiaddr="192.168.1.50", xid=12345,
+        options=[("message-type", "offer"), ("server_id", "192.168.1.1"),
+                 ("router", "192.168.1.1"), ("name_server", "192.168.1.1"), "end"],
+    ))
+
+    assert clients == []  # never merged into client inventory
+    assert len(servers) == 1
+    s = servers[0]
+    assert s.interface == "eth0"
+    assert s.server_id == "192.168.1.1"
+    assert s.message_type == "offer"
+    assert s.offered_ip == "192.168.1.50"
+    assert s.transaction_id == 12345
+    assert s.router == "192.168.1.1"
+    assert s.dns == "192.168.1.1"
+    assert s.relay_ip is None  # giaddr 0.0.0.0 -> no relay
+    assert s.client_mac_evidence == "aa:bb:cc:dd:ee:ff"
+    assert s.source_mac == "11:22:33:44:55:66"
+
+
+def test_passive_sniff_dispatches_dhcp_ack_and_nak_as_server_sightings(monkeypatch):
+    handler, _clients, servers = _sniff_dhcp_server(monkeypatch)
+
+    handler(_dhcp_reply_packet(
+        yiaddr="192.168.1.50",
+        options=[("message-type", "ack"), ("server_id", "192.168.1.1"), "end"],
+    ))
+    handler(_dhcp_reply_packet(
+        options=[("message-type", "nak"), ("server_id", "192.168.1.1"), "end"],
+    ))
+
+    assert [s.message_type for s in servers] == ["ack", "nak"]
+
+
+def test_passive_sniff_relayed_reply_preserves_relay_and_server_identity_separately(monkeypatch):
+    """The relay's own MAC/IP must never be attributed as the DHCP server's
+    identity - the server identifier (option 54) is what identifies the
+    server; the relay address/source are kept only as separate evidence."""
+
+    handler, _clients, servers = _sniff_dhcp_server(monkeypatch)
+
+    handler(_dhcp_reply_packet(
+        src_mac="99:99:99:99:99:99", src_ip="10.0.0.254", giaddr="10.0.0.254",
+        yiaddr="10.0.0.99", xid=999,
+        options=[("message-type", "offer"), ("server_id", "10.0.0.9"), "end"],
+    ))
+
+    assert len(servers) == 1
+    s = servers[0]
+    assert s.server_id == "10.0.0.9"  # the actual server, from option 54
+    assert s.source_mac == "99:99:99:99:99:99"  # the relay's MAC - evidence, not identity
+    assert s.relay_ip == "10.0.0.254"
+
+
+def test_passive_sniff_client_messages_never_treated_as_server_responses(monkeypatch):
+    handler, clients, servers = _sniff_dhcp_server(monkeypatch)
+
+    for message_type in ("discover", "request", "decline", "release", "inform"):
+        pkt = _dhcp_packet(options=[
+            ("message-type", message_type), ("requested_addr", "192.168.1.77"), "end",
+        ])
+        handler(pkt)
+
+    assert servers == []
+    # Each carries an explicit address hint, so all 5 are still ordinary
+    # client sightings (existing client-path behavior, unaffected by this
+    # feature) - what matters here is that none was misclassified as a
+    # server response.
+    assert len(clients) == 5
+
+
+def test_passive_sniff_missing_server_id_produces_no_server_sighting(monkeypatch):
+    handler, _clients, servers = _sniff_dhcp_server(monkeypatch)
+
+    handler(_dhcp_reply_packet(options=[("message-type", "nak"), "end"]))
+
+    assert servers == []
+
+
+def test_passive_sniff_dhcp_server_detection_off_by_default_when_not_requested(monkeypatch):
+    """Passing no ``on_dhcp_server`` at all means no server-side parsing
+    happens - existing callers (that don't know about this feature) see no
+    behavior change."""
+
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    clients = []
+    scanner.passive_sniff(on_sighting=clients.append, interface="eth0")  # no on_dhcp_server
+    handler = captured["prn"]
+
+    handler(_dhcp_reply_packet(
+        yiaddr="192.168.1.50",
+        options=[("message-type", "offer"), ("server_id", "192.168.1.1"), "end"],
+    ))
+
+    assert clients == []  # no crash, and definitely not merged into client sightings
+
+
+def test_passive_sniff_dhcp_disabled_also_disables_server_detection(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    servers = []
+    scanner.passive_sniff(
+        on_sighting=lambda s: None, on_dhcp_server=servers.append, interface="eth0", dhcp=False,
+    )
+    handler = captured["prn"]
+
+    handler(_dhcp_reply_packet(
+        options=[("message-type", "offer"), ("server_id", "192.168.1.1"), "end"]
+    ))
+
+    assert servers == []
+
+
+# --- defensive option-value handling (white-box) ----------------------
+
+
+def test_classify_dhcp_message_type_handles_real_numeric_codes():
+    assert scanner._classify_dhcp_message_type(2) == "offer"
+    assert scanner._classify_dhcp_message_type(5) == "ack"
+    assert scanner._classify_dhcp_message_type(6) == "nak"
+
+
+def test_classify_dhcp_message_type_rejects_client_codes():
+    for code in (1, 3, 4, 7, 8):  # discover/request/decline/release/inform
+        assert scanner._classify_dhcp_message_type(code) is None
+
+
+def test_classify_dhcp_message_type_handles_strings_and_bytes():
+    assert scanner._classify_dhcp_message_type("offer") == "offer"
+    assert scanner._classify_dhcp_message_type("OFFER") == "offer"
+    assert scanner._classify_dhcp_message_type(b"ack") == "ack"
+
+
+def test_classify_dhcp_message_type_handles_malformed_input():
+    assert scanner._classify_dhcp_message_type(None) is None
+    assert scanner._classify_dhcp_message_type(9999) is None
+    assert scanner._classify_dhcp_message_type("not-a-type") is None
+    assert scanner._classify_dhcp_message_type(object()) is None
+    assert scanner._classify_dhcp_message_type(True) is None  # bool is an int subclass - not a code
+
+
+def test_dhcp_ip_option_handles_str_bytes_and_malformed():
+    assert scanner._dhcp_ip_option("192.168.1.1") == "192.168.1.1"
+    assert scanner._dhcp_ip_option(b"192.168.1.1") == "192.168.1.1"
+    assert scanner._dhcp_ip_option("not-an-ip") is None
+    assert scanner._dhcp_ip_option(None) is None
+    assert scanner._dhcp_ip_option(b"\xff\xfe\x00") is None
+    assert scanner._dhcp_ip_option(1234) is None

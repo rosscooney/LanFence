@@ -9,6 +9,7 @@ import yaml
 from typer.testing import CliRunner
 
 from lanfence.cli import app
+from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.models import Finding
 
@@ -485,6 +486,129 @@ def test_monitor_dhcp_disabled_when_passive_disabled_even_if_dhcp_flag_true(conf
     monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
     result = runner.invoke(app, ["monitor", "--dhcp", "--no-passive", "--config", str(config_path)])
     assert "dhcp: False" in result.output
+
+
+def test_monitor_dhcp_server_detection_banner_off_by_default(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--no-passive", "--config", str(config_path)])
+    assert "dhcp-server-detection: False" in result.output
+
+
+def test_monitor_dhcp_server_detection_warns_when_enabled_but_passive_off(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "scan": {"passive": False},
+            "dhcp_servers": {"enabled": True},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--config", str(config_path)])
+    assert "dhcp-server-detection: False" in result.output
+    assert "passive DHCP capture is off" in result.output
+
+
+def test_monitor_dhcp_server_detection_warns_when_no_approvals(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "dhcp_servers": {"enabled": True, "approved": []},
+        }),
+        encoding="utf-8",
+    )
+    from lanfence import scanner as scanner_module
+
+    def fake_passive_sniff(**kwargs):
+        raise scanner_module.ScannerUnavailable("n/a")
+
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr("lanfence.cli.scanner.passive_sniff", fake_passive_sniff)
+    result = runner.invoke(app, ["monitor", "--config", str(config_path)])
+    assert "every DHCP server observed will be treated as unexpected" in result.output
+
+
+# --- dhcp-servers --------------------------------------------------------
+
+
+def test_dhcp_servers_empty_inventory(config_path: Path):
+    result = runner.invoke(app, ["dhcp-servers", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "No DHCP server replies observed" in result.output
+
+
+def _seed_dhcp_server(config_path: Path, *, interface="eth0", server_id="192.168.1.66") -> None:
+    from lanfence.dhcp_server import process_dhcp_server_sighting
+    from lanfence.scanner import DhcpServerSighting
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    cfg = Config.load(config_path)
+    store = DeviceStore(cfg_dict["db_path"])
+    process_dhcp_server_sighting(
+        DhcpServerSighting(
+            interface=interface, server_id=server_id, message_type="offer", observed_at=_now(),
+            source_ip=server_id, source_mac="bb:bb:bb:bb:bb:bb",
+        ),
+        store, cfg,
+    )
+    store.close()
+
+
+def test_dhcp_servers_lists_observed_server(config_path: Path):
+    _seed_dhcp_server(config_path)
+    result = runner.invoke(app, ["dhcp-servers", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "192.168.1.66" in result.output
+    assert "NOT approved" in result.output
+
+
+def test_dhcp_servers_json_output_has_no_mac_field_but_has_server_id(config_path: Path):
+    import json
+
+    _seed_dhcp_server(config_path)
+    result = runner.invoke(app, ["dhcp-servers", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["server_id"] == "192.168.1.66"
+    assert payload[0]["approved"] is False
+
+
+def test_dhcp_servers_shows_approved_status_and_name(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "dhcp_servers": {
+                "enabled": True,
+                "approved": [{"interface": "eth0", "server_ip": "192.168.1.1", "name": "Main Router"}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    _seed_dhcp_server(config_path, server_id="192.168.1.1")
+    result = runner.invoke(app, ["dhcp-servers", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Main Router" in result.output
+    assert "NOT approved" not in result.output
+
+
+def test_dhcp_servers_rejects_invalid_format(config_path: Path):
+    result = runner.invoke(app, ["dhcp-servers", "--format", "xml", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_dhcp_servers_is_read_only_never_scans(config_path: Path):
+    with patch("lanfence.cli.scanner.active_scan") as mock_scan, \
+         patch("lanfence.cli.scanner.passive_sniff") as mock_sniff:
+        result = runner.invoke(app, ["dhcp-servers", "--config", str(config_path)])
+    assert result.exit_code == 0
+    mock_scan.assert_not_called()
+    mock_sniff.assert_not_called()
 
 
 class _FakeUrlopenResponse:
@@ -1288,7 +1412,7 @@ def test_monitor_queued_passive_sighting_prevents_false_disconnect_reappear(
         def start(self) -> None:
             self._target()
 
-    def fake_passive_sniff(*, on_sighting, interface=None, stop_event=None, dhcp=True):
+    def fake_passive_sniff(*, on_sighting, interface=None, stop_event=None, dhcp=True, on_dhcp_server=None):
         on_sighting(scanner_module.ArpSighting(mac=sighting_mac, ip="10.0.0.5", seen_at=_now()))
 
     monkeypatch.setattr("lanfence.cli.threading.Thread", _SyncThread)

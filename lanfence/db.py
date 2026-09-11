@@ -3,17 +3,22 @@
 
 """Persistent SQLite store of every device LAN Fence has ever seen.
 
-Four tables: ``devices`` holds the current state of each MAC address (first
-seen, last seen, online/offline, and - for the offline-grace-period feature -
-its consecutive-missed-scan count and discovery provenance); ``events`` is an
+``devices`` holds the current state of each MAC address (first seen, last
+seen, online/offline, and - for the offline-grace-period feature - its
+consecutive-missed-scan count and discovery provenance); ``events`` is an
 append-only log of lifecycle transitions (new / reappeared / disconnected)
 used by ``lanfence report``; ``alert_log`` tracks the last external-alert
-dispatch per MAC, used by :meth:`DeviceStore.due_for_alert` to cool down
-repeated alerts for a flapping device; ``device_review`` tracks the
-``lanfence review`` state (snoozed/investigating) per MAC, used by ``lanfence
-devices``/``device``/``review``. Trust itself is *not* stored here - it lives
-in the YAML allowlist (see ``lanfence/allowlist.py``); this table only tracks
-the review workflow around a still-untrusted device.
+dispatch per cooldown key (usually a MAC, but see :meth:`due_for_alert`'s
+``key`` param), used by :meth:`DeviceStore.due_for_alert` to cool down
+repeated alerts for a flapping device or a noisy network-service finding;
+``device_review`` tracks the ``lanfence review`` state (snoozed/
+investigating) per MAC, used by ``lanfence devices``/``device``/``review``.
+Trust itself is *not* stored here - it lives in the YAML allowlist (see
+``lanfence/allowlist.py``); this table only tracks the review workflow
+around a still-untrusted device. ``device_presence`` tracks per-device
+presence policy (see :data:`lanfence.models.PresencePolicyName`).
+``dhcp_servers``/``dhcp_server_findings`` track observed DHCP servers and
+unexpected-server findings - see :mod:`lanfence.dhcp_server`.
 
 ``devices``' ``missed_scans``/``seen_via_ipv4``/``seen_via_ipv6``/
 ``last_interface``/``ipv4_subnet`` columns are provenance for
@@ -31,7 +36,16 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lanfence.models import SEVERITIES, Device, DeviceEvent, EventType, PresenceState, ReviewState, Severity
+from lanfence.models import (
+    SEVERITIES,
+    Device,
+    DeviceEvent,
+    DhcpServerRecord,
+    EventType,
+    PresenceState,
+    ReviewState,
+    Severity,
+)
 from lanfence.netutil import normalize_mac
 
 _SCHEMA = """
@@ -83,6 +97,38 @@ CREATE TABLE IF NOT EXISTS device_presence (
     availability_alerted INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS dhcp_servers (
+    interface TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    observation_count INTEGER NOT NULL DEFAULT 1,
+    last_message_type TEXT,
+    last_source_ip TEXT,
+    last_source_mac TEXT,
+    last_relay_ip TEXT,
+    last_router TEXT,
+    last_dns TEXT,
+    PRIMARY KEY (interface, server_id)
+);
+
+CREATE TABLE IF NOT EXISTS dhcp_server_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    interface TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    approved_at_observation INTEGER NOT NULL,
+    message_type TEXT,
+    source_ip TEXT,
+    source_mac TEXT,
+    relay_ip TEXT,
+    router TEXT,
+    dns TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dhcp_server_findings_scope
+    ON dhcp_server_findings (interface, server_id);
 """
 
 
@@ -703,14 +749,116 @@ class DeviceStore:
 
     def reset_all(self) -> None:
         """Permanently delete every device, its lifecycle events, alert-
-        dispatch cooldowns, review/snooze state, and presence policy - a
-        full wipe back to an empty database. Used by ``lanfence reset``.
-        Cannot be undone; trust (the allowlist) is separate and untouched by
-        this call."""
+        dispatch cooldowns, review/snooze state, presence policy, and
+        observed DHCP servers/findings - a full wipe back to an empty
+        database. Used by ``lanfence reset``. Cannot be undone; trust (the
+        allowlist) and DHCP server *approval* (config) are separate and
+        untouched by this call."""
 
         self._conn.execute("DELETE FROM devices")
         self._conn.execute("DELETE FROM events")
         self._conn.execute("DELETE FROM alert_log")
         self._conn.execute("DELETE FROM device_review")
         self._conn.execute("DELETE FROM device_presence")
+        self._conn.execute("DELETE FROM dhcp_servers")
+        self._conn.execute("DELETE FROM dhcp_server_findings")
+        self._conn.commit()
+
+    # --- DHCP server observations -------------------------------------
+
+    def record_dhcp_server_observation(
+        self,
+        *,
+        interface: str,
+        server_id: str,
+        message_type: str,
+        observed_at: datetime,
+        source_ip: str | None,
+        source_mac: str | None,
+        relay_ip: str | None,
+        router: str | None,
+        dns: str | None,
+    ) -> None:
+        """Coalesce one DHCPOFFER/ACK/NAK observation into the ``dhcp_servers``
+        inventory - one row per (interface, server_id), not one row per
+        packet. Updates ``last_*``/``last_seen`` and increments
+        ``observation_count``; ``first_seen`` is set only the first time
+        this (interface, server_id) pair is seen. Never writes a finding or
+        touches cooldown state - see :mod:`lanfence.dhcp_server` for that.
+        """
+
+        existing = self._conn.execute(
+            "SELECT first_seen FROM dhcp_servers WHERE interface = ? AND server_id = ?",
+            (interface, server_id),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO dhcp_servers (interface, server_id, first_seen, last_seen, "
+                "observation_count, last_message_type, last_source_ip, last_source_mac, "
+                "last_relay_ip, last_router, last_dns) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+                (interface, server_id, _iso(observed_at), _iso(observed_at),
+                 message_type, source_ip, source_mac, relay_ip, router, dns),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE dhcp_servers SET last_seen = ?, observation_count = observation_count + 1, "
+                "last_message_type = ?, last_source_ip = ?, last_source_mac = ?, last_relay_ip = ?, "
+                "last_router = ?, last_dns = ? WHERE interface = ? AND server_id = ?",
+                (_iso(observed_at), message_type, source_ip, source_mac, relay_ip, router, dns,
+                 interface, server_id),
+            )
+        self._conn.commit()
+
+    def dhcp_server_records(self) -> list[DhcpServerRecord]:
+        """Every observed DHCP server, coalesced - a pure database read.
+        ``approved``/``name`` are left at their defaults here; the caller
+        (see :mod:`lanfence.dhcp_server`) joins in current config, since
+        approval is a config fact, not something this store knows about."""
+
+        rows = self._conn.execute(
+            "SELECT * FROM dhcp_servers ORDER BY interface ASC, server_id ASC"
+        ).fetchall()
+        return [
+            DhcpServerRecord(
+                interface=row["interface"],
+                server_id=row["server_id"],
+                first_seen=_parse_dt(row["first_seen"]),
+                last_seen=_parse_dt(row["last_seen"]),
+                observation_count=row["observation_count"],
+                last_message_type=row["last_message_type"],
+                last_source_ip=row["last_source_ip"],
+                last_source_mac=row["last_source_mac"],
+                last_relay_ip=row["last_relay_ip"],
+                last_router=row["last_router"],
+                last_dns=row["last_dns"],
+            )
+            for row in rows
+        ]
+
+    def record_dhcp_server_finding(
+        self,
+        *,
+        interface: str,
+        server_id: str,
+        observed_at: datetime,
+        approved_at_observation: bool,
+        message_type: str | None,
+        source_ip: str | None,
+        source_mac: str | None,
+        relay_ip: str | None,
+        router: str | None,
+        dns: str | None,
+    ) -> None:
+        """Durably record one unexpected-DHCP-server finding's original
+        evidence and approval status *at the time it was observed* - a
+        later config change approving this server must never rewrite this
+        history (see the module docstring's persistence requirements)."""
+
+        self._conn.execute(
+            "INSERT INTO dhcp_server_findings (interface, server_id, observed_at, "
+            "approved_at_observation, message_type, source_ip, source_mac, relay_ip, router, dns) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (interface, server_id, _iso(observed_at), int(approved_at_observation),
+             message_type, source_ip, source_mac, relay_ip, router, dns),
+        )
         self._conn.commit()

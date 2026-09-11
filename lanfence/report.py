@@ -43,12 +43,21 @@ def exit_code_for_findings(findings: list[Finding]) -> int:
     return SEVERITY_EXIT_CODES.get(highest_severity(findings), 0)
 
 
+def _finding_subject(finding: Finding) -> str:
+    """A finding's identity for display - its MAC for an ordinary device
+    finding, or its ``subject_id`` for one that isn't about any single
+    device (e.g. an unexpected DHCP server, scoped by interface/server
+    identifier)."""
+
+    return finding.mac or finding.subject_id or "[no device]"
+
+
 def render_findings(findings: list[Finding], *, plain: bool = False) -> str:
     """Standalone findings rendering (no device table) - used by `report`."""
 
     lines = [f"Findings: {len(findings)}"]
     for finding in findings:
-        lines.append(f"  [{finding.severity.upper()}] {finding.title} (mac={finding.mac})")
+        lines.append(f"  [{finding.severity.upper()}] {finding.title} (mac={_finding_subject(finding)})")
         if finding.rationale:
             lines.append(f"      {finding.rationale}")
         if finding.recommendation:
@@ -118,7 +127,7 @@ def _render_findings(console, findings: list[Finding]) -> None:
     for finding in sorted(findings, key=lambda f: -{"high": 2, "medium": 1, "info": 0}[f.severity]):
         style = _SEVERITY_STYLE.get(finding.severity, "dim")
         console.print(f"\n  [{style}]{finding.severity.upper()}[/] {_rich_escape(finding.title)}")
-        console.print(f"    MAC: {finding.mac}")
+        console.print(f"    {'MAC' if finding.mac else 'Subject'}: {_rich_escape(_finding_subject(finding))}")
         if finding.rationale:
             console.print(f"    {_rich_escape(finding.rationale.strip())}")
         if finding.recommendation:
@@ -150,7 +159,7 @@ def _plain_summary(result: ScanResult) -> list[str]:
     lines.append("")
     lines.append(f"Findings: {len(result.findings)}")
     for finding in result.findings:
-        lines.append(f"  [{finding.severity.upper()}] {finding.title} (mac={finding.mac})")
+        lines.append(f"  [{finding.severity.upper()}] {finding.title} (mac={_finding_subject(finding)})")
         if finding.rationale:
             lines.append(f"      {finding.rationale}")
         if finding.recommendation:

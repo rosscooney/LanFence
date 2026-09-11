@@ -165,6 +165,7 @@ lanfence review <MAC> --clear
 lanfence report --since 24h     # summarize events/findings from the database
 lanfence digest                 # preview a 24h summary; add --send to deliver it
 lanfence digest --since 7d --send --channel email
+lanfence dhcp-servers            # observed DHCP servers and their approval status
 lanfence check                  # verify permissions, scapy, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
 lanfence upgrade --check        # only report whether an update is available
@@ -509,6 +510,80 @@ immediate-alert pipeline: it ignores `alerts.min_severity` and never reads
 or writes the per-MAC alert cooldown, so sending a digest can never suppress
 (or be suppressed by) an immediate alert for the same device.
 
+## Unexpected DHCP servers
+
+Passively detects a DHCP server (a DHCPOFFER/ACK/NAK reply) that isn't on
+your approved list for the interface it answered on - a rogue or
+misconfigured DHCP server on your LAN can silently redirect every new
+client's traffic through itself. Purely observation: LAN Fence never sends
+a DHCP request of its own, and this reuses the existing passive DHCP
+capture rather than opening a new one.
+
+```yaml
+dhcp_servers:
+  enabled: false                 # opt-in - off by default
+  approved:
+    - interface: eth0
+      server_ip: 192.168.1.1     # DHCP option 54 - the server identifier
+      name: Main router
+    - interface: eth0
+      server_ip: 192.168.1.2
+      name: Backup DHCP
+  alert_cooldown_seconds: 3600   # per (interface, server) - don't flood findings from one noisy server
+```
+
+```text
+lanfence dhcp-servers            # every observed server + approval status - a database read, no scan
+lanfence dhcp-servers --format json
+```
+
+Approval is scoped by **interface** - a VLAN sub-interface (e.g. `eth0.20`)
+is already its own interface name at the OS level, so it's covered with no
+separate VLAN setting; this project does not parse raw 802.1Q tags from
+captured frames, so no VLAN-isolation claim is made beyond what the
+interface name itself expresses. Multiple servers can be approved per
+interface (a primary and a failover, say). **Turning this on with an empty
+`approved` list means every server observed is treated as unexpected** -
+LAN Fence never auto-approves the first responder, and an existing device
+allowlist entry never implies DHCP server approval either; they're
+independent trust decisions, checked separately. This version has no
+config-writing workflow for approval - add entries to `dhcp_servers.approved`
+by hand and (since this config is only read at startup) restart `monitor`
+for the change to take effect.
+
+Detection only ever runs during `lanfence monitor` (`scan`, a one-shot
+active sweep, has no equivalent - DHCP servers only speak when spoken to by
+a real client, which nothing here simulates) and depends on the *same*
+passive DHCP capture the hostname-snooping feature uses
+(`scan.passive`/`scan.dhcp_snooping`) - if `dhcp_servers.enabled` is true
+but that capture is off, `monitor`'s startup banner says so plainly rather
+than silently providing no protection.
+
+An unapproved server produces one medium-severity **"Unexpected DHCP server
+observed"** finding, explaining that this alone doesn't establish malicious
+intent (it might be a legitimate second router, a failover server, or a
+misconfiguration) and recommending you check it and approve it if expected.
+This finding has **no MAC address** - a DHCP server's identity is its option
+54 server identifier, not any one Ethernet address (a relayed reply's
+source MAC belongs to the *relay*, not the server, and `BOOTP.chaddr`
+identifies the *client* the reply was for) - so it's shown by its interface
+and server identifier instead. Role approval is independent of device
+trust: a device already on your allowlist that starts answering DHCP
+requests without approval still produces this finding, and an intermittent
+presence policy has no bearing on it either (it isn't about a device at
+all). A server's approval status is computed fresh each time from current
+config - approving a server later never rewrites the evidence already
+recorded for findings raised while it was still unapproved.
+
+**Visibility limitations** - detection only covers replies actually visible
+at the capture interface: a switched network can hide a unicast reply
+entirely, and a quiet network may produce no observations until a client
+next renews or joins. Multiple DHCP servers/relays on a network can be
+entirely legitimate (redundancy, VLAN-specific scopes). Server identifiers
+and MAC addresses seen on the wire are claims, not authenticated identities
+- treat a finding as a lead to check, the same as every other signature in
+this tool. This feature does not detect DHCPv6 servers.
+
 ## Running unattended
 
 LAN Fence does not ship its own scheduler; use `systemd` (recommended on a
@@ -654,6 +729,16 @@ alerts:
     from_number: null             # E.164, e.g. "+15551234567"
     to_numbers: []
     timeout_seconds: 10
+
+digest:
+  channels: []                  # which alerts.<channel> destinations also get a digest, e.g. [email]
+  send_when_empty: false
+  max_devices_per_section: 20
+
+dhcp_servers:
+  enabled: false                # opt-in; needs scan.passive/scan.dhcp_snooping too - see "Unexpected DHCP servers"
+  approved: []                  # e.g. [{interface: eth0, server_ip: 192.168.1.1, name: Main router}]
+  alert_cooldown_seconds: 3600  # per (interface, server) - don't flood findings from one noisy server
 
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml

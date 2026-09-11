@@ -28,6 +28,11 @@ from lanfence import __version__, alerts, scanner
 from lanfence.allowlist import Allowlist
 from lanfence.config import DIGEST_CHANNELS, Config
 from lanfence.db import DeviceStore
+from lanfence.dhcp_server import (
+    dhcp_server_detection_active,
+    dhcp_server_inventory,
+    process_dhcp_server_sighting,
+)
 from lanfence.digest import build_digest, dispatch_digest
 from lanfence.engine import (
     apply_self_trust,
@@ -352,8 +357,9 @@ app.command(name="run")(scan)
 def _emit_findings(findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore) -> None:
     colour = {"high": "red", "medium": "yellow", "info": "cyan"}
     for finding in findings:
+        subject = finding.mac or finding.subject_id or "[no device]"
         typer.secho(
-            f"[{finding.severity.upper()}] {finding.title} (mac={finding.mac})",
+            f"[{finding.severity.upper()}] {finding.title} (mac={subject})",
             fg=colour.get(finding.severity, "white"), bold=(finding.severity == "high"),
         )
         if finding.rationale:
@@ -411,19 +417,36 @@ def monitor(
 
     typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
     dhcp_active = cfg.scan.passive and cfg.scan.dhcp_snooping
+    dhcp_server_active = dhcp_server_detection_active(cfg)
     typer.echo(
         f"interface: {iface or '(auto)'}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
-        f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}   dhcp: {dhcp_active}"
+        f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}   dhcp: {dhcp_active}   "
+        f"dhcp-server-detection: {dhcp_server_active}"
     )
+    if cfg.dhcp_servers.enabled and not dhcp_server_active:
+        typer.secho(
+            "warning: dhcp_servers.enabled is true, but passive DHCP capture is off "
+            "(scan.passive/scan.dhcp_snooping) - no unexpected-DHCP-server findings will be "
+            "produced until it is. This is not silently \"protected\" in the meantime.",
+            fg="yellow", err=True,
+        )
+    if dhcp_server_active and not cfg.dhcp_servers.approved:
+        typer.secho(
+            "warning: dhcp_servers.enabled is true with no dhcp_servers.approved entries - "
+            "every DHCP server observed will be treated as unexpected.",
+            fg="yellow",
+        )
 
     stop_event = threading.Event()
     passive_queue: "queue.Queue[scanner.ArpSighting]" = queue.Queue()
+    dhcp_server_queue: "queue.Queue[scanner.DhcpServerSighting]" = queue.Queue()
 
     def _run_passive() -> None:
         try:
             scanner.passive_sniff(
                 on_sighting=passive_queue.put, interface=iface, stop_event=stop_event,
                 dhcp=cfg.scan.dhcp_snooping,
+                on_dhcp_server=dhcp_server_queue.put if cfg.dhcp_servers.enabled else None,
             )
         except scanner.ScannerUnavailable as exc:
             typer.secho(f"passive monitoring unavailable: {exc}", fg="yellow", err=True)
@@ -459,6 +482,23 @@ def monitor(
                     hostname_hint=sighting.hostname, interface=iface, subnet=net,
                 )
                 _emit_findings(findings, alert=alert, cfg=cfg, store=store)
+
+            # DHCP server observations are processed the same way, from
+            # their own queue - kept separate from `passive_queue` since a
+            # server reply is not a device sighting (see
+            # `scanner.DhcpServerSighting`). Bounded for the same reason:
+            # one burst of DHCP traffic must not starve active sweeps or
+            # ARP/ND passive processing.
+            drained_dhcp_servers = 0
+            while drained_dhcp_servers < 200:
+                try:
+                    server_sighting = dhcp_server_queue.get_nowait()
+                except queue.Empty:
+                    break
+                drained_dhcp_servers += 1
+                finding = process_dhcp_server_sighting(server_sighting, store, cfg)
+                if finding is not None:
+                    _emit_findings([finding], alert=alert, cfg=cfg, store=store)
 
             if now - last_sweep >= cfg.scan.scan_interval_seconds:
                 # Reload on the same cadence as active sweeps, so a `lanfence
@@ -652,6 +692,56 @@ def digest(
         typer.secho(f"  {name}: {'sent' if ok else 'FAILED'}", fg="green" if ok else "red")
     if failed:
         raise typer.Exit(code=1)
+
+
+@app.command(name="dhcp-servers")
+def dhcp_servers_cmd(
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """List DHCP servers observed via passive capture, with approval status.
+
+    A read-only database query - never scans the network or sends packets,
+    and works whether or not `dhcp_servers.enabled` is on (that setting only
+    controls whether an *unexpected* server also produces a finding). An
+    empty list means no DHCP server reply has been observed at this capture
+    point yet, not that no DHCP server exists on the network - a switched
+    network can hide unicast replies from other segments entirely (see
+    README's "Visibility limitations").
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    cfg = _load_config(config)
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        records = dhcp_server_inventory(store, cfg)
+
+    if output_format == "json":
+        typer.echo(json.dumps([r.model_dump(mode="json") for r in records], indent=2))
+        return
+
+    if not records:
+        typer.secho("No DHCP server replies observed yet.", fg="yellow")
+        return
+
+    typer.secho(f"DHCP servers ({len(records)}):\n", fg="cyan", bold=True)
+    for r in records:
+        approval = f"approved ({r.name})" if r.approved and r.name else ("approved" if r.approved else "NOT approved")
+        typer.echo(
+            f"  {r.interface:<10} {r.server_id:<16} {approval:<20} "
+            f"seen {r.observation_count}x, {r.first_seen.isoformat(timespec='seconds')} - "
+            f"{r.last_seen.isoformat(timespec='seconds')}"
+        )
+        detail = f"    last: {r.last_message_type or '?'}"
+        if r.last_source_ip:
+            detail += f"  source={r.last_source_ip}"
+        if r.last_source_mac:
+            detail += f"  source_mac={r.last_source_mac}"
+        if r.last_relay_ip:
+            detail += f"  relay={r.last_relay_ip}"
+        typer.echo(detail)
 
 
 @app.command()

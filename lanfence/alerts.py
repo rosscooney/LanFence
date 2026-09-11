@@ -55,6 +55,14 @@ def findings_to_alert(findings: list[Finding], cfg: AlertConfig) -> list[Finding
     return [f for f in findings if _SEVERITY_RANK[f.severity] >= threshold]
 
 
+def _finding_subject(finding: Finding) -> str:
+    """A finding's identity for display - its MAC for an ordinary device
+    finding, or its ``subject_id`` (e.g. an interface/DHCP-server-identifier
+    pair) for one that isn't about any single device."""
+
+    return finding.mac or finding.subject_id or "[no device]"
+
+
 def send_syslog(findings: list[Finding], cfg: AlertConfig) -> None:
     if not cfg.syslog.enabled or not findings:
         return
@@ -63,7 +71,9 @@ def send_syslog(findings: list[Finding], cfg: AlertConfig) -> None:
     try:
         for finding in findings:
             priority = _SYSLOG_SEVERITY.get(finding.severity, syslog.LOG_INFO)
-            syslog.syslog(priority, f"[{finding.severity.upper()}] {finding.title} (mac={finding.mac})")
+            syslog.syslog(
+                priority, f"[{finding.severity.upper()}] {finding.title} (mac={_finding_subject(finding)})"
+            )
     finally:
         syslog.closelog()
 
@@ -77,7 +87,7 @@ def _format_findings_text(findings: list[Finding], *, heading: str | None) -> st
         lines.append("")
     for finding in findings:
         lines.append(f"[{finding.severity.upper()}] {finding.title}")
-        lines.append(f"  MAC: {finding.mac}")
+        lines.append(f"  {'MAC' if finding.mac else 'Subject'}: {_finding_subject(finding)}")
         if finding.rationale:
             lines.append(f"  {finding.rationale}")
         if finding.recommendation:
@@ -91,7 +101,7 @@ def _format_findings_compact(findings: list[Finding], *, max_len: int) -> str:
     (SMS) or with tight size limits."""
 
     parts = [f"LAN Fence: {len(findings)} finding(s)"]
-    parts.extend(f"[{f.severity.upper()}] {f.title} (mac={f.mac})" for f in findings)
+    parts.extend(f"[{f.severity.upper()}] {f.title} (mac={_finding_subject(f)})" for f in findings)
     text = " | ".join(parts)
     if len(text) > max_len:
         text = text[: max_len - 1].rstrip() + "…"

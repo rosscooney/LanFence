@@ -11,6 +11,7 @@ from lanfence.report import (
     render_device_detail,
     render_device_inventory,
     render_digest,
+    render_findings,
     render_scan_result,
     review_status_label,
 )
@@ -42,6 +43,16 @@ def test_exit_code_for_scan_result():
     assert exit_code_for(result) == 20
     clean = ScanResult(started_at=_now(), ended_at=_now())
     assert exit_code_for(clean) == 0
+
+
+def test_render_findings_handles_a_finding_with_no_mac(capsys):
+    finding = Finding(
+        mac=None, title="Unexpected DHCP server observed", severity="medium",
+        kind="network_service", subject_id="eth0/192.168.1.66",
+    )
+    text = render_findings([finding], plain=True)
+    assert "eth0/192.168.1.66" in text  # subject shown in place of a MAC
+    assert "None" not in text
 
 
 def test_render_scan_result_plain_does_not_raise(capsys):

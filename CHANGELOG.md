@@ -17,6 +17,28 @@ Each release is also published to
 
 ### Added
 
+- **Unexpected DHCP server detection.** Passively detects a DHCPOFFER/ACK/
+  NAK reply from a server not on the approved list for the interface it
+  answered on - opt-in via `dhcp_servers.enabled`/`dhcp_servers.approved`,
+  reusing the existing passive DHCP capture (needs `scan.passive`/
+  `scan.dhcp_snooping`). Approval is scoped by interface (a VLAN
+  sub-interface like `eth0.20` is already its own interface name; no raw
+  802.1Q tag parsing is added or claimed) and never inferred from device
+  trust - an already-allowlisted device acting as an unapproved server still
+  raises this finding, and enabling detection with no approvals means every
+  server seen is unexpected (never auto-approving the first responder). The
+  finding has no MAC address - a DHCP server's identity is its option 54
+  server identifier, not a relay's or client's Ethernet address, both of
+  which are easy to conflate with the server's own identity (RFC 2131) -
+  `Finding.mac` is now optional and a new `Finding.subject_id` carries this
+  kind of non-device finding's identity instead. `lanfence dhcp-servers`
+  lists every observed server and its current approval status (a database
+  read; never scans or sends packets); repeated replies from the same
+  unapproved server are coalesced with their own cooldown
+  (`dhcp_servers.alert_cooldown_seconds`) so one noisy server can't flood
+  findings, and historical evidence for a finding already raised is never
+  rewritten by a later approval.
+
 - **`lanfence digest`.** A concise, side-effect-free summary of recent
   network activity - new devices, devices needing review, current
   investigations, and (with presence policies) missing always-on devices -

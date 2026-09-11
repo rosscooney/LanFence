@@ -380,16 +380,27 @@ def run_active_sweep(
 
 def _alert_cooldown_key(finding: Finding) -> str:
     """The cooldown row identity for one finding - plain ``mac`` for every
-    pre-existing finding kind (unchanged behavior), but an availability
-    finding gets its own lane per phase (``mac#availability#<severity>``,
-    and absence is always "medium" while recovery is always "info") so a
-    recent absence alert can never swallow the recovery for the same MAC -
-    they are independent notifications, not escalating variants of the
-    same one. See :meth:`lanfence.db.DeviceStore.due_for_alert`.
+    pre-existing, device-scoped finding kind (unchanged behavior), but a
+    finding not about one device (``mac is None`` - kind ``availability`` or
+    ``network_service``) needs an identity that isn't a MAC:
+
+    - ``availability`` gets its own lane per phase
+      (``mac#availability#<severity>``, and absence is always "medium" while
+      recovery is always "info") so a recent absence alert can never
+      swallow the recovery for the same MAC - they are independent
+      notifications, not escalating variants of the same one.
+    - ``network_service`` (e.g. an unexpected DHCP server) has no MAC at
+      all - keyed by its own ``subject_id`` (interface/server-identifier)
+      instead, so two different servers - or the same server on two
+      interfaces - never share a cooldown row.
+
+    See :meth:`lanfence.db.DeviceStore.due_for_alert`.
     """
 
     if finding.kind == "availability":
         return f"{finding.mac}#availability#{finding.severity}"
+    if finding.kind == "network_service":
+        return f"network_service#{finding.subject_id}#{finding.severity}"
     return finding.mac
 
 
@@ -398,19 +409,20 @@ def filter_rate_limited(
 ) -> list[Finding]:
     """Findings actually worth sending to external alert channels right now.
 
-    Throttles only the *push* side (``alerts.dispatch``) via a per-MAC
-    cooldown in the database - the CLI table, JSON output, and the events/
-    findings already written to the database are unaffected. Processes
-    highest severity first so an escalation within the same batch is never
-    itself suppressed by a lower-severity finding for the same MAC processed
-    earlier. See :meth:`lanfence.db.DeviceStore.due_for_alert`.
+    Throttles only the *push* side (``alerts.dispatch``) via a per-MAC (or,
+    for a MAC-less finding, per-subject) cooldown in the database - the CLI
+    table, JSON output, and the events/findings already written to the
+    database are unaffected. Processes highest severity first so an
+    escalation within the same batch is never itself suppressed by a
+    lower-severity finding for the same subject processed earlier. See
+    :meth:`lanfence.db.DeviceStore.due_for_alert`.
     """
 
     ordered = sorted(findings, key=lambda f: -_SEVERITY_RANK[f.severity])
     return [
         finding for finding in ordered
         if store.due_for_alert(
-            finding.mac, finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds,
+            finding.mac or "", finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds,
             key=_alert_cooldown_key(finding),
         )
     ]
@@ -424,9 +436,13 @@ def filter_snoozed(findings: list[Finding], store: DeviceStore, *, now: datetime
     consume cooldown bookkeeping it never actually used. Only throttles
     external dispatch: the caller's own copy of ``findings`` (for CLI/JSON
     output, and whatever was already written to the database) is untouched.
+
+    A finding with no MAC (e.g. a DHCP-server finding) isn't about any one
+    device, so snoozing - a per-device concept - can't apply to it; it
+    always passes through unaffected.
     """
 
-    return [f for f in findings if not store.is_snoozed(f.mac, now=now)]
+    return [f for f in findings if f.mac is None or not store.is_snoozed(f.mac, now=now)]
 
 
 def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
