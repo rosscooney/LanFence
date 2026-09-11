@@ -307,6 +307,10 @@ def monitor(
     ipv6: Optional[bool] = typer.Option(
         None, "--ipv6/--no-ipv6", help="Also discover devices via IPv6 neighbor discovery."
     ),
+    dhcp: Optional[bool] = typer.Option(
+        None, "--dhcp/--no-dhcp",
+        help="While passive monitoring, also snoop DHCP for a device's self-reported hostname.",
+    ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
     alert: bool = typer.Option(True, "--alert/--no-alert", help="Dispatch alerts for findings as they occur."),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True),
@@ -321,6 +325,8 @@ def monitor(
         cfg.scan.passive = passive
     if ipv6 is not None:
         cfg.scan.ipv6 = ipv6
+    if dhcp is not None:
+        cfg.scan.dhcp_snooping = dhcp
 
     if not _is_root():
         _warn_not_root("monitor")
@@ -333,9 +339,10 @@ def monitor(
     net = subnet or cfg.scan.subnet
 
     typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
+    dhcp_active = cfg.scan.passive and cfg.scan.dhcp_snooping
     typer.echo(
         f"interface: {iface or '(auto)'}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
-        f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}"
+        f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}   dhcp: {dhcp_active}"
     )
 
     stop_event = threading.Event()
@@ -343,7 +350,10 @@ def monitor(
 
     def _run_passive() -> None:
         try:
-            scanner.passive_sniff(on_sighting=passive_queue.put, interface=iface, stop_event=stop_event)
+            scanner.passive_sniff(
+                on_sighting=passive_queue.put, interface=iface, stop_event=stop_event,
+                dhcp=cfg.scan.dhcp_snooping,
+            )
         except scanner.ScannerUnavailable as exc:
             typer.secho(f"passive monitoring unavailable: {exc}", fg="yellow", err=True)
 
@@ -373,6 +383,7 @@ def monitor(
                 _, _event_type, findings = process_sighting(
                     mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
                     store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
+                    hostname_hint=sighting.hostname,
                 )
                 _emit_findings(findings, alert=alert, cfg=cfg, store=store)
 

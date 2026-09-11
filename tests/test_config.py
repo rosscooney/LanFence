@@ -13,6 +13,7 @@ def test_defaults():
     assert cfg.scan.scan_interval_seconds == 60.0
     assert cfg.scan.passive is True
     assert cfg.scan.ipv6 is True
+    assert cfg.scan.dhcp_snooping is True
     assert cfg.alerts.min_severity == "medium"
 
 

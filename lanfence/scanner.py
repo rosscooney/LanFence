@@ -64,11 +64,15 @@ def _looks_like_permission_error(exc: BaseException) -> bool:
 
 @dataclass(frozen=True)
 class ArpSighting:
-    """One MAC/IP pairing observed on the wire, from either scan mode."""
+    """One MAC/IP pairing observed on the wire, from any discovery mechanism
+    (ARP, IPv6 neighbor discovery, or DHCP)."""
 
     mac: str
     ip: str
     seen_at: datetime
+    #: Self-reported hostname (DHCP option 12), when the sighting came from a
+    #: DHCP packet. ``None`` for ARP/NDP sightings, which carry no hostname.
+    hostname: str | None = None
 
 
 def _require_scapy():
@@ -248,22 +252,57 @@ def has_ipv6(interface: str | None = None) -> bool:
         return False
 
 
+def _mac_from_chaddr(chaddr: bytes) -> str:
+    return ":".join(f"{b:02x}" for b in chaddr[:6])
+
+
 def passive_sniff(
     *,
     on_sighting: Callable[[ArpSighting], None],
     interface: str | None = None,
     stop_event: "SupportsIsSet | None" = None,
     packet_count: int = 0,
+    dhcp: bool = True,
 ) -> None:
-    """Listen for ARP/ND traffic and call ``on_sighting`` for each packet seen.
+    """Listen for ARP/ND/DHCP traffic and call ``on_sighting`` for each
+    sighting seen.
 
     Blocks until ``stop_event`` is set (checked between packets) or
     ``packet_count`` packets have been processed (0 = unbounded - normal use is
     to run this in a background thread and set ``stop_event`` to end it).
+    ``dhcp=False`` omits DHCP entirely, from both the capture filter and the
+    packet handler.
     """
 
     scapy_module = _require_scapy()
+    from scapy.layers.dhcp import DHCP, BOOTP
     from scapy.layers.inet6 import ICMPv6ND_NA, ICMPv6ND_NS, IPv6
+
+    def _handle_dhcp(packet) -> None:
+        if not packet.haslayer(BOOTP):
+            return
+        bootp = packet[BOOTP]
+        # scapy's DHCP.options mixes (name, value) tuples with bare sentinel
+        # strings like "end"/"pad" - filter to 2-tuples before unpacking, or
+        # unpacking a 3+ char sentinel string raises ValueError.
+        options = {opt[0]: opt[1] for opt in packet[DHCP].options if isinstance(opt, tuple) and len(opt) == 2}
+        ip = options.get("requested_addr")
+        if not ip and bootp.yiaddr not in (None, "0.0.0.0"):
+            ip = bootp.yiaddr
+        if not ip and bootp.ciaddr not in (None, "0.0.0.0"):
+            ip = bootp.ciaddr
+        if not ip:
+            # A bare initial DHCPDISCOVER carries no address hint yet - the
+            # DHCPREQUEST/ACK that follows in the same handshake will.
+            return
+        on_sighting(
+            ArpSighting(
+                mac=_mac_from_chaddr(bytes(bootp.chaddr)),
+                ip=ip,
+                hostname=options.get("hostname"),
+                seen_at=datetime.now(timezone.utc),
+            )
+        )
 
     def _handle(packet) -> None:
         now = datetime.now(timezone.utc)
@@ -288,11 +327,19 @@ def passive_sniff(
             on_sighting(
                 ArpSighting(mac=packet[scapy_module.Ether].src, ip=src_ip, seen_at=now)
             )
+            return
+
+        if dhcp and packet.haslayer(DHCP):
+            _handle_dhcp(packet)
 
     def _should_stop(_packet) -> bool:
         return bool(stop_event is not None and stop_event.is_set())
 
-    kwargs = {"filter": "arp or icmp6", "prn": _handle, "store": False, "stop_filter": _should_stop}
+    dhcp_filter = " or (udp and (port 67 or port 68))" if dhcp else ""
+    kwargs = {
+        "filter": f"arp or icmp6{dhcp_filter}",
+        "prn": _handle, "store": False, "stop_filter": _should_stop,
+    }
     if interface:
         kwargs["iface"] = interface
     if packet_count:

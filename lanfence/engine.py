@@ -115,10 +115,20 @@ def process_sighting(
     allowlist: Allowlist,
     signatures: SignatureSet,
     cfg: Config,
+    hostname_hint: str | None = None,
 ) -> tuple[Device, EventType | None, list[Finding]]:
-    """Fold one MAC/IP sighting into the database and return what changed."""
+    """Fold one MAC/IP sighting into the database and return what changed.
 
-    hostname = scanner.resolve_hostname(ip, timeout=cfg.scan.dns_timeout_seconds) if cfg.scan.resolve_hostnames else None
+    ``hostname_hint`` - a self-reported name from a DHCP sighting - is used
+    as-is instead of doing a reverse-DNS lookup: a device telling the network
+    its own name moments ago is at least as trustworthy as a PTR record (both
+    are equally spoofable), and skips a DNS round-trip. ``None`` (every ARP/
+    NDP sighting) falls back to reverse-DNS exactly as before.
+    """
+
+    hostname = hostname_hint
+    if not hostname and cfg.scan.resolve_hostnames:
+        hostname = scanner.resolve_hostname(ip, timeout=cfg.scan.dns_timeout_seconds)
     vendor, matches = fingerprint_device(mac, hostname, signatures=signatures, vendor_file=cfg.vendor_file)
     device, event_type = store.observe(mac=mac, ip=ip, hostname=hostname, vendor=vendor, seen_at=seen_at)
 

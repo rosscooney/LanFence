@@ -15,6 +15,25 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- **DHCP snooping.** `lanfence monitor` (`--dhcp/--no-dhcp`, on by default,
+  effective only when `passive` is also enabled) now also parses DHCP
+  traffic in its existing passive capture for a device's self-reported
+  hostname (option 12) - added to the same `"arp or icmp6"` filter, now
+  `"arp or icmp6 or (udp and (port 67 or port 68))"`, one capture stream for
+  all three. Reverse-DNS fails often in practice (phones/IoT devices without
+  a PTR record, routers that don't register client hostnames, mDNS-only
+  devices); a DHCP-observed hostname is used directly instead of a reverse-
+  DNS lookup when available, and is often present at the exact moment a
+  brand-new device joins and sends its first DHCP request - frequently
+  faster than the next ARP broadcast, and with a name reverse-DNS would
+  never have produced. `lanfence scan` (a one-shot active sweep) is
+  unaffected - DHCP is inherently passive; there's no legitimate "please
+  DHCPDISCOVER for me" active probe. Deliberately scoped to option 12 only:
+  DHCP option 55 (parameter-request-list OS fingerprinting) would need a
+  maintained mapping table this project has no authoritative source for.
+
 ## [0.3.6] - 2026-09-11
 
 ### Changed

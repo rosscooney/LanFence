@@ -36,7 +36,10 @@ routinely) and never touches, blocks, deauthenticates or spoofs anything.
 2. **Passive monitoring** - between active sweeps, `lanfence monitor` also
    listens for ARP and IPv6 neighbor-discovery traffic on the wire, so a
    device that joins mid-interval is caught sooner rather than waiting for
-   the next sweep.
+   the next sweep. It also snoops DHCP traffic for a device's self-reported
+   hostname (option 12) - often available, faster, and more reliable than
+   reverse-DNS, and especially useful right when a brand-new device joins and
+   sends its first DHCP request.
 3. Every sighting is folded into a persistent **SQLite database** keyed by MAC
    address, which tracks each device's lifecycle: `new_device` the first time
    it's ever seen, `reappeared` if it had gone offline and came back, and
@@ -220,6 +223,7 @@ scan:
   active_scan_timeout_seconds: 3
   passive: true                # also sniff ARP/ND traffic between sweeps
   ipv6: true                   # also discover devices via IPv6 neighbor discovery
+  dhcp_snooping: true          # snoop DHCP for a self-reported hostname (needs passive: true)
   resolve_hostnames: true      # try reverse DNS for each device
   dns_timeout_seconds: 1
 

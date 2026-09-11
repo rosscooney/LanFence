@@ -12,6 +12,7 @@ scan:
   active_scan_timeout_seconds: 3
   passive: true                # also sniff ARP/ND traffic between sweeps
   ipv6: true                   # also discover devices via IPv6 neighbor discovery
+  dhcp_snooping: true          # snoop DHCP for a self-reported hostname (needs passive: true)
   resolve_hostnames: true      # try reverse DNS for each device
   dns_timeout_seconds: 1
 

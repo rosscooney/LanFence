@@ -116,6 +116,32 @@ def test_process_sighting_second_call_is_routine(tmp_path: Path, monkeypatch):
     store.close()
 
 
+def test_process_sighting_hostname_hint_skips_reverse_dns(tmp_path: Path):
+    with patch("lanfence.engine.scanner.resolve_hostname") as resolve_mock:
+        store = DeviceStore(tmp_path / "db.sqlite")
+        device, _, _ = process_sighting(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=_now(),
+            store=store, allowlist=Allowlist.load(None), signatures=SignatureSet.load(),
+            cfg=Config(), hostname_hint="Georges-iPhone",
+        )
+        store.close()
+    resolve_mock.assert_not_called()
+    assert device.hostname == "Georges-iPhone"
+
+
+def test_process_sighting_no_hint_falls_back_to_reverse_dns(tmp_path: Path):
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value="dns-name.local") as resolve_mock:
+        store = DeviceStore(tmp_path / "db.sqlite")
+        device, _, _ = process_sighting(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=_now(),
+            store=store, allowlist=Allowlist.load(None), signatures=SignatureSet.load(),
+            cfg=Config(),
+        )
+        store.close()
+    resolve_mock.assert_called_once()
+    assert device.hostname == "dns-name.local"
+
+
 def test_run_active_sweep_merges_ipv4_and_ipv6_sightings(tmp_path: Path):
     v4 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
     v6 = scanner.ArpSighting(mac="11:22:33:44:55:66", ip="fe80::1", seen_at=_now())

@@ -41,6 +41,12 @@ class ScanConfig(BaseModel):
     #: the link-local all-nodes address), catching an IPv6-only device an
     #: ARP-only sweep would miss entirely.
     ipv6: bool = True
+    #: While passive monitoring, also parse DHCP traffic for a device's
+    #: self-reported hostname (option 12) - often available (and faster to
+    #: get, and more reliable) than reverse-DNS, especially for a brand-new
+    #: device announcing itself at join time. Only takes effect when
+    #: ``passive`` is also true.
+    dhcp_snooping: bool = True
     #: Try a reverse-DNS lookup for each device's hostname.
     resolve_hostnames: bool = True
     dns_timeout_seconds: float = 1.0

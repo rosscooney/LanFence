@@ -135,6 +135,19 @@ def test_passive_sniff_uses_combined_arp_and_icmp6_filter(monkeypatch):
 
     monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
     scanner.passive_sniff(on_sighting=lambda s: None, interface="eth0")
+    assert captured["filter"] == "arp or icmp6 or (udp and (port 67 or port 68))"
+
+
+def test_passive_sniff_filter_omits_dhcp_when_disabled(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    scanner.passive_sniff(on_sighting=lambda s: None, interface="eth0", dhcp=False)
     assert captured["filter"] == "arp or icmp6"
 
 
@@ -168,3 +181,86 @@ def test_passive_sniff_dispatches_arp_and_ndp_sightings(monkeypatch):
         ("aa:bb:cc:dd:ee:ff", "10.0.0.5"),
         ("11:22:33:44:55:66", "fe80::1"),
     ]
+
+
+def _dhcp_packet(*, chaddr_mac="aa:bb:cc:dd:ee:ff", options):
+    from scapy.layers.dhcp import DHCP, BOOTP
+    from scapy.layers.inet import IP, UDP
+    from scapy.layers.l2 import Ether
+
+    chaddr = bytes.fromhex(chaddr_mac.replace(":", "")) + b"\x00" * 10
+    return (
+        Ether(src=chaddr_mac)
+        / IP(src="0.0.0.0", dst="255.255.255.255")
+        / UDP(sport=68, dport=67)
+        / BOOTP(chaddr=chaddr)
+        / DHCP(options=options)
+    )
+
+
+def test_passive_sniff_dispatches_dhcp_hostname_sighting(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    sightings = []
+    scanner.passive_sniff(on_sighting=sightings.append, interface="eth0")
+    handler = captured["prn"]
+
+    request = _dhcp_packet(options=[
+        ("message-type", "request"), ("requested_addr", "192.168.1.77"),
+        ("hostname", "Georges-iPhone"), "end",
+    ])
+    handler(request)
+
+    assert len(sightings) == 1
+    assert sightings[0].mac == "aa:bb:cc:dd:ee:ff"
+    assert sightings[0].ip == "192.168.1.77"
+    assert sightings[0].hostname == "Georges-iPhone"
+
+
+def test_passive_sniff_ignores_dhcp_discover_with_no_address_hint(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    sightings = []
+    scanner.passive_sniff(on_sighting=sightings.append, interface="eth0")
+    handler = captured["prn"]
+
+    # A bare initial DHCPDISCOVER: no requested_addr option, yiaddr/ciaddr
+    # both still 0.0.0.0 - nothing usable to record yet.
+    bare_discover = _dhcp_packet(options=[("message-type", "discover"), "end"])
+    handler(bare_discover)
+
+    assert sightings == []
+
+
+def test_passive_sniff_ignores_dhcp_when_disabled(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    sightings = []
+    scanner.passive_sniff(on_sighting=sightings.append, interface="eth0", dhcp=False)
+    handler = captured["prn"]
+
+    request = _dhcp_packet(options=[
+        ("message-type", "request"), ("requested_addr", "192.168.1.77"),
+        ("hostname", "Georges-iPhone"), "end",
+    ])
+    handler(request)
+
+    assert sightings == []

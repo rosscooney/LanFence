@@ -130,6 +130,21 @@ def test_monitor_no_ipv6_flag_is_reflected_in_banner(config_path: Path, monkeypa
     assert "ipv6: False" in result.output
 
 
+def test_monitor_no_dhcp_flag_is_reflected_in_banner(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--no-dhcp", "--no-passive", "--config", str(config_path)])
+    assert "dhcp: False" in result.output
+
+
+def test_monitor_dhcp_disabled_when_passive_disabled_even_if_dhcp_flag_true(config_path: Path, monkeypatch):
+    # dhcp_active in the banner is passive AND dhcp_snooping - --no-passive
+    # alone should already show dhcp: False, since DHCP snooping needs the
+    # capture running at all.
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--dhcp", "--no-passive", "--config", str(config_path)])
+    assert "dhcp: False" in result.output
+
+
 class _FakeUrlopenResponse:
     def read(self):
         return b""
