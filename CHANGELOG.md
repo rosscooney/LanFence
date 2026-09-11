@@ -15,6 +15,8 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-09-11
+
 ### Added
 
 - **Configurable offline grace periods.** A device is no longer marked
@@ -382,7 +384,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/rosscooney/lanfence/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/rosscooney/lanfence/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/rosscooney/lanfence/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/rosscooney/lanfence/compare/v0.3.3...v0.3.4
