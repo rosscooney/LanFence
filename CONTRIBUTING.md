@@ -24,9 +24,12 @@ There is **no** Contributor Licence Agreement or copyright assignment to sign.
 - Significant new dependencies whose licences are incompatible with the
   project's MIT distribution model. If a change adds a new runtime dependency,
   note its licence in the pull request description.
-- A full copy of the IEEE OUI registry or similarly large generated data files.
-  `lanfence/data/oui_vendors.txt` is a small curated subset on purpose (see
-  the comment at the top of that file) - keep additions targeted.
+- Hand edits to `lanfence/data/oui_vendors.txt`. It's a generated snapshot of
+  the IEEE's public MA-L OUI registry (see the comment at the top of that
+  file) - regenerate it wholesale with
+  `lanfence.vendor.parse_ieee_oui_csv`/`format_vendor_table` against a fresh
+  `https://standards-oui.ieee.org/oui/oui.csv` rather than editing entries by
+  hand, and mention the fetch date in the PR description.
 
 ## Scope and non-goals
 

@@ -6,12 +6,13 @@ SPDX-License-Identifier: MIT
 # Distributing LAN Fence
 
 LAN Fence is MIT-licensed. The distribution model is deliberately
-**low-friction**: this project ships **only its own MIT code**, plus a small
-curated OUI vendor table and a handful of rogue-device fingerprint signatures
-(both plain-text/YAML data files, not compiled artifacts), and never
-redistributes a prebuilt operating-system image. Users install onto their own
-stock Raspberry Pi OS / Debian, so the GPL/LGPL parts of the OS come straight
-from Raspberry Pi Ltd and Debian - this project is not in that supply chain.
+**low-friction**: this project ships **only its own MIT code**, plus a
+generated snapshot of the IEEE's public MA-L OUI registry and a handful of
+rogue-device fingerprint signatures (both plain-text/YAML data files, not
+compiled artifacts), and never redistributes a prebuilt operating-system
+image. Users install onto their own stock Raspberry Pi OS / Debian, so the
+GPL/LGPL parts of the OS come straight from Raspberry Pi Ltd and Debian -
+this project is not in that supply chain.
 
 > Not legal advice. If you redistribute at scale, have a solicitor review your
 > final artifact and its notices.

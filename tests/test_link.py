@@ -161,12 +161,19 @@ def test_trusted_to_run_as_root_true_for_owner_only_paths(tmp_path: Path):
 
 
 def test_trusted_to_run_as_root_false_for_group_writable_dir(tmp_path: Path):
+    """A group-writable dir is untrusted only when the group actually has
+    another member (see _group_write_is_self_only) - mock that check rather
+    than relying on the real test runner's own group membership, which
+    varies by platform: shared on macOS's default "staff" group, but a
+    single-user private group by default on Ubuntu (the CI runner)."""
+
     launcher = tmp_path / "lanfence"
     launcher.write_text("#!/bin/sh\n")
     launcher.chmod(0o755)
     tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IWGRP)
     try:
-        assert _trusted_to_run_as_root(launcher) is False
+        with patch("lanfence.cli._group_write_is_self_only", return_value=False):
+            assert _trusted_to_run_as_root(launcher) is False
     finally:
         tmp_path.chmod(0o700)
 
