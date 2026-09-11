@@ -17,6 +17,25 @@ Each release is also published to
 
 ### Added
 
+- **Device inventory and review.** Three new commands work the database
+  without touching the network: `lanfence devices` lists every previously
+  observed device (`--status online|offline`, `--untrusted`,
+  `--review-needed`, `--format table|json`, AND-combined); `lanfence device
+  <MAC>` shows one device's current details plus its lifecycle timeline
+  (`--since`, `--format table|json`); and `lanfence review` walks devices
+  needing attention - untrusted, not snoozed, not already flagged - offering
+  trust/snooze/investigate/skip/quit in a stable order, with noninteractive
+  equivalents (`review <MAC> --trust ...`, `--snooze 24h`, `--investigate
+  ...`, `--clear`) for scripts. Trust is still only ever recorded in the
+  existing YAML allowlist and only ever added by a human; review state,
+  notes, and snooze expiry live in a new, backward-compatible `device_review`
+  SQLite table. Snoozing suppresses external alert dispatch only - findings
+  keep recording and keep showing up in CLI/JSON output, and are filtered out
+  before alert cooldown bookkeeping so a suppressed finding never consumes a
+  cooldown slot a real alert would need. A `lanfence monitor` process already
+  running now reloads the allowlist on its normal sweep cadence, so trust
+  changes made from another terminal take effect without a restart.
+
 - **DHCP snooping.** `lanfence monitor` (`--dhcp/--no-dhcp`, on by default,
   effective only when `passive` is also enabled) now also parses DHCP
   traffic in its existing passive capture for a device's self-reported

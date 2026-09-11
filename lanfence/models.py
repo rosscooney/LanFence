@@ -18,6 +18,10 @@ SEVERITIES: tuple[str, ...] = ("info", "medium", "high")
 
 EventType = Literal["new_device", "reappeared", "disconnected"]
 
+#: Persisted review states are mutually exclusive; "pending" is the default
+#: for any device with no review row at all, or whose snooze has expired.
+ReviewStateName = Literal["pending", "snoozed", "investigating"]
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -36,13 +40,19 @@ class Device(BaseModel):
     allowlisted: bool = False
     allowlist_name: str | None = None
     fingerprints: list[str] = Field(default_factory=list)
+    #: Review/snooze state (see :class:`ReviewState`) - "pending" and unset
+    #: unless a device inventory query has populated these from the database.
+    #: Not itself stored on the ``devices`` table; joined in at read time.
+    review_state: ReviewStateName = "pending"
+    review_notes: str | None = None
+    snoozed_until: datetime | None = None
 
     @field_validator("mac")
     @classmethod
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("ip", "hostname", "vendor", "allowlist_name")
+    @field_validator("ip", "hostname", "vendor", "allowlist_name", "review_notes")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None
@@ -51,6 +61,32 @@ class Device(BaseModel):
     @classmethod
     def _clean_list(cls, value: list[str]) -> list[str]:
         return [clean_text(v, max_len=128) for v in value]
+
+
+class ReviewState(BaseModel):
+    """The persisted review/trust-review state for one MAC (``lanfence review``).
+
+    Trust itself lives in the YAML allowlist, not here - this only tracks the
+    mutually-exclusive ``snoozed``/``investigating`` states (``pending`` is
+    the default and is never itself persisted as a row). ``updated_at`` is
+    ``None`` for a MAC with no review row yet (never reviewed).
+    """
+
+    mac: str
+    state: ReviewStateName = "pending"
+    notes: str | None = None
+    snoozed_until: datetime | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=1000) if value is not None else None
 
 
 class DeviceEvent(BaseModel):

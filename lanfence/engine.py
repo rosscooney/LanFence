@@ -244,3 +244,50 @@ def filter_rate_limited(
             finding.mac, finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds
         )
     ]
+
+
+def filter_snoozed(findings: list[Finding], store: DeviceStore, *, now: datetime) -> list[Finding]:
+    """Findings for a MAC that is *not* currently snoozed.
+
+    Applied before :func:`filter_rate_limited` so a snoozed device's
+    suppressed findings never reach ``due_for_alert`` - a snooze must not
+    consume cooldown bookkeeping it never actually used. Only throttles
+    external dispatch: the caller's own copy of ``findings`` (for CLI/JSON
+    output, and whatever was already written to the database) is untouched.
+    """
+
+    return [f for f in findings if not store.is_snoozed(f.mac, now=now)]
+
+
+def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
+    """Every previously observed device, with current allowlist/review state
+    joined in. Does not perform a scan - purely a database read."""
+
+    inventory: list[Device] = []
+    for device in store.all_devices():
+        review = store.get_review(device.mac)
+        allow_entry = allowlist.match(device.mac)
+        inventory.append(
+            device.model_copy(
+                update={
+                    "allowlisted": allow_entry is not None,
+                    "allowlist_name": allow_entry.name if allow_entry else None,
+                    "review_state": review.state,
+                    "review_notes": review.notes,
+                    "snoozed_until": review.snoozed_until,
+                }
+            )
+        )
+    return inventory
+
+
+def is_review_needed(device: Device, *, now: datetime) -> bool:
+    """Untrusted, not actively snoozed, and not already flagged for
+    investigation. An expired snooze (``snoozed_until`` in the past) does not
+    count as active, so the device is back in the review queue."""
+
+    if device.allowlisted or device.review_state == "investigating":
+        return False
+    if device.review_state == "snoozed" and device.snoozed_until is not None and device.snoozed_until > now:
+        return False
+    return True

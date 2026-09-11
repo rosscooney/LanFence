@@ -154,3 +154,153 @@ def test_due_for_alert_is_independent_per_mac(tmp_path: Path):
         t0 = _now()
         assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "medium", now=t0, cooldown_seconds=900) is True
         assert store.due_for_alert("11:22:33:44:55:66", "medium", now=t0, cooldown_seconds=900) is True
+
+
+# --- events_for --------------------------------------------------------
+
+
+def test_events_for_filters_by_mac_and_time(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="1.1.1.1", hostname=None, vendor=None, seen_at=t0)
+        store.observe(mac="11:22:33:44:55:66", ip="2.2.2.2", hostname=None, vendor=None, seen_at=t0)
+        store.mark_offline(set(), as_of=t0 + timedelta(minutes=1))
+        store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="1.1.1.1", hostname=None, vendor=None,
+            seen_at=t0 + timedelta(minutes=2),
+        )
+
+        events = store.events_for("aa:bb:cc:dd:ee:ff")
+        assert [e.event_type for e in events] == ["new_device", "disconnected", "reappeared"]
+        assert all(e.mac == "aa:bb:cc:dd:ee:ff" for e in events)
+
+        recent = store.events_for("aa:bb:cc:dd:ee:ff", since=t0 + timedelta(minutes=1, seconds=30))
+        assert [e.event_type for e in recent] == ["reappeared"]
+
+
+def test_events_for_unknown_mac_is_empty(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        assert store.events_for("aa:bb:cc:dd:ee:ff") == []
+
+
+def test_events_for_normalizes_mac_case(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="1.1.1.1", hostname=None, vendor=None, seen_at=_now())
+        events = store.events_for("AA:BB:CC:DD:EE:FF")
+        assert len(events) == 1
+
+
+# --- review state (snooze / investigate / clear) ----------------------------
+
+
+def test_get_review_defaults_to_pending_for_unknown_mac(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        review = store.get_review("aa:bb:cc:dd:ee:ff")
+        assert review.state == "pending"
+        assert review.notes is None
+        assert review.snoozed_until is None
+        assert review.updated_at is None
+
+
+def test_set_snoozed_persists_state_and_expiry(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        until = now + timedelta(hours=24)
+        store.set_snoozed("aa:bb:cc:dd:ee:ff", until=until, updated_at=now)
+        review = store.get_review("aa:bb:cc:dd:ee:ff")
+        assert review.state == "snoozed"
+        assert review.snoozed_until == until
+        assert review.updated_at == now
+
+
+def test_set_snoozed_preserves_existing_notes_when_not_given(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_investigating("aa:bb:cc:dd:ee:ff", notes="original notes", updated_at=now)
+        store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now + timedelta(hours=1), updated_at=now)
+        assert store.get_review("aa:bb:cc:dd:ee:ff").notes == "original notes"
+
+
+def test_set_snoozed_overwrites_notes_when_given(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_investigating("aa:bb:cc:dd:ee:ff", notes="old", updated_at=now)
+        store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now + timedelta(hours=1), notes="new", updated_at=now)
+        assert store.get_review("aa:bb:cc:dd:ee:ff").notes == "new"
+
+
+def test_set_investigating_clears_any_snooze(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now + timedelta(hours=1), updated_at=now)
+        store.set_investigating("aa:bb:cc:dd:ee:ff", notes="check it", updated_at=now)
+        review = store.get_review("aa:bb:cc:dd:ee:ff")
+        assert review.state == "investigating"
+        assert review.snoozed_until is None
+        assert review.notes == "check it"
+
+
+def test_clear_review_resets_to_pending(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_investigating("aa:bb:cc:dd:ee:ff", notes="x", updated_at=now)
+        store.clear_review("aa:bb:cc:dd:ee:ff")
+        review = store.get_review("aa:bb:cc:dd:ee:ff")
+        assert review.state == "pending"
+        assert review.notes is None
+        assert review.updated_at is None
+
+
+def test_clear_review_on_never_reviewed_mac_is_a_noop(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        store.clear_review("aa:bb:cc:dd:ee:ff")  # must not raise
+        assert store.get_review("aa:bb:cc:dd:ee:ff").state == "pending"
+
+
+def test_is_snoozed_true_within_window_false_after_expiry(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now + timedelta(hours=1), updated_at=now)
+        assert store.is_snoozed("aa:bb:cc:dd:ee:ff", now=now) is True
+        assert store.is_snoozed("aa:bb:cc:dd:ee:ff", now=now + timedelta(hours=2)) is False
+
+
+def test_is_snoozed_false_for_pending_or_investigating(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        assert store.is_snoozed("aa:bb:cc:dd:ee:ff", now=now) is False
+        store.set_investigating("aa:bb:cc:dd:ee:ff", updated_at=now)
+        assert store.is_snoozed("aa:bb:cc:dd:ee:ff", now=now) is False
+
+
+def test_review_state_persists_across_reopening_the_database(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    now = _now()
+    with DeviceStore(db_path) as store:
+        store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now + timedelta(hours=1), notes="reopened test", updated_at=now)
+
+    with DeviceStore(db_path) as store:
+        review = store.get_review("aa:bb:cc:dd:ee:ff")
+        assert review.state == "snoozed"
+        assert review.notes == "reopened test"
+
+
+def test_device_review_table_added_to_a_pre_existing_database_without_it(tmp_path: Path):
+    """Migration test: a database file created before device_review existed
+    (here, simulated by dropping the table after normal creation) gets it
+    back transparently - and without data loss - the next time it's opened,
+    since the schema is applied with CREATE TABLE IF NOT EXISTS."""
+
+    db_path = tmp_path / "db.sqlite"
+    now = _now()
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="1.1.1.1", hostname=None, vendor=None, seen_at=now)
+        store._conn.execute("DROP TABLE device_review")
+        store._conn.commit()
+
+    with DeviceStore(db_path) as store:  # re-opening should recreate the table
+        assert store.get_review("aa:bb:cc:dd:ee:ff").state == "pending"
+        # pre-existing data untouched by the migration
+        assert store.get_device("aa:bb:cc:dd:ee:ff") is not None
+        store.set_investigating("aa:bb:cc:dd:ee:ff", notes="works after migration", updated_at=now)
+        assert store.get_review("aa:bb:cc:dd:ee:ff").notes == "works after migration"

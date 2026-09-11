@@ -129,6 +129,14 @@ lanfence monitor                # continuous: active sweeps + passive sniffing
 lanfence allow <MAC> --name X   # trust a device; its findings become info
 lanfence allow --list           # show the allowlist
 lanfence allow --remove <MAC>   # untrust a device
+lanfence devices                # list previously observed devices - no scan
+lanfence devices --review-needed --format json
+lanfence device <MAC>           # one device's details, trust state, timeline
+lanfence review                 # interactively work through devices needing review
+lanfence review <MAC> --trust --name "Kitchen speaker"
+lanfence review <MAC> --snooze 24h
+lanfence review <MAC> --investigate --notes "..."
+lanfence review <MAC> --clear
 lanfence report --since 24h     # summarize events/findings from the database
 lanfence check                  # verify permissions, scapy, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
@@ -177,6 +185,77 @@ Findings (1)
 
 Overall: 1 finding(s), highest severity: medium
 ```
+
+## Device inventory and review
+
+`scan`/`monitor` find devices; `devices`, `device`, and `review` let you work
+through what's already in the database, without touching the network.
+
+```text
+lanfence devices                          # every observed device, no scan
+lanfence devices --status online          # combine filters with AND
+lanfence devices --untrusted --review-needed --format json
+lanfence device aa:bb:cc:dd:ee:ff          # one device's details + timeline
+lanfence device aa:bb:cc:dd:ee:ff --since 7d --format json
+lanfence review                           # walk the review queue interactively
+lanfence review <MAC> --trust --name "Kitchen speaker" --notes "..."
+lanfence review <MAC> --snooze 24h
+lanfence review <MAC> --investigate --notes "..."
+lanfence review <MAC> --clear
+```
+
+`lanfence devices` lists every device ever observed, straight from SQLite -
+it never scans. Each row's trusted/untrusted state is looked up fresh against
+the *current* allowlist file, not whatever it was on that device's last scan.
+`--status online|offline`, `--untrusted`, and `--review-needed` combine with
+AND: `--status online --untrusted` shows only devices that are both online
+and off the allowlist. **Review-needed** means untrusted, not currently
+snoozed, and not already flagged investigating - trusting, an active snooze,
+or an investigation flag all take it out of the queue.
+
+`lanfence device <MAC>` shows one device in two clearly separated parts:
+*current details* (IP/hostname/vendor/status/trust/review state), which
+reflect only the most recent sighting, and a *lifecycle timeline* of
+connect/reappear/disconnect events since `--since` (default `30d`). The
+timeline is an append-only event log, not a full history of every address a
+MAC has ever held - LAN Fence does not retain that. An invalid or
+never-before-seen MAC exits non-zero with a clear error.
+
+`lanfence review` is how you act on the queue. With no MAC, it walks devices
+needing review one at a time, in a stable MAC order fixed at the start of the
+session, and offers:
+
+- **[t]rust** - prompts for a friendly name and optional notes, then adds the
+  device to the same allowlist `lanfence allow` writes to. LAN Fence never
+  trusts a device on its own; a human always makes this call.
+- **[s]nooze** - suppresses *external* alert dispatch (Slack/Discord/Teams/
+  Twilio/webhook/etc.) for this MAC for a bounded duration (default `24h`).
+  Findings keep being recorded and still show up in `scan`/`report`/`devices`
+  output and JSON - snoozing hides notifications, not the device.
+- **[i]nvestigate** - records an investigation flag and optional notes
+  without trusting the device or suppressing its alerts.
+- **s[k]ip** - no changes; the device stays in the queue for next time.
+- **[q]uit** - stops the session immediately; every decision made so far is
+  already persisted.
+
+It requires a real terminal and exits with a helpful error instead of
+hanging if stdin isn't interactive (e.g. in a script or cron job) - use the
+noninteractive form there instead, passing exactly one of `--trust`,
+`--snooze`, `--investigate`, or `--clear` alongside a MAC. `--clear` removes
+a snooze/investigation flag and returns the device to "pending"; it does
+**not** remove allowlist membership - `lanfence allow --remove <MAC>` is
+still what untrusts a device.
+
+Trust, snooze, and investigate are mutually exclusive persisted states
+(`pending` is the default); if a device is both trusted and, say, mid-snooze
+from before it was trusted, "trusted" always wins for display purposes. A
+snooze that expires simply lets the device fall back into the review queue -
+expiry alone never fabricates a new connect/disconnect event or fires a
+retroactive alert. A `lanfence monitor` process already running reloads the
+allowlist on its normal sweep cadence, so a `review --trust` or `allow` made
+from another terminal takes effect without restarting it; review/snooze
+state itself is read fresh from the database on every finding, so it needs
+no such reload.
 
 ## Running unattended
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,9 +9,14 @@ import yaml
 from typer.testing import CliRunner
 
 from lanfence.cli import app
+from lanfence.db import DeviceStore
 from lanfence.models import Finding
 
 runner = CliRunner()
+
+
+def _now():
+    return datetime.now(timezone.utc)
 
 
 @pytest.fixture
@@ -190,3 +196,508 @@ def test_scan_alert_rate_limits_repeat_dispatch_for_same_device(tmp_path: Path):
 def test_config_not_found(tmp_path: Path):
     result = runner.invoke(app, ["allow", "--list", "--config", str(tmp_path / "missing.yaml")])
     assert result.exit_code == 2
+
+
+# --- devices ---------------------------------------------------------------
+
+
+def _seed_devices(config_path: Path) -> None:
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    now = _now()
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname="phone.local", vendor="Apple, Inc.", seen_at=now)
+    store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor="Espressif Inc.", seen_at=now)
+    store.observe(mac="77:88:99:aa:bb:cc", ip="10.0.0.7", hostname="nas.local", vendor=None, seen_at=now)
+    store.mark_offline({"aa:bb:cc:dd:ee:ff", "77:88:99:aa:bb:cc"}, as_of=now)  # offlines 11:22:33
+    store.set_investigating("77:88:99:aa:bb:cc", notes="check", updated_at=now)
+    store.close()
+
+    from lanfence.allowlist import Allowlist
+
+    al = Allowlist.load(cfg_dict["allowlist_file"])
+    al.path = Path(cfg_dict["allowlist_file"])
+    al.add("aa:bb:cc:dd:ee:ff", "My Phone")
+    al.save()
+
+
+def test_devices_empty_database(config_path: Path):
+    result = runner.invoke(app, ["devices", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "database yet" in result.output.lower()
+
+
+def _devices_json(config_path: Path, *extra_args: str) -> dict:
+    import json
+
+    result = runner.invoke(app, ["devices", "--format", "json", *extra_args, "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    return {d["mac"]: d for d in json.loads(result.output)}
+
+
+def test_devices_lists_all_by_default(config_path: Path):
+    _seed_devices(config_path)
+    by_mac = _devices_json(config_path)
+    assert set(by_mac) == {"aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66", "77:88:99:aa:bb:cc"}
+
+    # the table format renders without crashing and reports the right count
+    result = runner.invoke(app, ["devices", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Devices (3)" in result.output
+
+
+def test_devices_status_filter(config_path: Path):
+    _seed_devices(config_path)
+    by_mac = _devices_json(config_path, "--status", "offline")
+    assert set(by_mac) == {"11:22:33:44:55:66"}
+
+
+def test_devices_untrusted_filter(config_path: Path):
+    _seed_devices(config_path)
+    by_mac = _devices_json(config_path, "--untrusted")
+    assert set(by_mac) == {"11:22:33:44:55:66", "77:88:99:aa:bb:cc"}
+
+
+def test_devices_review_needed_filter_excludes_trusted_and_investigating(config_path: Path):
+    _seed_devices(config_path)
+    by_mac = _devices_json(config_path, "--review-needed")
+    assert set(by_mac) == {"11:22:33:44:55:66"}
+
+
+def test_devices_combined_filters_are_predictable_and(config_path: Path):
+    _seed_devices(config_path)
+    # untrusted AND offline -> only 11:22:33 (77:88:99 is untrusted but online)
+    by_mac = _devices_json(config_path, "--untrusted", "--status", "offline")
+    assert set(by_mac) == {"11:22:33:44:55:66"}
+
+
+def test_devices_json_output(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["devices", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0
+    import json
+
+    payload = json.loads(result.output)
+    assert len(payload) == 3
+    by_mac = {d["mac"]: d for d in payload}
+    assert by_mac["aa:bb:cc:dd:ee:ff"]["allowlisted"] is True
+    assert by_mac["77:88:99:aa:bb:cc"]["review_state"] == "investigating"
+
+
+def test_devices_rejects_invalid_status(config_path: Path):
+    result = runner.invoke(app, ["devices", "--status", "sideways", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "status" in result.output.lower()
+
+
+def test_devices_rejects_invalid_format(config_path: Path):
+    result = runner.invoke(app, ["devices", "--format", "xml", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+# --- device <mac> ------------------------------------------------------
+
+
+def test_device_shows_current_details_and_timeline(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Current details" in result.output
+    assert "Lifecycle timeline" in result.output
+    assert "phone.local" in result.output
+    assert "trusted" in result.output.lower()
+
+
+def test_device_since_filters_timeline(config_path: Path):
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    old = _now() - timedelta(days=10)
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=old)
+    store.mark_offline(set(), as_of=old + timedelta(minutes=1))
+    store.observe(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None,
+        seen_at=_now(),
+    )
+    store.close()
+
+    result_all = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--since", "365d", "--config", str(config_path)]
+    )
+    assert "3 event(s)" in result_all.output  # new_device, disconnected, reappeared
+
+    result_recent = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--since", "1h", "--config", str(config_path)]
+    )
+    assert "1 event(s)" in result_recent.output  # only the recent reappeared
+
+
+def test_device_json_output(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0
+    import json
+
+    payload = json.loads(result.output)
+    assert payload["device"]["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert "timeline" in payload
+    assert "since" in payload
+
+
+def test_device_invalid_mac(config_path: Path):
+    result = runner.invoke(app, ["device", "not-a-mac", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "not a valid mac" in result.output.lower()
+
+
+def test_device_unknown_mac(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "00:00:00:00:00:99", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "no device" in result.output.lower()
+
+
+def test_device_normalizes_mac_case_and_separators(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "AA-BB-CC-DD-EE-FF", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "aa:bb:cc:dd:ee:ff" in result.output
+
+
+# --- review: noninteractive -------------------------------------------------
+
+
+def test_review_trust_adds_to_allowlist_and_clears_review_flag(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["review", "11:22:33:44:55:66", "--trust", "--name", "Kitchen speaker",
+              "--notes", "smart plug", "--config", str(config_path)],
+    )
+    assert result.exit_code == 0
+    assert "trusted" in result.output.lower()
+
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "Kitchen speaker" in listing.output
+
+    devices_result = runner.invoke(app, ["devices", "--format", "json", "--config", str(config_path)])
+    import json
+
+    payload = {d["mac"]: d for d in json.loads(devices_result.output)}
+    assert payload["11:22:33:44:55:66"]["allowlisted"] is True
+
+
+def test_review_trust_defaults_name_to_mac(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["review", "11:22:33:44:55:66", "--trust", "--config", str(config_path)])
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "11:22:33:44:55:66" in listing.output
+
+
+def test_review_snooze_sets_snoozed_state(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["review", "11:22:33:44:55:66", "--snooze", "24h", "--config", str(config_path)]
+    )
+    assert result.exit_code == 0
+    assert "snoozed" in result.output.lower()
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    review = store.get_review("11:22:33:44:55:66")
+    store.close()
+    assert review.state == "snoozed"
+    assert review.snoozed_until > _now()
+
+
+def test_review_investigate_sets_flag_without_trusting_or_snoozing(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["review", "11:22:33:44:55:66", "--investigate", "--notes", "weird device",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 0
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    review = store.get_review("11:22:33:44:55:66")
+    store.close()
+    assert review.state == "investigating"
+    assert review.notes == "weird device"
+
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "11:22:33:44:55:66" not in listing.output  # not trusted
+
+
+def test_review_clear_removes_flags_but_not_allowlist(config_path: Path):
+    _seed_devices(config_path)
+    # 77:88:99 was set to investigating by _seed_devices
+    result = runner.invoke(
+        app, ["review", "77:88:99:aa:bb:cc", "--clear", "--config", str(config_path)]
+    )
+    assert result.exit_code == 0
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    review = store.get_review("77:88:99:aa:bb:cc")
+    store.close()
+    assert review.state == "pending"
+
+    # aa:bb:cc:dd:ee:ff is trusted by _seed_devices; clearing its review
+    # state (a no-op here, it has none) must not touch the allowlist either.
+    runner.invoke(app, ["review", "aa:bb:cc:dd:ee:ff", "--clear", "--config", str(config_path)])
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "My Phone" in listing.output
+
+
+def test_review_rejects_no_action_given(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["review", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "exactly one" in result.output.lower()
+
+
+def test_review_rejects_conflicting_actions(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["review", "11:22:33:44:55:66", "--trust", "--investigate", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "exactly one" in result.output.lower()
+
+
+def test_review_rejects_name_without_trust(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["review", "11:22:33:44:55:66", "--investigate", "--name", "x", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "--name" in result.output
+
+
+def test_review_rejects_notes_without_trust_or_investigate(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["review", "11:22:33:44:55:66", "--snooze", "24h", "--notes", "x", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "--notes" in result.output
+
+
+def test_review_rejects_action_flags_without_mac(config_path: Path):
+    result = runner.invoke(app, ["review", "--trust", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "require a mac" in result.output.lower()
+
+
+def test_review_rejects_invalid_mac_noninteractive(config_path: Path):
+    result = runner.invoke(app, ["review", "not-a-mac", "--trust", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "not a valid mac" in result.output.lower()
+
+
+def test_review_rejects_invalid_snooze_duration(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["review", "11:22:33:44:55:66", "--snooze", "sideways", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+
+
+# --- review: interactive ----------------------------------------------------
+
+
+def test_review_interactive_requires_a_terminal(config_path: Path):
+    _seed_devices(config_path)
+    # No mock of _stdin_is_interactive - CliRunner's stdin is never a tty,
+    # matching real noninteractive use (cron/systemd) - must fail helpfully,
+    # not hang waiting for input that will never come.
+    result = runner.invoke(app, ["review", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "interactive terminal" in result.output.lower()
+
+
+def test_review_interactive_nothing_to_review(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["review", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "nothing needs review" in result.output.lower()
+
+
+def test_review_interactive_trust_flow(config_path: Path):
+    _seed_devices(config_path)  # 11:22:33 needs review; aa:bb:cc trusted; 77:88:99 investigating
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="t\nLiving Room ESP\nsome notes\n",
+        )
+    assert result.exit_code == 0
+    assert "trusted: living room esp" in result.output.lower()
+
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "Living Room ESP" in listing.output
+
+
+def test_review_interactive_snooze_flow(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="s\n2h\n",
+        )
+    assert result.exit_code == 0
+    assert "snoozed until" in result.output.lower()
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    review = store.get_review("11:22:33:44:55:66")
+    store.close()
+    assert review.state == "snoozed"
+
+
+def test_review_interactive_investigate_flow(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="i\nlooks odd\n",
+        )
+    assert result.exit_code == 0
+    assert "flagged for investigation" in result.output.lower()
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    review = store.get_review("11:22:33:44:55:66")
+    store.close()
+    assert review.state == "investigating"
+    assert review.notes == "looks odd"
+
+
+def test_review_interactive_skip_makes_no_changes(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["review", "--config", str(config_path)], input="k\n")
+    assert result.exit_code == 0
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    review = store.get_review("11:22:33:44:55:66")
+    store.close()
+    assert review.state == "pending"
+
+
+def test_review_interactive_quit_preserves_earlier_decisions(config_path: Path):
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    now = _now()
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=now)
+    store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=now)
+    store.close()
+
+    # queue order is by MAC ascending: 11:22:... comes before aa:bb:...
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="i\nfirst device flagged\nq\n",
+        )
+    assert result.exit_code == 0
+    assert "stopping review" in result.output.lower()
+
+    store = DeviceStore(cfg_dict["db_path"])
+    first_review = store.get_review("11:22:33:44:55:66")
+    second_review = store.get_review("aa:bb:cc:dd:ee:ff")
+    store.close()
+    assert first_review.state == "investigating"  # decision before quit preserved
+    assert second_review.state == "pending"  # never reached
+
+
+# --- monitor picking up live trust changes ----------------------------------
+
+
+def test_monitor_picks_up_trust_change_without_restart(tmp_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+    from lanfence.allowlist import Allowlist
+
+    db_path = tmp_path / "lanfence.db"
+    allowlist_path = tmp_path / "allowlist.yaml"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(db_path),
+            "allowlist_file": str(allowlist_path),
+            "scan": {"scan_interval_seconds": 0.001, "resolve_hostnames": False},
+        }),
+        encoding="utf-8",
+    )
+
+    # First octet 0x00 has the locally-administered bit clear and matches no
+    # vendor OUI, so this MAC triggers no fingerprint signature - keeping the
+    # "not yet trusted" severity a plain "medium" (see build_findings), not
+    # complicated by an unrelated info-severity signature match.
+    sighting_mac = "00:11:22:33:44:55"
+
+    # A routine "still online, nothing changed" sighting produces no finding
+    # at all (see build_findings) - to observe the reloaded trust state
+    # reflected in a *new* finding, the device must disconnect and reappear:
+    # present on sweeps 1 and 3, absent (marked offline) on sweep 2.
+    sweep = {"n": 0}
+
+    def fake_active_scan(*, subnet, interface=None, timeout=3.0):
+        sweep["n"] += 1
+        if sweep["n"] == 2:
+            return []
+        return [scanner_module.ArpSighting(mac=sighting_mac, ip="10.0.0.5", seen_at=_now())]
+
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", fake_active_scan)
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+
+    findings_seen: list[list] = []
+
+    def fake_emit_findings(findings, *, alert, cfg, store):
+        findings_seen.append(list(findings))
+
+    monkeypatch.setattr("lanfence.cli._emit_findings", fake_emit_findings)
+
+    # The monitor loop only re-sweeps once `scan_interval_seconds` of
+    # `time.monotonic()` has elapsed since the last sweep. With real
+    # monotonic time and a mocked (non-blocking) sleep, consecutive loop
+    # iterations can execute within the same sub-millisecond tick and
+    # spuriously skip a sweep. Pin monotonic time to a controlled,
+    # always-advancing counter so every iteration deterministically sweeps.
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    monkeypatch.setattr("lanfence.cli.time.monotonic", fake_monotonic)
+
+    tick = {"n": 0}
+
+    def fake_sleep(_seconds):
+        tick["n"] += 1
+        if tick["n"] == 1:
+            # Simulate a concurrent `lanfence review --trust` (or `allow`)
+            # happening while this monitor keeps running.
+            al = Allowlist.load(allowlist_path)
+            al.path = allowlist_path
+            al.add(sighting_mac, "Trusted Mid-Run")
+            al.save()
+        if tick["n"] >= 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("lanfence.cli.time.sleep", fake_sleep)
+
+    result = runner.invoke(
+        app, ["monitor", "--no-passive", "--no-ipv6", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    assert len(findings_seen) == 3
+    # Sweep 1 (new_device): not yet trusted.
+    assert findings_seen[0][0].severity != "info"
+    assert "unknown" in findings_seen[0][0].title.lower()
+    # Sweep 2: the device dropped off (disconnected) - no finding either way.
+    assert findings_seen[1] == []
+    # Sweep 3 (reappeared): the allowlist reload picked up the trust change
+    # made between sweeps 1 and 2, without restarting the monitor process.
+    assert findings_seen[2][0].severity == "info"
+    assert findings_seen[2][0].mac == sighting_mac

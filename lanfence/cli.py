@@ -28,14 +28,26 @@ from lanfence import __version__, alerts, scanner
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
-from lanfence.engine import build_findings, filter_rate_limited, process_sighting, run_active_sweep, utcnow
+from lanfence.engine import (
+    build_findings,
+    build_inventory,
+    filter_rate_limited,
+    filter_snoozed,
+    is_review_needed,
+    process_sighting,
+    run_active_sweep,
+    utcnow,
+)
 from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import setup_logging
 from lanfence.models import Finding
+from lanfence.netutil import normalize_mac
 from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
+    render_device_detail,
+    render_device_inventory,
     render_events,
     render_findings,
     render_scan_result,
@@ -222,19 +234,44 @@ def _warn_not_root(subcommand: str) -> None:
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
-def _parse_since(value: str) -> datetime:
-    """Parse a duration like ``24h``, ``30m``, ``7d`` into a UTC cutoff datetime."""
+def _duration_seconds(value: str) -> Optional[float]:
+    """Parse a duration like ``24h``, ``30m``, ``7d`` into seconds, or
+    ``None`` if it isn't well-formed. The one duration grammar shared by
+    ``--since`` and ``--snooze``."""
 
     value = value.strip().lower()
     if value and value[-1] in _UNIT_SECONDS and value[:-1].replace(".", "", 1).isdigit():
-        amount = float(value[:-1])
-        seconds = amount * _UNIT_SECONDS[value[-1]]
-        return datetime.now(timezone.utc) - timedelta(seconds=seconds)
-    typer.secho(
-        f"error: could not parse --since {value!r} (expected e.g. 24h, 30m, 7d)",
-        fg="red", err=True,
-    )
-    raise typer.Exit(code=2)
+        return float(value[:-1]) * _UNIT_SECONDS[value[-1]]
+    return None
+
+
+def _parse_since(value: str) -> datetime:
+    """Parse a duration like ``24h``, ``30m``, ``7d`` into a UTC cutoff datetime."""
+
+    seconds = _duration_seconds(value)
+    if seconds is None:
+        typer.secho(
+            f"error: could not parse --since {value!r} (expected e.g. 24h, 30m, 7d)",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+    return datetime.now(timezone.utc) - timedelta(seconds=seconds)
+
+
+def _parse_snooze_duration(value: str) -> timedelta:
+    """Parse a duration like ``24h`` for ``--snooze``. Exits(2) on bad input -
+    for the *noninteractive* path; the interactive prompt uses
+    :func:`_duration_seconds` directly so one bad answer doesn't abort the
+    whole review session."""
+
+    seconds = _duration_seconds(value)
+    if seconds is None:
+        typer.secho(
+            f"error: could not parse --snooze {value!r} (expected e.g. 24h, 30m, 7d)",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+    return timedelta(seconds=seconds)
 
 
 @app.command()
@@ -268,7 +305,8 @@ def scan(
     with DeviceStore(cfg.resolved_db_path()) as store:
         result = run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
         if alert:
-            to_send = filter_rate_limited(result.findings, store, cfg.alerts, now=utcnow())
+            not_snoozed = filter_snoozed(result.findings, store, now=utcnow())
+            to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
             alerts.dispatch(to_send, cfg.alerts)
 
     if output_format == "json":
@@ -292,7 +330,8 @@ def _emit_findings(findings: list[Finding], *, alert: bool, cfg: Config, store: 
         if finding.recommendation:
             typer.secho(f"    Recommendation: {finding.recommendation}", fg="cyan")
     if alert and findings:
-        to_send = filter_rate_limited(findings, store, cfg.alerts, now=utcnow())
+        not_snoozed = filter_snoozed(findings, store, now=utcnow())
+        to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
         alerts.dispatch(to_send, cfg.alerts)
 
 
@@ -367,6 +406,15 @@ def monitor(
         while True:
             now = time.monotonic()
             if now - last_sweep >= cfg.scan.scan_interval_seconds:
+                # Reload on the same cadence as active sweeps, so a `lanfence
+                # allow` / `review --trust` made while this monitor is
+                # already running takes effect without a restart - review
+                # state itself needs no such reload, since it's read fresh
+                # from the database on every finding via filter_snoozed.
+                try:
+                    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+                except Exception as exc:  # noqa: BLE001 - a bad edit must not crash monitoring
+                    typer.secho(f"warning: could not reload allowlist: {exc}", fg="yellow", err=True)
                 result = run_active_sweep(cfg, store, allowlist, signatures, interface=iface, subnet=net)
                 last_sweep = now
                 for err in result.errors:
@@ -494,6 +542,293 @@ def allow(
     entry = al.add(mac, name or mac, notes or "")
     al.save()
     typer.secho(f"added: {entry.name}  ({entry.mac})", fg="green")
+
+
+@app.command()
+def devices(
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status: online | offline."),
+    untrusted: bool = typer.Option(False, "--untrusted", help="Only devices not on the allowlist."),
+    review_needed: bool = typer.Option(
+        False, "--review-needed",
+        help="Only devices needing review: untrusted, not actively snoozed, not flagged investigating.",
+    ),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """List every previously observed device from the database - no scan.
+
+    Filters combine with AND: `--status online --untrusted` shows only
+    devices that are both online and not on the allowlist. Allowlist
+    membership is applied fresh from the current allowlist file, not
+    whatever it was the last time a scan ran.
+    """
+
+    if status is not None and status not in ("online", "offline"):
+        typer.secho(f"error: --status must be 'online' or 'offline', got {status!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    cfg = _load_config(config)
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    now = utcnow()
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        inventory = build_inventory(store, allowlist)
+
+    total_count = len(inventory)
+    if status is not None:
+        inventory = [d for d in inventory if d.status == status]
+    if untrusted:
+        inventory = [d for d in inventory if not d.allowlisted]
+    if review_needed:
+        inventory = [d for d in inventory if is_review_needed(d, now=now)]
+
+    if output_format == "json":
+        typer.echo(json.dumps([d.model_dump(mode="json") for d in inventory], indent=2))
+    else:
+        render_device_inventory(inventory, now=now, total_count=total_count)
+
+
+@app.command()
+def device(
+    mac: str = typer.Argument(..., help="MAC address to show."),
+    since: str = typer.Option("30d", "--since", help="How far back to show the lifecycle timeline, e.g. 24h, 7d."),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Show one device's current details, trust/review state, and lifecycle timeline.
+
+    "Current details" (IP/hostname/vendor/status) reflect only the most
+    recent sighting; the timeline below is a separate, append-only log of
+    connect/reappear/disconnect transitions - not a complete history of
+    every address this MAC has ever held (see the timeline's own caveat).
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        norm_mac = normalize_mac(mac)
+    except ValueError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+
+    cfg = _load_config(config)
+    since_dt = _parse_since(since)
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    now = utcnow()
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        raw_device = store.get_device(norm_mac)
+        if raw_device is None:
+            typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
+            raise typer.Exit(code=2)
+        review = store.get_review(norm_mac)
+        events = store.events_for(norm_mac, since=since_dt)
+
+    allow_entry = allowlist.match(norm_mac)
+    dev = raw_device.model_copy(
+        update={
+            "allowlisted": allow_entry is not None,
+            "allowlist_name": allow_entry.name if allow_entry else None,
+            "review_state": review.state,
+            "review_notes": review.notes,
+            "snoozed_until": review.snoozed_until,
+        }
+    )
+
+    if output_format == "json":
+        payload = {
+            "device": dev.model_dump(mode="json"),
+            "since": since_dt.isoformat(),
+            "timeline": [e.model_dump(mode="json") for e in events],
+        }
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        render_device_detail(dev, events, since_dt, now=now)
+
+
+def _stdin_is_interactive() -> bool:
+    """Wrapped so tests can simulate a real terminal without fighting how
+    the test runner's own stdin reports ``isatty()``."""
+
+    return sys.stdin.isatty()
+
+
+def _run_interactive_review(cfg: Config) -> None:
+    if not _stdin_is_interactive():
+        typer.secho(
+            "error: `lanfence review` needs an interactive terminal. Use the "
+            "noninteractive form instead, e.g.:\n"
+            "  lanfence review <MAC> --trust --name \"...\"\n"
+            "  lanfence review <MAC> --snooze 24h\n"
+            "  lanfence review <MAC> --investigate --notes \"...\"\n"
+            "  lanfence review <MAC> --clear",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+
+    allowlist_path = cfg.resolved_allowlist_file()
+    allowlist = Allowlist.load(allowlist_path)
+    allowlist.path = allowlist_path
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        now = utcnow()
+        # A stable snapshot taken once at the start - a decision made on one
+        # device (trust/snooze/investigate) never reshuffles or reintroduces
+        # others later in the same session.
+        queue = sorted(
+            (d for d in build_inventory(store, allowlist) if is_review_needed(d, now=now)),
+            key=lambda d: d.mac,
+        )
+
+        if not queue:
+            typer.secho("Nothing needs review.", fg="green")
+            return
+
+        typer.secho(f"{len(queue)} device(s) need review.\n", fg="cyan", bold=True)
+        for dev in queue:
+            typer.secho(f"Device: {dev.mac}", fg="cyan", bold=True)
+            typer.echo(
+                f"  IP: {dev.ip or '[unknown]'}   Hostname: {dev.hostname or '[unknown]'}   "
+                f"Vendor: {dev.vendor or '[unknown]'}"
+            )
+            typer.echo(
+                f"  First seen: {dev.first_seen.isoformat(timespec='seconds')}   "
+                f"Last seen: {dev.last_seen.isoformat(timespec='seconds')}   Status: {dev.status}"
+            )
+            if dev.fingerprints:
+                typer.echo(f"  Fingerprint signals: {', '.join(dev.fingerprints)}")
+
+            action = typer.prompt(
+                "  [t]rust  [s]nooze  [i]nvestigate  s[k]ip  [q]uit", default="k"
+            ).strip().lower()
+
+            if action in ("q", "quit"):
+                typer.echo("stopping review.")
+                return
+            if action in ("t", "trust"):
+                name = typer.prompt("  name", default=dev.mac)
+                notes = typer.prompt("  notes", default="")
+                entry = allowlist.add(dev.mac, name, notes)
+                allowlist.save()
+                store.clear_review(dev.mac)
+                typer.secho(f"  trusted: {entry.name}", fg="green")
+            elif action in ("s", "snooze"):
+                duration_str = typer.prompt("  snooze for", default="24h")
+                seconds = _duration_seconds(duration_str)
+                if seconds is None:
+                    typer.secho(f"  could not parse {duration_str!r}, snoozing for 24h instead", fg="yellow")
+                    seconds = 24 * 3600
+                action_now = utcnow()
+                until = action_now + timedelta(seconds=seconds)
+                store.set_snoozed(dev.mac, until=until, updated_at=action_now)
+                typer.secho(f"  snoozed until {until.isoformat(timespec='seconds')}", fg="green")
+            elif action in ("i", "investigate"):
+                notes = typer.prompt("  notes", default="")
+                store.set_investigating(dev.mac, notes=notes, updated_at=utcnow())
+                typer.secho("  flagged for investigation", fg="green")
+            else:
+                typer.echo("  skipped.")
+            typer.echo("")
+
+
+@app.command()
+def review(
+    mac: Optional[str] = typer.Argument(
+        None, help="MAC to act on directly. Omit to interactively review the queue."
+    ),
+    trust: bool = typer.Option(False, "--trust", help="Trust this device (adds it to the allowlist)."),
+    name: Optional[str] = typer.Option(
+        None, "--name", help="Friendly name when trusting (default: the MAC itself)."
+    ),
+    notes: Optional[str] = typer.Option(None, "--notes", help="Notes for --trust or --investigate."),
+    snooze: Optional[str] = typer.Option(
+        None, "--snooze", help="Snooze external alerts for this MAC, e.g. 24h."
+    ),
+    investigate: bool = typer.Option(False, "--investigate", help="Flag this device for investigation."),
+    clear: bool = typer.Option(
+        False, "--clear",
+        help="Clear review flags/snooze for this MAC. Does not untrust it - see `allow --remove`.",
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Review devices needing attention: trust, snooze, flag, or clear.
+
+    With no MAC, interactively walks the review queue (devices that are
+    untrusted, not currently snoozed, and not already flagged for
+    investigation) in a stable order, offering trust/snooze/investigate/skip/
+    quit for each. With a MAC, exactly one of --trust, --snooze,
+    --investigate, or --clear performs that action without prompting:
+
+        lanfence review <MAC> --trust --name "Kitchen speaker" --notes "..."
+        lanfence review <MAC> --snooze 24h
+        lanfence review <MAC> --investigate --notes "..."
+        lanfence review <MAC> --clear
+
+    Trusting always uses the same allowlist `lanfence allow` writes to.
+    Snoozing only suppresses external alert dispatch - findings, events, and
+    CLI/JSON output are unaffected, and it never automatically trusts a
+    device. `--clear` removes a snooze/investigation flag but leaves the
+    allowlist untouched either way.
+    """
+
+    cfg = _load_config(config)
+    actions_given = sum([trust, snooze is not None, investigate, clear])
+
+    if mac is None:
+        if actions_given:
+            typer.secho(
+                "error: --trust/--snooze/--investigate/--clear require a MAC argument",
+                fg="red", err=True,
+            )
+            raise typer.Exit(code=2)
+        _run_interactive_review(cfg)
+        return
+
+    try:
+        norm_mac = normalize_mac(mac)
+    except ValueError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+
+    if actions_given != 1:
+        typer.secho(
+            "error: provide exactly one of --trust, --snooze, --investigate, --clear",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+    if name is not None and not trust:
+        typer.secho("error: --name only applies to --trust", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if notes is not None and not (trust or investigate):
+        typer.secho("error: --notes only applies to --trust or --investigate", fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    now = utcnow()
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        if trust:
+            path = cfg.resolved_allowlist_file()
+            al = Allowlist.load(path)
+            al.path = path
+            entry = al.add(norm_mac, name or norm_mac, notes or "")
+            al.save()
+            store.clear_review(norm_mac)
+            typer.secho(f"trusted: {entry.name}  ({entry.mac})", fg="green")
+        elif snooze is not None:
+            duration = _parse_snooze_duration(snooze)
+            until = now + duration
+            store.set_snoozed(norm_mac, until=until, updated_at=now)
+            typer.secho(f"snoozed {norm_mac} until {until.isoformat(timespec='seconds')}", fg="green")
+        elif investigate:
+            store.set_investigating(norm_mac, notes=notes, updated_at=now)
+            typer.secho(f"flagged {norm_mac} for investigation", fg="green")
+        else:  # clear
+            store.clear_review(norm_mac)
+            typer.secho(f"cleared review state for {norm_mac}", fg="green")
 
 
 #: Set in the child's environment across the ``execvpe`` below so a second

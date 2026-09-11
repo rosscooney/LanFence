@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from lanfence.models import Device, DeviceEvent, Finding, ScanResult
 
 try:  # rich ships with typer, but keep rendering optional
     from rich.console import Console
     from rich.markup import escape as _rich_escape
+    from rich.panel import Panel
     from rich.table import Table
 
     _RICH = True
@@ -186,4 +189,171 @@ def render_events(events: list[DeviceEvent], *, plain: bool = False) -> str:
             _rich_escape(event.hostname or "[unknown]"),
         )
     console.print(table)
+    return text
+
+
+def review_status_label(device: Device, *, now: datetime) -> str:
+    """Human display label for a device's trust/review state.
+
+    Trust takes display precedence over any lingering review flag - a
+    trusted device shows "trusted" even if it was flagged for investigation
+    before being trusted. An expired snooze displays as "pending" (it no
+    longer suppresses anything - see ``DeviceStore.is_snoozed``).
+    """
+
+    if device.allowlisted:
+        return "trusted"
+    if device.review_state == "investigating":
+        return "investigating"
+    if device.review_state == "snoozed" and device.snoozed_until is not None and device.snoozed_until > now:
+        return f"snoozed until {device.snoozed_until.isoformat(timespec='seconds')}"
+    return "pending"
+
+
+def render_device_inventory(
+    devices: list[Device], *, now: datetime, total_count: int | None = None, plain: bool = False
+) -> str:
+    """Render the ``lanfence devices`` listing - no scan, a pure database read.
+
+    ``total_count`` (the unfiltered database size, if filters were applied)
+    lets the empty case say whether the database itself is empty or a filter
+    just matched nothing - passing ``None`` treats ``devices`` as unfiltered.
+    """
+
+    empty_message = (
+        "No devices in the database yet - run `lanfence scan` first."
+        if not total_count
+        else "No devices match those filters."
+    )
+
+    lines = [f"Devices: {len(devices)}"]
+    for d in devices:
+        trust = f"trusted ({d.allowlist_name})" if d.allowlisted else "untrusted"
+        lines.append(
+            f"  - {d.mac}  {d.ip or '-':<15}  {d.hostname or '[unknown]':<24}  "
+            f"{d.vendor or '[unknown]':<20}  {d.status:<8}  {trust:<20}  "
+            f"{review_status_label(d, now=now):<28}  {d.last_seen.isoformat(timespec='seconds')}"
+        )
+    text = "\n".join(lines)
+    if plain or not _RICH:
+        print(text)
+        return text
+
+    console = Console()
+    if not devices:
+        console.print(f"[yellow]{empty_message}[/yellow]")
+        return text
+
+    table = Table(title=f"Devices ({len(devices)})")
+    table.add_column("MAC")
+    table.add_column("IP")
+    table.add_column("Hostname", overflow="fold")
+    table.add_column("Vendor", overflow="fold")
+    table.add_column("Status")
+    table.add_column("Trusted")
+    table.add_column("Review")
+    table.add_column("Last seen")
+    for d in devices:
+        table.add_row(
+            d.mac,
+            d.ip or "-",
+            _rich_escape(d.hostname or "[unknown]"),
+            _rich_escape(d.vendor or "[unknown]"),
+            d.status,
+            f"yes ({_rich_escape(d.allowlist_name)})" if d.allowlisted else "no",
+            _rich_escape(review_status_label(d, now=now)),
+            d.last_seen.isoformat(timespec="seconds"),
+        )
+    console.print(table)
+    return text
+
+
+def render_device_detail(
+    device: Device, events: list[DeviceEvent], since: datetime, *, now: datetime, plain: bool = False
+) -> str:
+    """Render ``lanfence device <mac>`` - current details, then the separate,
+    necessarily-incomplete lifecycle timeline (see :meth:`DeviceStore.events_for`)."""
+
+    trust = f"trusted ({device.allowlist_name})" if device.allowlisted else "untrusted"
+    lines = [
+        f"Device {device.mac}",
+        "",
+        "Current details (as of the most recent sighting):",
+        f"  IP:         {device.ip or '[unknown]'}",
+        f"  Hostname:   {device.hostname or '[unknown]'}",
+        f"  Vendor:     {device.vendor or '[unknown]'}",
+        f"  Status:     {device.status}",
+        f"  First seen: {device.first_seen.isoformat(timespec='seconds')}",
+        f"  Last seen:  {device.last_seen.isoformat(timespec='seconds')}",
+        f"  Trust:      {trust}",
+        f"  Review:     {review_status_label(device, now=now)}",
+    ]
+    if device.review_notes:
+        lines.append(f"  Notes:      {device.review_notes}")
+    if device.fingerprints:
+        lines.append(f"  Fingerprint signals: {', '.join(device.fingerprints)}")
+
+    lines.append("")
+    lines.append(
+        f"Lifecycle timeline since {since.isoformat(timespec='seconds')} ({len(events)} event(s)):"
+    )
+    lines.append(
+        "  Only connect/reappear/disconnect transitions are logged here - a device that stayed "
+        "online the whole time may have changed IP/hostname with no entry below; this is not a "
+        "complete history of every address the MAC has held."
+    )
+    for event in events:
+        lines.append(
+            f"  {event.timestamp.isoformat(timespec='seconds')}  {event.event_type:<12}  "
+            f"{event.ip or '-':<15}  {event.hostname or '[unknown]'}"
+        )
+
+    text = "\n".join(lines)
+    if plain or not _RICH:
+        print(text)
+        return text
+
+    console = Console()
+    detail_lines = [
+        "[bold]Current details[/bold] (as of the most recent sighting):",
+        f"IP:         {device.ip or '[unknown]'}",
+        f"Hostname:   {_rich_escape(device.hostname or '[unknown]')}",
+        f"Vendor:     {_rich_escape(device.vendor or '[unknown]')}",
+        f"Status:     {device.status}",
+        f"First seen: {device.first_seen.isoformat(timespec='seconds')}",
+        f"Last seen:  {device.last_seen.isoformat(timespec='seconds')}",
+        f"Trust:      {_rich_escape(trust)}",
+        f"Review:     {_rich_escape(review_status_label(device, now=now))}",
+    ]
+    if device.review_notes:
+        detail_lines.append(f"Notes:      {_rich_escape(device.review_notes)}")
+    if device.fingerprints:
+        detail_lines.append(f"Fingerprint signals: {_rich_escape(', '.join(device.fingerprints))}")
+    console.print(Panel("\n".join(detail_lines), title=f"Device {device.mac}"))
+
+    console.print(
+        f"\n[bold]Lifecycle timeline[/bold] since {since.isoformat(timespec='seconds')} "
+        f"({len(events)} event(s))"
+    )
+    console.print(
+        "[dim]Only connect/reappear/disconnect transitions are logged - a device that stayed "
+        "online throughout may have changed IP/hostname with no entry below; this is not a "
+        "complete history of every address the MAC has held.[/dim]"
+    )
+    if events:
+        table = Table()
+        table.add_column("Time")
+        table.add_column("Event")
+        table.add_column("IP")
+        table.add_column("Hostname", overflow="fold")
+        for event in events:
+            table.add_row(
+                event.timestamp.isoformat(timespec="seconds"),
+                event.event_type,
+                event.ip or "-",
+                _rich_escape(event.hostname or "[unknown]"),
+            )
+        console.print(table)
+    else:
+        console.print("[dim](no events in this window)[/dim]")
     return text

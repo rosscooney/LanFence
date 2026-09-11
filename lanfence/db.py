@@ -3,12 +3,16 @@
 
 """Persistent SQLite store of every device LAN Fence has ever seen.
 
-Three tables: ``devices`` holds the current state of each MAC address (first
+Four tables: ``devices`` holds the current state of each MAC address (first
 seen, last seen, online/offline); ``events`` is an append-only log of
 lifecycle transitions (new / reappeared / disconnected) used by ``lanfence
 report``; ``alert_log`` tracks the last external-alert dispatch per MAC, used
 by :meth:`DeviceStore.due_for_alert` to cool down repeated alerts for a
-flapping device.
+flapping device; ``device_review`` tracks the ``lanfence review`` state
+(snoozed/investigating) per MAC, used by ``lanfence devices``/``device``/
+``review``. Trust itself is *not* stored here - it lives in the YAML
+allowlist (see ``lanfence/allowlist.py``); this table only tracks the
+review workflow around a still-untrusted device.
 """
 
 from __future__ import annotations
@@ -17,7 +21,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lanfence.models import SEVERITIES, Device, DeviceEvent, EventType, Severity
+from lanfence.models import SEVERITIES, Device, DeviceEvent, EventType, ReviewState, Severity
+from lanfence.netutil import normalize_mac
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -46,6 +51,14 @@ CREATE TABLE IF NOT EXISTS alert_log (
     mac TEXT PRIMARY KEY,
     last_alerted_at TEXT NOT NULL,
     last_severity TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_review (
+    mac TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'pending',
+    notes TEXT,
+    snoozed_until TEXT,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -121,6 +134,103 @@ class DeviceStore:
             )
             for row in rows
         ]
+
+    def events_for(self, mac: str, *, since: datetime | None = None) -> list[DeviceEvent]:
+        """One device's lifecycle timeline, oldest first.
+
+        Note this is *only* the log of connect/reappear/disconnect
+        transitions - a routine "still online, nothing changed" sighting
+        records no event, so a device's IP/hostname may have changed one or
+        more times without a corresponding timeline entry. It is not a
+        complete history of every address a MAC has ever held.
+        """
+
+        mac = normalize_mac(mac)
+        if since is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM events WHERE mac = ? AND timestamp >= ? ORDER BY timestamp ASC",
+                (mac, _iso(since)),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM events WHERE mac = ? ORDER BY timestamp ASC", (mac,)
+            ).fetchall()
+        return [
+            DeviceEvent(
+                mac=row["mac"], event_type=row["event_type"], timestamp=_parse_dt(row["timestamp"]),
+                ip=row["ip"], hostname=row["hostname"],
+            )
+            for row in rows
+        ]
+
+    def get_review(self, mac: str) -> ReviewState:
+        """The persisted review state for ``mac`` - ``pending``/unreviewed if
+        it has never been snoozed or flagged for investigation."""
+
+        mac = normalize_mac(mac)
+        row = self._conn.execute(
+            "SELECT state, notes, snoozed_until, updated_at FROM device_review WHERE mac = ?", (mac,)
+        ).fetchone()
+        if row is None:
+            return ReviewState(mac=mac)
+        return ReviewState(
+            mac=mac,
+            state=row["state"],
+            notes=row["notes"],
+            snoozed_until=_parse_dt(row["snoozed_until"]) if row["snoozed_until"] else None,
+            updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    def _upsert_review(
+        self, mac: str, *, state: str, notes: str | None, snoozed_until: datetime | None, updated_at: datetime
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO device_review (mac, state, notes, snoozed_until, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(mac) DO UPDATE SET state = excluded.state, notes = excluded.notes, "
+            "snoozed_until = excluded.snoozed_until, updated_at = excluded.updated_at",
+            (mac, state, notes, _iso(snoozed_until) if snoozed_until else None, _iso(updated_at)),
+        )
+        self._conn.commit()
+
+    def set_snoozed(
+        self, mac: str, *, until: datetime, notes: str | None = None, updated_at: datetime
+    ) -> ReviewState:
+        """Suppress external alerts for ``mac`` until ``until``.
+
+        Only ever throttles alert *dispatch* (see
+        :func:`lanfence.engine.filter_snoozed`) - findings, events and CLI/
+        JSON output are unaffected. ``notes`` left as ``None`` preserves any
+        notes already on file rather than blanking them.
+        """
+
+        mac = normalize_mac(mac)
+        if notes is None:
+            notes = self.get_review(mac).notes
+        self._upsert_review(mac, state="snoozed", notes=notes, snoozed_until=until, updated_at=updated_at)
+        return self.get_review(mac)
+
+    def set_investigating(self, mac: str, *, notes: str | None = None, updated_at: datetime) -> ReviewState:
+        """Flag ``mac`` for investigation - does not trust it or suppress alerts."""
+
+        mac = normalize_mac(mac)
+        self._upsert_review(mac, state="investigating", notes=notes, snoozed_until=None, updated_at=updated_at)
+        return self.get_review(mac)
+
+    def clear_review(self, mac: str) -> None:
+        """Remove any review flag/snooze for ``mac``. Does not touch the
+        allowlist - see ``lanfence allow --remove`` for untrusting a device."""
+
+        mac = normalize_mac(mac)
+        self._conn.execute("DELETE FROM device_review WHERE mac = ?", (mac,))
+        self._conn.commit()
+
+    def is_snoozed(self, mac: str, *, now: datetime) -> bool:
+        """Whether ``mac`` is *currently* snoozed - an expired snooze reads
+        as not-snoozed without needing any write to expire it."""
+
+        review = self.get_review(mac)
+        return review.state == "snoozed" and review.snoozed_until is not None and review.snoozed_until > now
 
     def observe(
         self,

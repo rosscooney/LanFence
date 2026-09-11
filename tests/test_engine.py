@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,7 +10,15 @@ from lanfence import scanner
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
-from lanfence.engine import build_findings, filter_rate_limited, process_sighting, run_active_sweep
+from lanfence.engine import (
+    build_findings,
+    build_inventory,
+    filter_rate_limited,
+    filter_snoozed,
+    is_review_needed,
+    process_sighting,
+    run_active_sweep,
+)
 from lanfence.fingerprint import SignatureSet
 from lanfence.models import Device, Finding
 
@@ -324,3 +332,104 @@ def test_filter_rate_limited_independent_per_mac(tmp_path: Path):
     store.close()
 
     assert kept == [b]
+
+
+# --- filter_snoozed ------------------------------------------------------
+
+
+def test_filter_snoozed_removes_findings_for_a_snoozed_mac(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    now = _now()
+    store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now + timedelta(hours=1), updated_at=now)
+    finding = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="high")
+
+    kept = filter_snoozed([finding], store, now=now)
+    store.close()
+    assert kept == []
+
+
+def test_filter_snoozed_keeps_findings_for_unsnoozed_or_expired_mac(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    now = _now()
+    store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now - timedelta(hours=1), updated_at=now)  # expired
+    not_snoozed = Finding(mac="11:22:33:44:55:66", title="t", severity="high")
+    expired_snooze = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="high")
+
+    kept = filter_snoozed([not_snoozed, expired_snooze], store, now=now)
+    store.close()
+    assert kept == [not_snoozed, expired_snooze]
+
+
+def test_filter_snoozed_does_not_consume_alert_cooldown(tmp_path: Path):
+    """Regression test for the spec requirement: snooze filtering must run
+    before cooldown bookkeeping, so a suppressed finding never marks the
+    cooldown as used - due_for_alert must still return True afterward."""
+
+    store = DeviceStore(tmp_path / "db.sqlite")
+    now = _now()
+    store.set_snoozed("aa:bb:cc:dd:ee:ff", until=now + timedelta(hours=1), updated_at=now)
+    finding = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="high")
+
+    kept = filter_snoozed([finding], store, now=now)
+    assert kept == []
+    # the cooldown was never touched by the (correctly) suppressed finding
+    assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "high", now=now, cooldown_seconds=900) is True
+    store.close()
+
+
+# --- build_inventory / is_review_needed -------------------------------------
+
+
+def test_build_inventory_joins_allowlist_and_review_state(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    now = _now()
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="1.1.1.1", hostname=None, vendor=None, seen_at=now)
+    store.observe(mac="11:22:33:44:55:66", ip="2.2.2.2", hostname=None, vendor=None, seen_at=now)
+    store.set_investigating("11:22:33:44:55:66", notes="hmm", updated_at=now)
+
+    allowlist = Allowlist.load(None)
+    allowlist.add("aa:bb:cc:dd:ee:ff", "Trusted Thing")
+
+    inventory = build_inventory(store, allowlist)
+    store.close()
+    by_mac = {d.mac: d for d in inventory}
+
+    assert by_mac["aa:bb:cc:dd:ee:ff"].allowlisted is True
+    assert by_mac["aa:bb:cc:dd:ee:ff"].allowlist_name == "Trusted Thing"
+    assert by_mac["11:22:33:44:55:66"].review_state == "investigating"
+    assert by_mac["11:22:33:44:55:66"].review_notes == "hmm"
+
+
+def test_is_review_needed_true_for_plain_untrusted_device():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now())
+    assert is_review_needed(device, now=_now()) is True
+
+
+def test_is_review_needed_false_when_allowlisted():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(), allowlisted=True)
+    assert is_review_needed(device, now=_now()) is False
+
+
+def test_is_review_needed_false_when_investigating():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(), review_state="investigating"
+    )
+    assert is_review_needed(device, now=_now()) is False
+
+
+def test_is_review_needed_false_when_actively_snoozed():
+    now = _now()
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now,
+        review_state="snoozed", snoozed_until=now + timedelta(hours=1),
+    )
+    assert is_review_needed(device, now=now) is False
+
+
+def test_is_review_needed_true_when_snooze_expired():
+    now = _now()
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now,
+        review_state="snoozed", snoozed_until=now - timedelta(hours=1),
+    )
+    assert is_review_needed(device, now=now) is True
