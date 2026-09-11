@@ -79,6 +79,9 @@ Each release is also published to
   DHCP option 55 (parameter-request-list OS fingerprinting) would need a
   maintained mapping table this project has no authoritative source for.
 
+- **`lanfence run`** is a new exact alias for `lanfence scan`, for anyone who
+  reaches for "run" instead of "scan" - same options, same behavior.
+
 ### Fixed
 
 - **`lanfence link` falsely refused a normal pipx install.** Its

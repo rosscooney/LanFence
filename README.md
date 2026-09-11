@@ -126,6 +126,7 @@ Scanning needs raw-socket access, so `scan`/`monitor` typically need `sudo`
 
 ```text
 lanfence scan                  # one-time active ARP scan; table + findings
+lanfence run                    # exact alias for `scan`
 lanfence scan --format json    # same, machine-readable
 lanfence monitor                # continuous: active sweeps + passive sniffing
 lanfence allow <MAC> --name X   # trust a device; its findings become info

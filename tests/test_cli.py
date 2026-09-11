@@ -118,6 +118,16 @@ def test_check_reports_ipv6_line(config_path: Path):
     assert "ipv6:" in result.output
 
 
+def test_run_is_an_alias_for_scan(config_path: Path):
+    with patch("lanfence.cli.run_active_sweep") as sweep_mock:
+        sweep_mock.return_value.findings = []
+        sweep_mock.return_value.errors = []
+        sweep_mock.return_value.to_json.return_value = "{}"
+        result = runner.invoke(app, ["run", "--config", str(config_path)])
+    assert result.exit_code == 0
+    sweep_mock.assert_called_once()
+
+
 def test_scan_no_ipv6_flag_disables_ipv6_scanning(config_path: Path):
     with patch("lanfence.cli.run_active_sweep") as sweep_mock:
         sweep_mock.return_value.findings = []

@@ -339,6 +339,12 @@ def scan(
         raise typer.Exit(code=exit_code_for(result))
 
 
+#: `lanfence run` is an exact alias for `lanfence scan` - same function, same
+#: options, same behavior, just a second name for anyone who reaches for
+#: "run" instead of "scan".
+app.command(name="run")(scan)
+
+
 def _emit_findings(findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore) -> None:
     colour = {"high": "red", "medium": "yellow", "info": "cyan"}
     for finding in findings:
