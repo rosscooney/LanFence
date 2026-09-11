@@ -15,6 +15,24 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- The bundled `lanfence/data/oui_vendors.txt` is now a full snapshot
+  (~40,000 entries) of the IEEE's public MA-L OUI registry, up from a
+  curated ~150-entry subset - fetched directly from
+  `https://standards-oui.ieee.org/oui/oui.csv` and converted with the new
+  `lanfence.vendor.parse_ieee_oui_csv`. Only the MA-L (24-bit block) tier is
+  included; the finer-grained MA-M/MA-S tiers reassign parts of one OUI-24 to
+  several different organisations, which this table's 3-octet-key format
+  can't represent.
+- `lanfence vendor-refresh` - downloads a current copy of that same registry
+  on demand and saves it as an extra `vendor_file:` (merged on top of, never
+  overwriting, the packaged table), so a device assigned an OUI after this
+  copy of LAN Fence was built can still be recognised without waiting for a
+  new release. This is a deliberate, operator-triggered exception to "no
+  network calls" - the same pattern as `lanfence upgrade` checking PyPI - and
+  runs only when explicitly invoked.
+
 ### Fixed
 
 - `lanfence upgrade` no longer reports "upgraded" when nothing actually

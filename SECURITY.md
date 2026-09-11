@@ -41,8 +41,12 @@ records what it sees, and reports. Relevant reports include, for example:
   (e.g. a way to corrupt them, or a symlink/permissions issue that exposes
   their contents to another local user),
 - a way for an alert destination you did *not* configure (syslog, email,
-  webhook) to receive data, or for LAN Fence to make any other network call
-  you did not configure - it has no telemetry and should never phone home,
+  webhook) to receive data, or for LAN Fence to make any network call you did
+  not explicitly ask for - it has no telemetry and should never phone home on
+  its own. The only exceptions are `lanfence upgrade` (PyPI) and `lanfence
+  vendor-refresh` (the IEEE OUI registry), and only while that exact command
+  is running - a report that either fetches anything else, or fetches
+  something without the operator having typed that command, is in scope,
 - privilege-escalation issues in `lanfence link`'s `sudo` self-elevation.
 
 LAN Fence does not attempt to prove that a device is authorized or that a MAC

@@ -67,6 +67,24 @@ Extend or override these with your own `rogue_signatures_file:` (same YAML
 shape as `lanfence/data/rogue_signatures.yaml`) and `vendor_file:` (same
 tab-separated shape as `lanfence/data/oui_vendors.txt`) in config.
 
+## Vendor lookups
+
+The bundled `lanfence/data/oui_vendors.txt` is a full snapshot (~40,000
+entries) of the IEEE's public MA-L OUI registry, taken when this version was
+built. LAN Fence makes no network calls on its own and does not auto-update
+it; run `lanfence vendor-refresh` to pull a current copy on demand:
+
+```bash
+lanfence vendor-refresh                       # -> ~/.config/lanfence/oui_vendors.txt
+lanfence vendor-refresh --output my_ouis.txt  # or choose where to save it
+```
+
+It's saved as an *extra* table (never overwriting the packaged one) - add
+`vendor_file: <path it printed>` to your config to have `scan`/`monitor`
+merge it on top of the built-in table. This is the one deliberate,
+operator-triggered exception to "no network calls", the same as `lanfence
+upgrade` checking PyPI - it only ever runs when you type the command.
+
 ## Install
 
 ```bash
@@ -105,6 +123,7 @@ lanfence check                  # verify permissions, scapy, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
 lanfence upgrade --check        # only report whether an update is available
 lanfence link                   # make `sudo lanfence` work (pipx/--user installs)
+lanfence vendor-refresh         # pull a current copy of the IEEE OUI registry
 ```
 
 `scan`/`monitor` warn (and show copy-pasteable fixes) if not run as root, since
@@ -233,11 +252,16 @@ rogue_signatures_file: null   # extra signatures, merged with the packaged ones
 
 ## Privacy and security
 
-- **No telemetry, no external calls.** LAN Fence never phones home. The only
-  network destinations it ever contacts are ones *you* configure: your own
-  syslog daemon, your own SMTP relay, or your own webhook URL.
-- The vendor and signature databases are bundled, offline, and static -
-  nothing is fetched to "keep them fresh".
+- **No telemetry, no automatic external calls.** LAN Fence never phones home
+  on its own. Alert destinations are ones *you* configure (your own syslog
+  daemon, SMTP relay, or webhook URL), and the only other network access is
+  two commands that exist purely to fetch something *you* asked for, only
+  when you run them: `lanfence upgrade` (checks/installs from PyPI) and
+  `lanfence vendor-refresh` (downloads the IEEE OUI registry). Every other
+  command touches only your local network (ARP) and disk.
+- The bundled vendor and signature tables are static snapshots taken when
+  this version was built; nothing is fetched automatically to "keep them
+  fresh" - that's what `vendor-refresh` is for, on request.
 - The device database and allowlist are written atomically and are
   owner-readable only where the platform supports it.
 

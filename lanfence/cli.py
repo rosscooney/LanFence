@@ -30,6 +30,7 @@ from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.engine import build_findings, process_sighting, run_active_sweep
 from lanfence.fingerprint import SignatureSet, fingerprint_device
+from lanfence.fsutil import atomic_write
 from lanfence.logging_config import setup_logging
 from lanfence.models import Finding
 from lanfence.report import (
@@ -39,6 +40,7 @@ from lanfence.report import (
     render_findings,
     render_scan_result,
 )
+from lanfence.vendor import format_vendor_table, parse_ieee_oui_csv
 
 app = typer.Typer(
     add_completion=False,
@@ -839,6 +841,68 @@ def upgrade(
         fg="yellow",
     )
     raise typer.Exit(code=10)
+
+
+_IEEE_OUI_CSV_URL = "https://standards-oui.ieee.org/oui/oui.csv"
+
+
+@app.command(name="vendor-refresh")
+def vendor_refresh(
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Where to save the refreshed table (default: config vendor_file, "
+        "or ~/.config/lanfence/oui_vendors.txt).",
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+    url: str = typer.Option(_IEEE_OUI_CSV_URL, "--url", help="CSV source to fetch."),
+    timeout: float = typer.Option(30.0, "--timeout", help="Download timeout, in seconds."),
+) -> None:
+    """Download the current IEEE OUI (MA-L) registry as an extra vendor table.
+
+    LAN Fence ships a large built-in vendor table and makes no network calls
+    on its own; this is the one deliberate, operator-triggered exception -
+    the same pattern as `lanfence upgrade` checking PyPI. It fetches IEEE's
+    public registry directly (a few MB) so a device assigned an OUI after
+    this copy of LAN Fence was built is still recognised, without waiting for
+    a new release. The result is saved as an *extra* table, never overwriting
+    the packaged one - point `vendor_file:` in your config at it (printed at
+    the end) to have `scan`/`monitor` merge it on top of the built-in table.
+    """
+
+    cfg = _load_config(config)
+    dest = output or cfg.vendor_file or Path("~/.config/lanfence/oui_vendors.txt").expanduser()
+    dest = Path(dest).expanduser()
+
+    typer.echo(f"fetching {url} ...")
+    request = urllib.request.Request(url, headers={"User-Agent": f"lanfence/{__version__}"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 - https literal
+            raw = resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        typer.secho(f"error: could not download vendor registry: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    table = parse_ieee_oui_csv(raw.decode("utf-8", errors="replace"))
+    if not table:
+        typer.secho(
+            "error: downloaded file did not parse as an IEEE OUI (MA-L) registry.",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=1)
+
+    header = (
+        f"# Fetched via `lanfence vendor-refresh` from {url}\n"
+        f"# on {datetime.now(timezone.utc).isoformat()}\n"
+    )
+    try:
+        atomic_write(dest, header + format_vendor_table(table), mode=0o644)
+    except OSError as exc:
+        typer.secho(f"error: could not write {dest}: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(f"saved {len(table)} vendor entries to {dest}", fg="green")
+    if cfg.vendor_file is None or Path(cfg.vendor_file).expanduser() != dest:
+        typer.echo(f"add this to your config to use it:\n  vendor_file: {dest}")
 
 
 def main() -> None:  # pragma: no cover - entry point shim
