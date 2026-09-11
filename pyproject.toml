@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lanfence"
+version = "0.1.0"
+description = "Defensive LAN device monitor - detect and alert on unauthorized devices joining your network"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Stable State Consulting Ltd", email = "contributors@lanfence.dev" }]
+maintainers = [{ name = "Stable State Consulting Ltd", email = "contributors@lanfence.dev" }]
+keywords = ["network", "security", "defensive", "arp", "raspberry-pi", "monitoring"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.6",
+    "PyYAML>=6.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+# Active/passive ARP scanning needs scapy (GPL-2.0-only) + libpcap. Kept out of
+# the core dependency set deliberately: config, the allowlist, the device
+# database and reporting have no GPL dependency, and `lanfence check` /
+# `lanfence report` / `lanfence allow` work fine without it. See
+# DISTRIBUTING.md.
+scan = [
+    "scapy>=2.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/rosscooney/lanfence"
+Source = "https://github.com/rosscooney/lanfence"
+Issues = "https://github.com/rosscooney/lanfence/issues"
+
+[project.scripts]
+lanfence = "lanfence.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lanfence*"]
+
+[tool.setuptools.package-data]
+lanfence = ["data/*.yaml", "data/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

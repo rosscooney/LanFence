@@ -1,0 +1,23 @@
+# Copyright (c) 2026-present Stable State Consulting Ltd
+# SPDX-License-Identifier: MIT
+#
+# Example systemd unit for continuous monitoring.
+# Install: sudo cp packaging/lanfence.service /etc/systemd/system/
+#          sudo systemctl enable --now lanfence
+
+[Unit]
+Description=LAN Fence continuous network device monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/lanfence monitor --config /etc/lanfence/config.yaml
+Restart=on-failure
+RestartSec=5
+# Active/passive ARP scanning needs CAP_NET_RAW; running as root is simplest
+# on a dedicated Pi. To run as a non-root user instead, drop User=root and
+# grant the capability: sudo setcap cap_net_raw+eip /usr/local/bin/lanfence
+User=root
+
+[Install]
+WantedBy=multi-user.target

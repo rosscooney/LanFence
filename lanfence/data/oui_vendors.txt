@@ -1,0 +1,148 @@
+# LAN Fence OUI vendor table.
+#
+# A curated subset of the public IEEE OUI registry - common consumer,
+# enterprise and IoT vendors, plus every vendor referenced by
+# rogue_signatures.yaml. Not a full copy of the registry (~40MB and it drifts
+# out of date the day it's fetched); LAN Fence makes no network calls to
+# refresh it. Regenerate/extend from the IEEE's public CSV
+# (https://standards-oui.ieee.org/oui/oui.csv) offline if you want fuller
+# coverage - format is one `XX:XX:XX<TAB>Vendor Name` entry per line.
+#
+# Prefixes are 3-octet OUIs, uppercase, colon-separated.
+00:00:0C	Cisco Systems, Inc.
+00:01:42	Cisco Systems, Inc.
+00:03:93	Apple, Inc.
+00:0A:27	Apple, Inc.
+00:0D:93	Apple, Inc.
+00:0E:C6	ASIX Electronics Corporation
+00:0F:66	Cisco Systems, Inc.
+00:11:24	Apple, Inc.
+00:12:17	Cisco Systems, Inc.
+00:13:10	Netgear
+00:14:38	Cisco Systems, Inc.
+00:14:6C	Netgear
+00:15:5D	Microsoft Corporation
+00:16:CB	Apple, Inc.
+00:17:88	Philips Lighting BV (Hue)
+00:17:9A	D-Link Corporation
+00:18:39	Cisco-Linksys, LLC
+00:19:5B	D-Link Corporation
+00:1A:11	Google, Inc.
+00:1A:70	Cisco Systems, Inc.
+00:1B:63	Apple, Inc.
+00:1C:B3	Apple, Inc.
+00:1D:0F	Cisco Systems, Inc.
+00:1E:37	ASIX Electronics Corporation
+00:1E:52	Apple, Inc.
+00:1E:C2	Apple, Inc.
+00:1F:3A	Sony Corporation
+00:1F:F3	Apple, Inc.
+00:21:6A	Intel Corporate
+00:21:E9	Apple, Inc.
+00:22:41	Apple, Inc.
+00:23:12	Apple, Inc.
+00:23:69	Cisco-Linksys, LLC
+00:23:DF	Apple, Inc.
+00:24:36	Apple, Inc.
+00:25:00	Apple, Inc.
+00:25:90	Super Micro Computer, Inc.
+00:25:9C	Cisco Systems, Inc.
+00:26:08	Apple, Inc.
+00:26:BB	Apple, Inc.
+00:50:56	VMware, Inc.
+00:60:2F	Cisco Systems, Inc.
+00:90:4C	Epigram, Inc.
+00:A0:57	Karlnet, Inc. (wireless AP modules)
+04:18:D6	Ubiquiti Networks Inc.
+04:F0:21	Apple, Inc.
+08:00:27	PCS Systemtechnik GmbH (VirtualBox)
+0C:47:C9	Rockwell Automation
+10:9A:DD	Hewlett Packard
+14:10:9F	D-Link Corporation
+18:B4:30	Nest Labs Inc.
+18:FE:34	Espressif Inc.
+1C:69:7A	D-Link Corporation
+1C:B7:2C	Ring LLC
+20:76:00	Danfoss A/S
+24:0A:C4	Espressif Inc.
+24:A4:3C	D-Link Corporation
+28:CD:C1	Raspberry Pi Trading Ltd
+28:C6:8E	Espressif Inc.
+2C:3A:E8	Espressif Inc.
+2C:F0:5D	Espressif Inc.
+30:AE:A4	Espressif Inc.
+30:B5:C2	Espressif Inc.
+34:29:8F	Amazon Technologies Inc.
+34:AB:37	Apple, Inc.
+34:EB:C6	D-Link Corporation
+38:2C:4A	Amazon Technologies Inc.
+3C:33:00	IEEE Registration Authority (locally significant test blocks)
+3C:61:05	Apple, Inc.
+3C:71:BF	Espressif Inc.
+3C:5A:B4	Google, Inc.
+40:9F:38	Espressif Inc.
+44:65:0D	Amazon Technologies Inc.
+48:D6:D5	Google, Inc.
+4C:11:AE	Espressif Inc.
+4C:EB:D6	Elitegroup Computer Systems (ASRock)
+50:02:91	Sonos, Inc.
+50:F5:DA	Netgear
+54:60:09	Amazon Technologies Inc.
+54:AF:97	Fibocom Wireless Inc.
+58:CB:52	Netgear
+5C:CF:7F	Espressif Inc.
+5C:E9:1E	TP-LINK Technologies Co.,Ltd.
+64:16:66	TP-LINK Technologies Co.,Ltd.
+68:37:E9	Ubiquiti Networks Inc.
+68:C6:3A	Aruba, a Hewlett Packard Enterprise Company
+6C:5A:B0	Google, Inc.
+70:5D:CC	Netgear
+74:4D:28	Wistron Neweb Corporation
+74:AC:B9	Amazon Technologies Inc.
+78:11:DC	D-Link Corporation
+7C:2E:BD	D-Link Corporation
+7C:DD:90	Ubiquiti Networks Inc.
+80:1F:02	Netgear
+84:CC:A8	Espressif Inc.
+84:F3:EB	TP-LINK Technologies Co.,Ltd.
+88:15:44	Chongqing Fugui Electronics
+8C:85:90	Apple, Inc.
+90:9A:4A	Amazon Technologies Inc.
+94:B4:0F	D-Link Corporation
+98:D3:31	Espressif Inc. (unofficial/dev-board clones)
+9C:93:4E	Netgear
+A0:20:A6	Espressif Inc.
+A4:CF:12	Espressif Inc.
+A4:E9:75	D-Link Corporation
+A8:03:2A	Amazon Technologies Inc.
+AC:84:C6	Amazon Technologies Inc.
+B0:4E:26	Nintendo Co., Ltd.
+B0:BE:76	Amazon Technologies Inc.
+B4:75:0E	Espressif Inc.
+B8:27:EB	Raspberry Pi Foundation
+BC:5F:F4	Espressif Inc.
+BC:DD:C2	Espressif Inc.
+C4:5B:BE	D-Link Corporation
+C8:2B:96	Netgear
+CC:50:E3	Espressif Inc.
+D0:03:4B	Apple, Inc.
+D8:0D:17	Amazon Technologies Inc.
+D8:3A:DD	Ubiquiti Networks Inc.
+DC:A6:32	Raspberry Pi Trading Ltd
+DC:4F:22	Espressif Inc.
+E0:5F:B9	Netgear
+E0:98:06	Espressif Inc.
+E4:5F:01	Raspberry Pi Trading Ltd
+E8:9F:6D	Amazon Technologies Inc.
+EC:FA:BC	Espressif Inc.
+F0:27:2D	Netgear
+F0:9F:C2	Ubiquiti Networks Inc.
+F4:F5:D8	Google, Inc.
+F8:1A:67	Nokia
+FC:F5:C4	Espressif Inc.
+00:1D:D8	Microsoft Corporation
+00:50:F2	Microsoft Corporation
+7C:D1:C3	Hewlett Packard
+3C:97:0E	Apple, Inc.
+A4:83:E7	Apple, Inc.
+F0:18:98	Apple, Inc.

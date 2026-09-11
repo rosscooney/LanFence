@@ -1,0 +1,106 @@
+# LAN Fence built-in rogue-device signatures.
+#
+# These are heuristics, not proof. A MAC vendor prefix or hostname is
+# trivially spoofed by anyone who wants to hide, so a match here is a lead to
+# investigate, not a verdict - treat it the way you'd treat a smoke alarm, not
+# a conviction. Extend this file (or point --rogue-signatures at your own copy)
+# with anything specific to your own environment.
+#
+# vendor_keywords: matched case-insensitively against the OUI vendor string
+#   looked up for a device's MAC address.
+# hostname_keywords: matched case-insensitively as a substring of the DHCP /
+#   mDNS / reverse-DNS hostname a device presents.
+# Both support the same fields: category, severity (high|medium|info),
+# description.
+
+vendor_keywords:
+  - match: "espressif"
+    category: esp32_esp8266
+    severity: medium
+    description: >
+      Espressif ESP32/ESP8266 Wi-Fi chipset. Extremely common in legitimate
+      IoT devices (smart plugs, sensors), but also the basis for cheap
+      DIY hidden cameras, rogue access points, and ESP32-based Wi-Fi
+      implants (e.g. "ESP32 Marauder", DIY deauther/AP boards). Verify what
+      this device physically is.
+
+  - match: "raspberry pi"
+    category: raspberry_pi
+    severity: info
+    description: >
+      Raspberry Pi hardware. Widely used for entirely legitimate purposes,
+      but also the common hardware basis for network-tap / rogue-implant
+      projects (e.g. P4wnP1, PoisonTap-style boards, home-built network
+      taps). Confirm this Pi is one you or your organisation put on the
+      network.
+
+  - match: "asix electronics"
+    category: usb_ethernet_gadget
+    severity: medium
+    description: >
+      USB-to-Ethernet chipset. Common in ordinary USB-Ethernet dongles, but
+      also used by commercial BadUSB / implant tools (e.g. Hak5 Bash Bunny,
+      LAN Turtle, O.MG cable) when they present themselves to the network as
+      a wired adapter. A match alone does not mean the latter - most devices
+      with this chipset are innocuous dongles.
+
+hostname_keywords:
+  - match: "pwnagotchi"
+    category: pwnagotchi
+    severity: high
+    description: >
+      Hostname matches Pwnagotchi, an offensive Wi-Fi handshake-capture tool
+      built on ESP32/Raspberry Pi hardware. Its default hostname is
+      distinctive; a real Pwnagotchi on your network is not accidental.
+
+  - match: "bashbunny"
+    category: bash_bunny
+    severity: high
+    description: >
+      Hostname matches Hak5 Bash Bunny, a USB attack platform that can
+      present itself as a network adapter once plugged into a host.
+
+  - match: "lanturtle"
+    category: lan_turtle
+    severity: high
+    description: >
+      Hostname matches Hak5 LAN Turtle, a covert USB-Ethernet implant
+      designed to be left plugged into a network for remote access.
+
+  - match: "pineapple"
+    category: wifi_pineapple
+    severity: high
+    description: >
+      Hostname matches Hak5 WiFi Pineapple, a rogue-access-point / Wi-Fi
+      auditing platform. Legitimate on an authorized pentest; otherwise a
+      strong signal of an unauthorized AP on your network.
+
+  - match: "flipper"
+    category: flipper_zero
+    severity: medium
+    description: >
+      Hostname matches Flipper Zero, a multi-tool device (BLE/NFC/RFID/IR/
+      sub-GHz) that can also appear on the network via its Wi-Fi dev board
+      add-on.
+
+  - match: "omg-cable"
+    category: omg_cable
+    severity: high
+    description: >
+      Hostname matches an O.MG Cable, a USB cable with an embedded implant
+      that can expose a Wi-Fi access point / network interface for remote
+      control.
+
+  - match: "esp32"
+    category: esp32_esp8266
+    severity: info
+    description: >
+      Hostname suggests an ESP32-based device. See the vendor-based ESP32
+      finding for context; this is the weaker (hostname-only) signal.
+
+  - match: "esp8266"
+    category: esp32_esp8266
+    severity: info
+    description: >
+      Hostname suggests an ESP8266-based device. See the vendor-based ESP32
+      finding for context; this is the weaker (hostname-only) signal.
