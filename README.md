@@ -55,12 +55,14 @@ Heuristics, not proof - a match is a lead to check by hand:
 
 | Signal | Category | Why it matters |
 |---|---|---|
-| Vendor: Espressif | `esp32_esp8266` | ESP32/ESP8266 - the chipset behind most cheap DIY hidden cameras, rogue APs, and ESP32-based Wi-Fi implants (as well as plenty of legitimate IoT). |
+| Vendor: Espressif / Ai-Thinker | `esp32_esp8266` | ESP32/ESP8266 - the chipset behind most cheap DIY hidden cameras, rogue APs, and ESP32-based Wi-Fi implants (as well as plenty of legitimate IoT). |
 | Vendor: Raspberry Pi | `raspberry_pi` | Legitimate everywhere, but also the common hardware basis for rogue network-tap / implant projects (P4wnP1, home-built taps). |
+| Vendor: Orange Pi (Shenzhen Xunlong) | `orange_pi` | Same rationale as Raspberry Pi - a legitimate SBC also common in DIY implant projects. |
+| Vendor: Allwinner | `allwinner_sbc_or_camera` | Common in budget SBCs, Android TV boxes, and cheap white-label Wi-Fi cameras. |
+| Vendor: HiSilicon | `hisilicon_camera_soc` | The Hi3516/Hi3518-family SoC behind huge numbers of cheap white-label IP cameras/DVRs - and the hardware base widely reported behind the Mirai botnet and its successors. |
 | Vendor: ASIX Electronics | `usb_ethernet_gadget` | USB-Ethernet chipset used both by ordinary dongles and by BadUSB tools (Bash Bunny, LAN Turtle, O.MG cable) presenting as a network adapter. |
-| Hostname contains `pwnagotchi` | `pwnagotchi` | Pwnagotchi's distinctive default hostname. |
-| Hostname contains `bashbunny` / `lanturtle` / `pineapple` / `omg-cable` | Hak5/O.MG tooling | Default hostnames of common commercial implant/pentest hardware. |
-| Hostname contains `flipper` | `flipper_zero` | Flipper Zero (via its Wi-Fi dev board). |
+| Hostname contains `pwnagotchi` | `pwnagotchi` | Pwnagotchi's own default hostname (`main.name` in its default config) - confirmed from the project's source. |
+| Hostname contains `bunny` / `turtle` / `pineapple` | Hak5 tooling | Commonly-reported default hostnames for Bash Bunny / LAN Turtle / WiFi Pineapple - corroborated from Hak5's own community forum and docs, not an official spec page, and short enough to occasionally match an unrelated device. |
 | Locally administered MAC | `locally_administered_mac` | No vendor OUI - common for privacy MAC-randomization on phones/laptops, but also for spoofed or gadget hardware. |
 
 Extend or override these with your own `rogue_signatures_file:` (same YAML

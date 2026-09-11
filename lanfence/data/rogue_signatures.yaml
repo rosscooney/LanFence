@@ -7,9 +7,19 @@
 # with anything specific to your own environment.
 #
 # vendor_keywords: matched case-insensitively against the OUI vendor string
-#   looked up for a device's MAC address.
+#   looked up for a device's MAC address. Every vendor name referenced below
+#   is a real, confirmed string from the IEEE OUI registry bundled in
+#   oui_vendors.txt.
 # hostname_keywords: matched case-insensitively as a substring of the DHCP /
-#   mDNS / reverse-DNS hostname a device presents.
+#   mDNS / reverse-DNS hostname a device presents. Unlike the vendor table,
+#   there is no authoritative registry of "default hostnames hacking tools
+#   use" - the entries below are the best that could be corroborated from
+#   each project's own source/docs or its maker's own community forum at the
+#   time this file was written, not an official specification. A tool's
+#   default can change between firmware versions, and short hostnames (e.g.
+#   "bunny", "turtle") can coincidentally match an unrelated device someone
+#   named that - treat a match here as a stronger prompt to look closer, not
+#   a stronger verdict.
 # Both support the same fields: category, severity (high|medium|info),
 # description.
 
@@ -24,6 +34,15 @@ vendor_keywords:
       implants (e.g. "ESP32 Marauder", DIY deauther/AP boards). Verify what
       this device physically is.
 
+  - match: "ai-thinker"
+    category: esp32_esp8266
+    severity: medium
+    description: >
+      Ai-Thinker Wi-Fi module (their own OUI block, on ESP8266/ESP32
+      silicon) - the same fingerprint and rationale as an Espressif-branded
+      OUI: common in legitimate IoT, but also the basis for cheap DIY hidden
+      cameras and Wi-Fi implants.
+
   - match: "raspberry pi"
     category: raspberry_pi
     severity: info
@@ -33,6 +52,36 @@ vendor_keywords:
       projects (e.g. P4wnP1, PoisonTap-style boards, home-built network
       taps). Confirm this Pi is one you or your organisation put on the
       network.
+
+  - match: "shenzhen xunlong"
+    category: orange_pi
+    severity: info
+    description: >
+      Orange Pi hardware (Shenzhen Xunlong Software). The same rationale as
+      Raspberry Pi: a legitimate, widely used single-board computer that is
+      also a common basis for DIY network-tap / rogue-implant projects.
+      Confirm this board is one you or your organisation put on the network.
+
+  - match: "allwinner"
+    category: allwinner_sbc_or_camera
+    severity: info
+    description: >
+      Allwinner Technology SoC. Common in budget single-board computers,
+      Android TV/streaming boxes, and inexpensive Wi-Fi "hidden" cameras
+      sold under many white-label brands. Not notable on its own - verify
+      what the physical device actually is.
+
+  - match: "hisilicon"
+    category: hisilicon_camera_soc
+    severity: medium
+    description: >
+      HiSilicon (Huawei) Hi3516/Hi3518-family SoC - the dominant chipset
+      family behind cheap, white-label IP cameras and DVRs sold under
+      hundreds of brand names, and the hardware base widely reported behind
+      the Mirai botnet and its many successors. Not proof of anything by
+      itself (plenty of legitimate cameras use it too), but worth confirming
+      what the device is and whether its firmware/credentials were ever
+      hardened.
 
   - match: "asix electronics"
     category: usb_ethernet_gadget
@@ -50,46 +99,43 @@ hostname_keywords:
     severity: high
     description: >
       Hostname matches Pwnagotchi, an offensive Wi-Fi handshake-capture tool
-      built on ESP32/Raspberry Pi hardware. Its default hostname is
-      distinctive; a real Pwnagotchi on your network is not accidental.
+      built on ESP32/Raspberry Pi hardware. Its default hostname
+      (`main.name` in the project's own default config) is exactly this
+      string; a real Pwnagotchi on your network is not accidental.
 
-  - match: "bashbunny"
+  - match: "bunny"
     category: bash_bunny
-    severity: high
+    severity: medium
     description: >
-      Hostname matches Hak5 Bash Bunny, a USB attack platform that can
-      present itself as a network adapter once plugged into a host.
+      Hostname matches the commonly-reported default hostname of a Hak5
+      Bash Bunny, a USB attack platform that can present itself as a network
+      adapter once plugged into a host. Not from an official Hak5 spec page
+      - corroborated from Hak5's own community forum and third-party
+      write-ups, not verified against firmware source. "bunny" is also short
+      enough to coincidentally match an unrelated device someone named that.
 
-  - match: "lanturtle"
+  - match: "turtle"
     category: lan_turtle
-    severity: high
+    severity: medium
     description: >
-      Hostname matches Hak5 LAN Turtle, a covert USB-Ethernet implant
-      designed to be left plugged into a network for remote access.
+      Hostname matches the commonly-reported default hostname of a Hak5 LAN
+      Turtle, a covert USB-Ethernet implant designed to be left plugged into
+      a network for remote access. Not from an official Hak5 spec page -
+      corroborated from Hak5's own community forum (a "how do I change the
+      hostname away from the default" thread), not verified against
+      firmware source. "turtle" is also short enough to coincidentally match
+      an unrelated device (e.g. a "TurtleBot" robotics platform).
 
   - match: "pineapple"
     category: wifi_pineapple
-    severity: high
-    description: >
-      Hostname matches Hak5 WiFi Pineapple, a rogue-access-point / Wi-Fi
-      auditing platform. Legitimate on an authorized pentest; otherwise a
-      strong signal of an unauthorized AP on your network.
-
-  - match: "flipper"
-    category: flipper_zero
     severity: medium
     description: >
-      Hostname matches Flipper Zero, a multi-tool device (BLE/NFC/RFID/IR/
-      sub-GHz) that can also appear on the network via its Wi-Fi dev board
-      add-on.
-
-  - match: "omg-cable"
-    category: omg_cable
-    severity: high
-    description: >
-      Hostname matches an O.MG Cable, a USB cable with an embedded implant
-      that can expose a Wi-Fi access point / network interface for remote
-      control.
+      Hostname matches the product name of a Hak5 WiFi Pineapple, a
+      rogue-access-point / Wi-Fi auditing platform - plausible as its
+      default hostname (Hak5's docs confirm the hostname is sent in DHCP
+      client-mode requests, without stating the out-of-box default value
+      itself). Legitimate on an authorized pentest; otherwise worth
+      confirming as an unauthorized AP on your network.
 
   - match: "esp32"
     category: esp32_esp8266

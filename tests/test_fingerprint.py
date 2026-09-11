@@ -28,6 +28,47 @@ def test_no_match_for_ordinary_device():
     assert matches == []
 
 
+def test_vendor_keyword_match_ai_thinker_shares_esp32_category():
+    sigs = SignatureSet.load()
+    matches = sigs.match(vendor="Shenzhen Ai-Thinker Technology Co.,Ltd", hostname=None)
+    assert any(m.category == "esp32_esp8266" for m in matches)
+
+
+def test_vendor_keyword_match_hisilicon_camera_soc():
+    sigs = SignatureSet.load()
+    matches = sigs.match(vendor="Hisilicon Technologies Co., Ltd", hostname=None)
+    assert any(m.category == "hisilicon_camera_soc" and m.severity == "medium" for m in matches)
+
+
+def test_vendor_keyword_match_allwinner():
+    sigs = SignatureSet.load()
+    matches = sigs.match(vendor="Allwinner Technology Co., Ltd", hostname=None)
+    assert any(m.category == "allwinner_sbc_or_camera" for m in matches)
+
+
+def test_vendor_keyword_match_orange_pi():
+    sigs = SignatureSet.load()
+    matches = sigs.match(vendor="SHENZHEN XUNLONG SOFTWARE CO.,LIMITED", hostname=None)
+    assert any(m.category == "orange_pi" for m in matches)
+
+
+def test_hostname_keyword_match_bash_bunny_and_lan_turtle():
+    sigs = SignatureSet.load()
+    assert any(m.category == "bash_bunny" for m in sigs.match(vendor=None, hostname="bunny-4821"))
+    assert any(m.category == "lan_turtle" for m in sigs.match(vendor=None, hostname="turtle"))
+
+
+def test_no_stale_signatures_for_corrected_or_removed_entries():
+    """Regression test: `bashbunny`/`lanturtle` were replaced with the
+    better-corroborated `bunny`/`turtle`, and `omg-cable`/`flipper` were
+    removed outright after verification found no support for them - a
+    hostname that only matches the old strings should no longer fire."""
+
+    sigs = SignatureSet.load()
+    assert sigs.match(vendor=None, hostname="omg-cable-01") == []
+    assert sigs.match(vendor=None, hostname="flipper-zero") == []
+
+
 def test_fingerprint_device_raspberry_pi_vendor():
     sigs = SignatureSet.load()
     vendor, matches = fingerprint_device("b8:27:eb:12:34:56", "nas.local", signatures=sigs)

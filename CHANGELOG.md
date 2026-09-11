@@ -17,6 +17,16 @@ Each release is also published to
 
 ### Added
 
+- New rogue-device vendor signatures, each backed by a real, confirmed
+  vendor string in the now-full `oui_vendors.txt`: `hisilicon_camera_soc`
+  (HiSilicon Hi3516/Hi3518-family SoCs - the dominant chipset behind cheap
+  white-label IP cameras/DVRs and widely reported behind the Mirai botnet
+  and successors), `allwinner_sbc_or_camera` (Allwinner - budget SBCs,
+  Android TV boxes, cheap Wi-Fi cameras), `orange_pi` (Shenzhen Xunlong -
+  same rationale as the existing Raspberry Pi signature), and an
+  `ai-thinker` vendor match folded into the existing `esp32_esp8266`
+  category (Ai-Thinker modules are ESP8266/ESP32 silicon under their own
+  OUI block).
 - The bundled `lanfence/data/oui_vendors.txt` is now a full snapshot
   (~40,000 entries) of the IEEE's public MA-L OUI registry, up from a
   curated ~150-entry subset - fetched directly from
@@ -32,6 +42,29 @@ Each release is also published to
   new release. This is a deliberate, operator-triggered exception to "no
   network calls" - the same pattern as `lanfence upgrade` checking PyPI - and
   runs only when explicitly invoked.
+
+### Changed
+
+- `bashbunny`/`lanturtle` hostname signatures corrected to `bunny`/`turtle`
+  after verification found no support for the original strings and
+  better - though still not officially documented - corroboration for the
+  shorter ones (from Hak5's own community forum and third-party write-ups).
+  Both are now `medium` rather than `high` severity, and their descriptions
+  note they're not sourced from an official spec and can coincidentally
+  match an unrelated device's hostname (e.g. a "TurtleBot" robotics
+  platform). `pineapple` similarly downgraded to `medium` pending
+  confirmation of its actual default value. `pwnagotchi` is unchanged and
+  was independently confirmed against the project's own `defaults.toml`.
+
+### Removed
+
+- The `omg-cable` hostname signature: verification found the O.MG Cable's
+  actual identifying signal is its Wi-Fi access point's SSID ("O.MG"), not a
+  DHCP/mDNS hostname - something ARP-based scanning structurally can't
+  observe, so the signature could never have matched anything real. The
+  `flipper` hostname signature was also removed: no source (official docs,
+  project source, or community forum) could be found confirming any default
+  hostname/SSID for a Flipper Zero's optional Wi-Fi dev board.
 
 ### Fixed
 
