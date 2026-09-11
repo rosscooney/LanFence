@@ -210,8 +210,28 @@ def review_status_label(device: Device, *, now: datetime) -> str:
     return "pending"
 
 
+def _presence_value(device: Device, *, default_offline_after_seconds: float | None = None) -> str:
+    """"intermittent" / "always-on" (+ effective absence delay) / "unspecified"."""
+
+    if device.presence_policy != "always-on" or default_offline_after_seconds is None:
+        return device.presence_policy
+    effective = device.offline_after_seconds or default_offline_after_seconds
+    return f"always-on (alert after {effective:.0f}s absent)"
+
+
+def presence_label(device: Device, *, default_offline_after_seconds: float | None = None) -> str:
+    """Human display label for a device's presence policy (see
+    :data:`lanfence.models.PresencePolicyName`) - "Presence: intermittent",
+    "Presence: always-on", or "Presence: unspecified". For an always-on
+    device, also shows the effective absence-alert delay (its own
+    ``--offline-after`` override, or the global default when given)."""
+
+    return f"Presence: {_presence_value(device, default_offline_after_seconds=default_offline_after_seconds)}"
+
+
 def render_device_inventory(
-    devices: list[Device], *, now: datetime, total_count: int | None = None, plain: bool = False
+    devices: list[Device], *, now: datetime, total_count: int | None = None, plain: bool = False,
+    default_offline_after_seconds: float | None = None,
 ) -> str:
     """Render the ``lanfence devices`` listing - no scan, a pure database read.
 
@@ -229,10 +249,12 @@ def render_device_inventory(
     lines = [f"Devices: {len(devices)}"]
     for d in devices:
         trust = f"trusted ({d.allowlist_name})" if d.allowlisted else "untrusted"
+        presence = _presence_value(d, default_offline_after_seconds=default_offline_after_seconds)
         lines.append(
             f"  - {d.mac}  {d.ip or '-':<15}  {d.hostname or '[unknown]':<24}  "
             f"{d.vendor or '[unknown]':<20}  {d.status:<8}  {trust:<20}  "
-            f"{review_status_label(d, now=now):<28}  {d.last_seen.isoformat(timespec='seconds')}"
+            f"{review_status_label(d, now=now):<28}  {presence:<28}  "
+            f"{d.last_seen.isoformat(timespec='seconds')}"
         )
     text = "\n".join(lines)
     if plain or not _RICH:
@@ -252,6 +274,7 @@ def render_device_inventory(
     table.add_column("Status")
     table.add_column("Trusted")
     table.add_column("Review")
+    table.add_column("Presence")
     table.add_column("Last seen")
     for d in devices:
         table.add_row(
@@ -262,6 +285,7 @@ def render_device_inventory(
             d.status,
             f"yes ({_rich_escape(d.allowlist_name)})" if d.allowlisted else "no",
             _rich_escape(review_status_label(d, now=now)),
+            _rich_escape(_presence_value(d, default_offline_after_seconds=default_offline_after_seconds)),
             d.last_seen.isoformat(timespec="seconds"),
         )
     console.print(table)
@@ -269,7 +293,8 @@ def render_device_inventory(
 
 
 def render_device_detail(
-    device: Device, events: list[DeviceEvent], since: datetime, *, now: datetime, plain: bool = False
+    device: Device, events: list[DeviceEvent], since: datetime, *, now: datetime, plain: bool = False,
+    default_offline_after_seconds: float | None = None,
 ) -> str:
     """Render ``lanfence device <mac>`` - current details, then the separate,
     necessarily-incomplete lifecycle timeline (see :meth:`DeviceStore.events_for`)."""
@@ -287,6 +312,7 @@ def render_device_detail(
         f"  Last seen:  {device.last_seen.isoformat(timespec='seconds')}",
         f"  Trust:      {trust}",
         f"  Review:     {review_status_label(device, now=now)}",
+        f"  {presence_label(device, default_offline_after_seconds=default_offline_after_seconds)}",
     ]
     if device.review_notes:
         lines.append(f"  Notes:      {device.review_notes}")
@@ -324,6 +350,7 @@ def render_device_detail(
         f"Last seen:  {device.last_seen.isoformat(timespec='seconds')}",
         f"Trust:      {_rich_escape(trust)}",
         f"Review:     {_rich_escape(review_status_label(device, now=now))}",
+        _rich_escape(presence_label(device, default_offline_after_seconds=default_offline_after_seconds)),
     ]
     if device.review_notes:
         detail_lines.append(f"Notes:      {_rich_escape(device.review_notes)}")

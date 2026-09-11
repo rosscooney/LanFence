@@ -22,6 +22,21 @@ EventType = Literal["new_device", "reappeared", "disconnected"]
 #: for any device with no review row at all, or whose snooze has expired.
 ReviewStateName = Literal["pending", "snoozed", "investigating"]
 
+#: Per-device presence expectation (separate from trust). "unspecified" is
+#: the default and preserves pre-existing behavior; "intermittent" devices
+#: (laptops, phones) routinely leave/rejoin and their routine lifecycle
+#: announcements are suppressed; "always-on" devices are expected to stay
+#: connected, and a sustained absence produces its own availability finding.
+PresencePolicyName = Literal["unspecified", "intermittent", "always-on"]
+
+#: What a finding is *about*, so intermittent-presence suppression and
+#: availability-alert cooldown bucketing can act on an explicit signal
+#: rather than pattern-matching human-readable titles. "security" (the
+#: default) covers new-device/rogue-signature findings; "lifecycle" is a
+#: routine connect/reappear announcement with no independent security
+#: signal; "availability" is an always-on absence/recovery finding.
+FindingKind = Literal["security", "lifecycle", "availability"]
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -46,6 +61,18 @@ class Device(BaseModel):
     review_state: ReviewStateName = "pending"
     review_notes: str | None = None
     snoozed_until: datetime | None = None
+    #: Presence expectation (see :data:`PresencePolicyName`) - "unspecified"
+    #: and unset unless a device inventory query has populated this from the
+    #: database. Separate from trust: not itself stored on ``devices`` or in
+    #: the allowlist; joined in at read time from ``device_presence``.
+    presence_policy: PresencePolicyName = "unspecified"
+    #: Per-device override of how long an "always-on" device may be absent
+    #: before an availability finding fires. ``None`` means "use the
+    #: configured global ``scan.offline_grace_seconds``" - callers needing
+    #: the *effective* value combine this with that config themselves (see
+    #: ``lanfence device``/``devices`` rendering). Meaningless when
+    #: ``presence_policy`` isn't ``"always-on"``.
+    offline_after_seconds: float | None = None
 
     @field_validator("mac")
     @classmethod
@@ -89,6 +116,29 @@ class ReviewState(BaseModel):
         return clean_text(value, max_len=1000) if value is not None else None
 
 
+class PresenceState(BaseModel):
+    """The persisted presence policy for one MAC (separate from trust - see
+    :data:`PresencePolicyName`). ``updated_at`` is ``None`` for a MAC with no
+    presence row yet (``unspecified``, the default).
+
+    ``availability_alerted`` tracks whether an availability (absence) finding
+    has already fired for the device's *current* offline episode, so a
+    recovery finding fires exactly once per episode and a restart never
+    duplicates either - see ``lanfence/engine.py``'s always-on handling.
+    """
+
+    mac: str
+    policy: PresencePolicyName = "unspecified"
+    offline_after_seconds: float | None = None
+    availability_alerted: bool = False
+    updated_at: datetime | None = None
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+
 class DeviceEvent(BaseModel):
     """A lifecycle transition for one device (connect / disconnect / reappear)."""
 
@@ -118,6 +168,11 @@ class Finding(BaseModel):
     rationale: str = ""
     recommendation: str = ""
     evidence: list[str] = Field(default_factory=list)
+    #: What this finding is about (see :data:`FindingKind`). Additive field;
+    #: defaults to "security" so every finding predating this field - and
+    #: every finding this codebase already builds without setting it
+    #: explicitly - keeps its existing meaning.
+    kind: FindingKind = "security"
 
     @field_validator("mac")
     @classmethod

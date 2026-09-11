@@ -15,6 +15,26 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- **Per-device presence policies.** `lanfence device <MAC> --presence
+  unspecified|intermittent|always-on` lets you tell LAN Fence what "normal"
+  looks like for a device - separate from trust. `intermittent` (routine
+  come-and-go, e.g. laptops/phones) suppresses only the routine "it came
+  back" lifecycle finding/notification - first discoveries and independent
+  security findings are never suppressed, and status/history tracking is
+  unaffected. `always-on` (e.g. servers, NAS, printers) keeps the existing
+  offline-detection rules for *when* a device is confirmed offline, and adds
+  one medium-severity availability finding once it's been absent for the
+  effective delay (`--offline-after`, default the global
+  `scan.offline_grace_seconds`) plus one info-severity recovery finding on
+  its return - persisted per absence episode so a restart never duplicates
+  either. `lanfence devices --presence ...` filters by policy, and
+  `lanfence review`'s interactive flow asks about presence right after
+  trusting a device. Policy is stored in a new, backward-compatible
+  `device_presence` table; editing it alone never fabricates a lifecycle
+  event or fires an alert.
+
 ## [0.3.8] - 2026-09-11
 
 ### Added

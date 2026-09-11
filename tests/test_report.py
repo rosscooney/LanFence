@@ -7,6 +7,7 @@ from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
     highest_severity,
+    presence_label,
     render_device_detail,
     render_device_inventory,
     render_scan_result,
@@ -141,3 +142,54 @@ def test_render_device_detail_empty_timeline_plain():
     device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
     text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
     assert "0 event(s)" in text
+
+
+# --- presence_label ----------------------------------------------------
+
+
+def test_presence_label_unspecified():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now())
+    assert presence_label(device) == "Presence: unspecified"
+
+
+def test_presence_label_intermittent():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(), presence_policy="intermittent"
+    )
+    assert presence_label(device) == "Presence: intermittent"
+
+
+def test_presence_label_always_on_shows_effective_duration_from_override():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(),
+        presence_policy="always-on", offline_after_seconds=600.0,
+    )
+    label = presence_label(device, default_offline_after_seconds=180.0)
+    assert "always-on" in label
+    assert "600s" in label
+
+
+def test_presence_label_always_on_falls_back_to_global_default():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(), presence_policy="always-on",
+    )
+    label = presence_label(device, default_offline_after_seconds=180.0)
+    assert "180s" in label
+
+
+def test_render_device_inventory_shows_presence_column_plain():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(), presence_policy="intermittent",
+    )
+    text = render_device_inventory([device], now=_now(), plain=True)
+    assert "intermittent" in text
+
+
+def test_render_device_detail_shows_presence_line_plain():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now, presence_policy="always-on")
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, default_offline_after_seconds=180.0
+    )
+    assert "Presence: always-on" in text
+    assert "180s" in text

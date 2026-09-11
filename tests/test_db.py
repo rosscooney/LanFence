@@ -732,3 +732,242 @@ def test_reset_all_on_empty_database_is_a_noop(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         store.reset_all()  # must not raise
         assert store.all_devices() == []
+
+
+# --- presence policy -------------------------------------------------------
+
+
+def test_get_presence_defaults_to_unspecified_for_unknown_mac(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        presence = store.get_presence("aa:bb:cc:dd:ee:ff")
+        assert presence.policy == "unspecified"
+        assert presence.offline_after_seconds is None
+        assert presence.availability_alerted is False
+        assert presence.updated_at is None
+
+
+def test_set_presence_policy_persists(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "intermittent", updated_at=now)
+        presence = store.get_presence("aa:bb:cc:dd:ee:ff")
+        assert presence.policy == "intermittent"
+        assert presence.updated_at == now
+
+
+def test_set_offline_after_only_meaningful_for_always_on_but_stored_regardless(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=now)
+        store.set_offline_after("aa:bb:cc:dd:ee:ff", 600.0, updated_at=now)
+        presence = store.get_presence("aa:bb:cc:dd:ee:ff")
+        assert presence.policy == "always-on"
+        assert presence.offline_after_seconds == 600.0
+
+
+def test_moving_away_from_always_on_clears_override_and_alerted_flag(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=now)
+        store.set_offline_after("aa:bb:cc:dd:ee:ff", 600.0, updated_at=now)
+        store.set_availability_alerted("aa:bb:cc:dd:ee:ff", True, updated_at=now)
+
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "intermittent", updated_at=now)
+        presence = store.get_presence("aa:bb:cc:dd:ee:ff")
+        assert presence.policy == "intermittent"
+        assert presence.offline_after_seconds is None
+        assert presence.availability_alerted is False
+
+
+def test_switching_back_to_always_on_keeps_previous_override(tmp_path: Path):
+    """Re-affirming the *same* always-on policy (not switching away and
+    back) preserves whatever override/alerted state was already there."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=now)
+        store.set_offline_after("aa:bb:cc:dd:ee:ff", 600.0, updated_at=now)
+        store.set_availability_alerted("aa:bb:cc:dd:ee:ff", True, updated_at=now)
+
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=now)
+        presence = store.get_presence("aa:bb:cc:dd:ee:ff")
+        assert presence.offline_after_seconds == 600.0
+        assert presence.availability_alerted is True
+
+
+def test_reset_all_clears_presence_policy(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=now)
+        store.reset_all()
+        assert store.get_presence("aa:bb:cc:dd:ee:ff").policy == "unspecified"
+
+
+def test_device_presence_table_added_to_a_pre_existing_database(tmp_path: Path):
+    """Migration test: a database created before presence policies existed
+    gets the device_presence table transparently, without data loss."""
+
+    db_path = tmp_path / "db.sqlite"
+    now = _now()
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=now)
+        store._conn.execute("DROP TABLE device_presence")
+        store._conn.commit()
+
+    with DeviceStore(db_path) as store:  # re-opening should recreate the table
+        assert store.get_presence("aa:bb:cc:dd:ee:ff").policy == "unspecified"
+        assert store.get_device("aa:bb:cc:dd:ee:ff") is not None
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "intermittent", updated_at=now)
+        assert store.get_presence("aa:bb:cc:dd:ee:ff").policy == "intermittent"
+
+
+# --- evaluate_availability --------------------------------------------------
+
+
+def _offline_always_on(store: DeviceStore, mac: str, *, last_seen, offline_after=None):
+    store.observe(mac=mac, ip="10.0.0.5", hostname=None, vendor=None, seen_at=last_seen,
+                  interface="eth0", subnet="10.0.0.0/24")
+    store.mark_offline(
+        set(), as_of=last_seen, grace_seconds=0, missed_after=1,
+        ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+    )
+    store.set_presence_policy(mac, "always-on", updated_at=last_seen)
+    if offline_after is not None:
+        store.set_offline_after(mac, offline_after, updated_at=last_seen)
+
+
+def test_evaluate_availability_fires_once_duration_reached(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _offline_always_on(store, "aa:bb:cc:dd:ee:ff", last_seen=t0)
+
+        due = store.evaluate_availability(
+            as_of=t0 + timedelta(seconds=600), default_offline_after_seconds=300,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        assert [d["mac"] for d in due] == ["aa:bb:cc:dd:ee:ff"]
+        assert store.get_presence("aa:bb:cc:dd:ee:ff").availability_alerted is True
+
+
+def test_evaluate_availability_not_yet_due(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _offline_always_on(store, "aa:bb:cc:dd:ee:ff", last_seen=t0)
+
+        due = store.evaluate_availability(
+            as_of=t0 + timedelta(seconds=10), default_offline_after_seconds=300,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        assert due == []
+        assert store.get_presence("aa:bb:cc:dd:ee:ff").availability_alerted is False
+
+
+def test_evaluate_availability_never_fires_twice_for_the_same_episode(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _offline_always_on(store, "aa:bb:cc:dd:ee:ff", last_seen=t0)
+        kwargs = dict(default_offline_after_seconds=300, ipv4_covered=True,
+                      ipv4_subnet="10.0.0.0/24", interface="eth0")
+
+        first = store.evaluate_availability(as_of=t0 + timedelta(seconds=600), **kwargs)
+        second = store.evaluate_availability(as_of=t0 + timedelta(seconds=1200), **kwargs)
+        assert len(first) == 1
+        assert second == []  # already alerted - not re-fired on a later sweep
+
+
+def test_evaluate_availability_alerted_flag_survives_reopening_the_database(tmp_path: Path):
+    """Persistence test: a restarted monitor (a fresh DeviceStore handle)
+    must not re-fire an absence alert that already fired before the
+    restart."""
+
+    db_path = tmp_path / "db.sqlite"
+    t0 = _now()
+    kwargs = dict(default_offline_after_seconds=300, ipv4_covered=True,
+                  ipv4_subnet="10.0.0.0/24", interface="eth0")
+
+    with DeviceStore(db_path) as store:
+        _offline_always_on(store, "aa:bb:cc:dd:ee:ff", last_seen=t0)
+        due = store.evaluate_availability(as_of=t0 + timedelta(seconds=600), **kwargs)
+        assert len(due) == 1
+
+    with DeviceStore(db_path) as store:  # simulates a monitor restart
+        due_again = store.evaluate_availability(as_of=t0 + timedelta(seconds=1200), **kwargs)
+        assert due_again == []
+        assert store.get_presence("aa:bb:cc:dd:ee:ff").availability_alerted is True
+
+
+def test_evaluate_availability_uses_per_device_override(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _offline_always_on(store, "aa:bb:cc:dd:ee:ff", last_seen=t0, offline_after=60)
+
+        # Global default (300s) hasn't been reached, but the override (60s) has.
+        due = store.evaluate_availability(
+            as_of=t0 + timedelta(seconds=90), default_offline_after_seconds=300,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        assert len(due) == 1
+
+
+def test_evaluate_availability_ignores_non_always_on_devices(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None,
+                      seen_at=t0, interface="eth0", subnet="10.0.0.0/24")
+        store.mark_offline(
+            set(), as_of=t0, grace_seconds=0, missed_after=1,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        # presence left at the default "unspecified"
+
+        due = store.evaluate_availability(
+            as_of=t0 + timedelta(days=1), default_offline_after_seconds=300,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        assert due == []
+
+
+def test_evaluate_availability_respects_coverage_rules(tmp_path: Path):
+    """A sweep on a different subnet must not evaluate this device's
+    absence - same conservative coverage rule as mark_offline."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _offline_always_on(store, "aa:bb:cc:dd:ee:ff", last_seen=t0)
+
+        due = store.evaluate_availability(
+            as_of=t0 + timedelta(seconds=600), default_offline_after_seconds=300,
+            ipv4_covered=True, ipv4_subnet="192.168.1.0/24", interface="eth0",
+        )
+        assert due == []
+
+
+def test_evaluate_availability_still_online_device_is_not_a_candidate(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None,
+                      seen_at=t0, interface="eth0", subnet="10.0.0.0/24")
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=t0)
+
+        due = store.evaluate_availability(
+            as_of=t0 + timedelta(days=1), default_offline_after_seconds=300,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        assert due == []
+
+
+# --- due_for_alert key override ---------------------------------------------
+
+
+def test_due_for_alert_independent_keys_do_not_interfere(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "medium", now=t0, cooldown_seconds=900,
+            key="aa:bb:cc:dd:ee:ff#availability#medium",
+        ) is True
+        # A different key for the same MAC is unaffected by the above.
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "info", now=t0, cooldown_seconds=900,
+            key="aa:bb:cc:dd:ee:ff#availability#info",
+        ) is True

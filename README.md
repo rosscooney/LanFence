@@ -155,6 +155,8 @@ lanfence reset                  # permanently wipe scanned device history (and a
 lanfence devices                # list previously observed devices - no scan
 lanfence devices --review-needed --format json
 lanfence device <MAC>           # one device's details, trust state, timeline
+lanfence device <MAC> --presence intermittent   # set a presence policy (separate from trust)
+lanfence devices --presence always-on
 lanfence review                 # interactively work through devices needing review
 lanfence review <MAC> --trust --name "Kitchen speaker"
 lanfence review <MAC> --snooze 24h
@@ -356,6 +358,72 @@ passive traffic) establishes its real coverage; from then on, normal
 grace-period rules apply. The database schema itself is upgraded
 automatically and idempotently the next time it's opened - no data is lost
 or reset.
+
+## Presence policies
+
+Laptops, phones, and tablets routinely leave and rejoin the network - that's
+normal, not a problem. A server, printer, or NAS staying connected is the
+opposite: its absence *is* the problem. Presence policies let you tell LAN
+Fence which is which, per device - **separate from trust**. Trusting a
+device (the allowlist) says "I recognize this device"; a presence policy
+says "here's what normal looks like for it." A device can be trusted and
+have any presence policy, or neither, independently.
+
+```text
+lanfence device <MAC> --presence intermittent    # normal to come and go
+lanfence device <MAC> --presence always-on       # sustained absence is unexpected
+lanfence device <MAC> --presence always-on --offline-after 10m
+lanfence device <MAC> --presence unspecified     # back to the default
+lanfence device <MAC> --clear-offline-after      # restore the global default delay
+lanfence devices --presence intermittent
+```
+
+Three policies, per device:
+
+- **`unspecified`** (the default) - no change from existing behavior.
+- **`intermittent`** - routine absence and return are expected. LAN Fence
+  keeps tracking real online/offline status and keeps recording
+  disconnected/reappeared events in the timeline exactly as before; what's
+  suppressed is only the *routine* "it came back" notification and finding -
+  a finding whose sole purpose is announcing an ordinary return. A brand-new
+  device's first-ever discovery is **never** suppressed, and neither is any
+  independent security signal (e.g. a rogue-device signature match) carried
+  alongside a reappearance - only the routine announcement itself is
+  dropped. Setting this never trusts, snoozes, or otherwise approves the
+  device.
+- **`always-on`** - sustained absence is unexpected. Online/offline status
+  still comes from the same scan-coverage rules, consecutive-miss threshold,
+  and global `offline_grace_seconds` as every other device (see above) -
+  presence policy doesn't change *when* a device is confirmed offline, only
+  what happens next. Once confirmed offline, if it stays absent for the
+  **effective absence duration** - its own `--offline-after` override, or
+  `scan.offline_grace_seconds` when no override is set - LAN Fence emits one
+  medium-severity availability finding ("this device has been gone longer
+  than expected"), and exactly one info-severity recovery finding the moment
+  it's seen again. **`--offline-after` is an alert delay, not a grace
+  period**: it does not affect when a device is marked offline (that's still
+  purely the coverage/miss-threshold/grace-period logic above) - it only
+  controls how much *additional* time an already-offline always-on device
+  gets before its absence is treated as noteworthy. If that delay elapses
+  while a device is already offline, the alert fires on the next eligible
+  sweep - no new disconnect is needed to trigger it. Trust is irrelevant
+  here: even an allowlisted always-on device gets its availability finding.
+
+Editing a policy never fabricates a lifecycle event or fires an alert by
+itself - it only changes how *future* observations are interpreted. Setting
+`always-on` on a device that's already offline makes it eligible for
+evaluation on the very next qualifying sweep; switching a device *away* from
+`always-on` clears any pending absence-alert state without firing a
+recovery (there's nothing to recover from once it's no longer being
+watched). A `lanfence monitor` process already running picks up a policy
+edit made from another terminal immediately, on the next sighting - no
+restart needed, the same as trust and review state.
+
+`lanfence review`'s interactive flow asks about presence right after you
+choose to trust a device ("Should this device always be online, or is it
+normal for it to come and go?") - answering is optional and defaults to
+whatever the device's policy already was (`unspecified` if never set);
+exiting that follow-up prompt never undoes the trust decision you just made.
 
 ## Running unattended
 

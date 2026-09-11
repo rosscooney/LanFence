@@ -354,6 +354,22 @@ def test_devices_combined_filters_are_predictable_and(config_path: Path):
     assert set(by_mac) == {"11:22:33:44:55:66"}
 
 
+def test_devices_presence_filter(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "11:22:33:44:55:66", "--presence", "intermittent", "--config", str(config_path)])
+    runner.invoke(app, ["device", "77:88:99:aa:bb:cc", "--presence", "always-on", "--config", str(config_path)])
+
+    assert set(_devices_json(config_path, "--presence", "intermittent")) == {"11:22:33:44:55:66"}
+    assert set(_devices_json(config_path, "--presence", "always-on")) == {"77:88:99:aa:bb:cc"}
+    assert set(_devices_json(config_path, "--presence", "unspecified")) == {"aa:bb:cc:dd:ee:ff"}
+
+
+def test_devices_rejects_invalid_presence(config_path: Path):
+    result = runner.invoke(app, ["devices", "--presence", "sometimes", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "presence" in result.output.lower()
+
+
 def test_devices_json_output(config_path: Path):
     _seed_devices(config_path)
     result = runner.invoke(app, ["devices", "--format", "json", "--config", str(config_path)])
@@ -430,6 +446,136 @@ def test_device_invalid_mac(config_path: Path):
     result = runner.invoke(app, ["device", "not-a-mac", "--config", str(config_path)])
     assert result.exit_code == 2
     assert "not a valid mac" in result.output.lower()
+
+
+# --- device <mac> --presence -------------------------------------------
+
+
+def test_device_shows_presence_unspecified_by_default(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Presence: unspecified" in result.output
+
+
+def test_device_set_presence_intermittent(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "intermittent", "--config", str(config_path)]
+    )
+    assert result.exit_code == 0
+    assert "intermittent" in result.output.lower()
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Presence: intermittent" in show.output
+
+
+def test_device_set_always_on_with_offline_after(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "always-on", "--offline-after", "10m",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Presence: always-on" in show.output
+    assert "600s" in show.output
+
+
+def test_device_read_only_when_no_mutation_options_given(config_path: Path):
+    """Preserve existing read-only behavior: no presence flags means show,
+    same as before this feature existed."""
+
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Current details" in result.output
+
+
+def test_device_offline_after_rejected_when_not_always_on(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--offline-after", "10m", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "always-on" in result.output.lower()
+
+
+def test_device_offline_after_rejected_when_presence_given_as_something_else(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "intermittent", "--offline-after", "10m",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 2
+    assert "always-on" in result.output.lower()
+
+
+def test_device_offline_after_and_clear_offline_after_are_contradictory(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--offline-after", "10m", "--clear-offline-after",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 2
+    assert "contradictory" in result.output.lower()
+
+
+def test_device_clear_offline_after_restores_global_default(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "always-on", "--offline-after", "10m",
+              "--config", str(config_path)],
+    )
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--clear-offline-after", "--config", str(config_path)]
+    )
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "180s" in show.output  # the default scan.offline_grace_seconds
+
+
+def test_device_switching_away_from_always_on_clears_override(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "always-on", "--offline-after", "10m",
+              "--config", str(config_path)],
+    )
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "intermittent", "--config", str(config_path)])
+
+    by_mac = _devices_json(config_path)
+    assert by_mac["aa:bb:cc:dd:ee:ff"]["offline_after_seconds"] is None
+
+
+def test_device_rejects_invalid_presence_value(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "sometimes", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+
+
+def test_device_presence_unknown_mac_fails(config_path: Path):
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "intermittent", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "no device" in result.output.lower()
+
+
+def test_device_presence_json_output_is_additive(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--presence", "always-on", "--offline-after", "5m",
+              "--config", str(config_path)],
+    )
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--format", "json", "--config", str(config_path)])
+    import json
+
+    payload = json.loads(result.output)
+    assert payload["device"]["presence_policy"] == "always-on"
+    assert payload["device"]["offline_after_seconds"] == 300.0
 
 
 def test_device_unknown_mac(config_path: Path):
@@ -617,6 +763,51 @@ def test_review_interactive_trust_flow(config_path: Path):
 
     listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
     assert "Living Room ESP" in listing.output
+
+
+def test_review_interactive_trust_then_presence_intermittent(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="t\nLiving Room ESP\nsome notes\ni\n",
+        )
+    assert result.exit_code == 0
+    assert "presence: intermittent" in result.output.lower()
+
+    by_mac = _devices_json(config_path)
+    assert by_mac["11:22:33:44:55:66"]["presence_policy"] == "intermittent"
+
+
+def test_review_interactive_trust_then_presence_always_on(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="t\nNAS\n\na\n",
+        )
+    assert result.exit_code == 0
+    assert "presence: always-on" in result.output.lower()
+
+
+def test_review_interactive_trust_then_presence_prompt_aborted_preserves_trust(config_path: Path):
+    """Exiting the presence sub-prompt (EOF here, standing in for Ctrl+D/C)
+    must not undo the trust decision made moments before."""
+
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="t\nLiving Room ESP\nsome notes\n",  # no answer for the presence prompt
+        )
+    assert result.exit_code == 0
+    assert "presence unchanged" in result.output.lower()
+
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "Living Room ESP" in listing.output  # trust was preserved
+
+    by_mac = _devices_json(config_path)
+    assert by_mac["11:22:33:44:55:66"]["presence_policy"] == "unspecified"  # left at the default
 
 
 def test_review_interactive_snooze_flow(config_path: Path):

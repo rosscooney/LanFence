@@ -636,6 +636,9 @@ def reset(
     typer.secho(summary, fg="green")
 
 
+_PRESENCE_POLICIES = ("unspecified", "intermittent", "always-on")
+
+
 @app.command()
 def devices(
     status: Optional[str] = typer.Option(None, "--status", help="Filter by status: online | offline."),
@@ -643,6 +646,9 @@ def devices(
     review_needed: bool = typer.Option(
         False, "--review-needed",
         help="Only devices needing review: untrusted, not actively snoozed, not flagged investigating.",
+    ),
+    presence: Optional[str] = typer.Option(
+        None, "--presence", help="Filter by presence policy: unspecified | intermittent | always-on."
     ),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
@@ -657,6 +663,12 @@ def devices(
 
     if status is not None and status not in ("online", "offline"):
         typer.secho(f"error: --status must be 'online' or 'offline', got {status!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if presence is not None and presence not in _PRESENCE_POLICIES:
+        typer.secho(
+            f"error: --presence must be one of {', '.join(_PRESENCE_POLICIES)}, got {presence!r}",
+            fg="red", err=True,
+        )
         raise typer.Exit(code=2)
     if output_format not in ("table", "json"):
         typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
@@ -677,17 +689,33 @@ def devices(
         inventory = [d for d in inventory if not d.allowlisted]
     if review_needed:
         inventory = [d for d in inventory if is_review_needed(d, now=now)]
+    if presence is not None:
+        inventory = [d for d in inventory if d.presence_policy == presence]
 
     if output_format == "json":
         typer.echo(json.dumps([d.model_dump(mode="json") for d in inventory], indent=2))
     else:
-        render_device_inventory(inventory, now=now, total_count=total_count)
+        render_device_inventory(
+            inventory, now=now, total_count=total_count,
+            default_offline_after_seconds=cfg.scan.offline_grace_seconds,
+        )
 
 
 @app.command()
 def device(
     mac: str = typer.Argument(..., help="MAC address to show."),
     since: str = typer.Option("30d", "--since", help="How far back to show the lifecycle timeline, e.g. 24h, 7d."),
+    presence: Optional[str] = typer.Option(
+        None, "--presence", help="Set presence policy: unspecified | intermittent | always-on."
+    ),
+    offline_after: Optional[str] = typer.Option(
+        None, "--offline-after",
+        help="Always-on only: override how long an absence may last before an availability "
+        "finding fires, e.g. 10m. Default: the configured global offline grace period.",
+    ),
+    clear_offline_after: bool = typer.Option(
+        False, "--clear-offline-after", help="Remove the --offline-after override; restore the global default."
+    ),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
@@ -697,10 +725,25 @@ def device(
     recent sighting; the timeline below is a separate, append-only log of
     connect/reappear/disconnect transitions - not a complete history of
     every address this MAC has ever held (see the timeline's own caveat).
+
+    With `--presence`/`--offline-after`/`--clear-offline-after`, edits that
+    device's presence policy instead of showing it - see
+    `lanfence device <MAC> --presence always-on --offline-after 10m`.
+    Presence is separate from trust: it never changes the allowlist, and a
+    policy edit alone never fabricates a lifecycle event or fires an alert.
     """
 
     if output_format not in ("table", "json"):
         typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if presence is not None and presence not in _PRESENCE_POLICIES:
+        typer.secho(
+            f"error: --presence must be one of {', '.join(_PRESENCE_POLICIES)}, got {presence!r}",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+    if offline_after is not None and clear_offline_after:
+        typer.secho("error: --offline-after and --clear-offline-after are contradictory", fg="red", err=True)
         raise typer.Exit(code=2)
 
     try:
@@ -710,6 +753,43 @@ def device(
         raise typer.Exit(code=2) from exc
 
     cfg = _load_config(config)
+
+    mutating = presence is not None or offline_after is not None or clear_offline_after
+    if mutating:
+        with DeviceStore(cfg.resolved_db_path()) as store:
+            if store.get_device(norm_mac) is None:
+                typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
+                raise typer.Exit(code=2)
+
+            current = store.get_presence(norm_mac)
+            effective_policy = presence if presence is not None else current.policy
+            if offline_after is not None and effective_policy != "always-on":
+                typer.secho(
+                    "error: --offline-after only applies when the effective policy is always-on",
+                    fg="red", err=True,
+                )
+                raise typer.Exit(code=2)
+
+            now = utcnow()
+            if presence is not None:
+                store.set_presence_policy(norm_mac, presence, updated_at=now)
+                typer.secho(f"presence policy for {norm_mac} set to {presence}", fg="green")
+            if offline_after is not None:
+                seconds = _duration_seconds(offline_after)
+                if seconds is None or seconds <= 0:
+                    typer.secho(
+                        f"error: could not parse --offline-after {offline_after!r} "
+                        "(expected a positive duration, e.g. 10m, 1h)",
+                        fg="red", err=True,
+                    )
+                    raise typer.Exit(code=2)
+                store.set_offline_after(norm_mac, seconds, updated_at=now)
+                typer.secho(f"offline-after for {norm_mac} set to {offline_after}", fg="green")
+            if clear_offline_after:
+                store.set_offline_after(norm_mac, None, updated_at=now)
+                typer.secho(f"offline-after for {norm_mac} cleared - using the global default", fg="green")
+        return
+
     since_dt = _parse_since(since)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=cfg.scan.interface)
@@ -721,6 +801,7 @@ def device(
             typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
             raise typer.Exit(code=2)
         review = store.get_review(norm_mac)
+        presence_state = store.get_presence(norm_mac)
         events = store.events_for(norm_mac, since=since_dt)
 
     allow_entry = allowlist.match(norm_mac)
@@ -731,6 +812,8 @@ def device(
             "review_state": review.state,
             "review_notes": review.notes,
             "snoozed_until": review.snoozed_until,
+            "presence_policy": presence_state.policy,
+            "offline_after_seconds": presence_state.offline_after_seconds,
         }
     )
 
@@ -742,7 +825,9 @@ def device(
         }
         typer.echo(json.dumps(payload, indent=2))
     else:
-        render_device_detail(dev, events, since_dt, now=now)
+        render_device_detail(
+            dev, events, since_dt, now=now, default_offline_after_seconds=cfg.scan.offline_grace_seconds
+        )
 
 
 def _stdin_is_interactive() -> bool:
@@ -819,6 +904,32 @@ def _run_interactive_review(cfg: Config) -> None:
                 allowlist.save()
                 store.clear_review(dev.mac)
                 typer.secho(f"  trusted: {entry.name}", fg="green")
+
+                # Presence is separate from trust - ask, but never let
+                # exiting this sub-prompt undo the trust decision just made
+                # above (already persisted) or abort the rest of the queue.
+                current_policy = store.get_presence(dev.mac).policy
+                try:
+                    presence_choice = typer.prompt(
+                        "  Should this device always be online, or is it normal for it "
+                        "to come and go?\n    [i]ntermittent - normal to come and go\n"
+                        "    [a]lways on - notify after a sustained absence\n"
+                        "    [u]nspecified - retain existing behavior\n  presence",
+                        default={"intermittent": "i", "always-on": "a"}.get(current_policy, "u"),
+                    ).strip().lower()
+                except (typer.Abort, EOFError):
+                    presence_choice = None
+                    typer.echo("  presence unchanged.")
+
+                policy_map = {
+                    "i": "intermittent", "intermittent": "intermittent",
+                    "a": "always-on", "always-on": "always-on", "always on": "always-on",
+                    "u": "unspecified", "unspecified": "unspecified",
+                }
+                new_policy = policy_map.get(presence_choice)
+                if new_policy is not None and new_policy != current_policy:
+                    store.set_presence_policy(dev.mac, new_policy, updated_at=utcnow())
+                    typer.secho(f"  presence: {new_policy}", fg="green")
             elif action in ("s", "snooze"):
                 duration_str = typer.prompt("  snooze for", default="24h")
                 seconds = _duration_seconds(duration_str)

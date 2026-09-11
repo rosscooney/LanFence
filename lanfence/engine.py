@@ -44,6 +44,25 @@ def build_findings(device: Device, event_type: EventType | None, matches: list[S
     disconnect is a lifecycle fact (see ``lanfence report``), not something to
     alert on. Only a device newly joining, or reappearing after being offline,
     is worth an operator's attention.
+
+    Every finding here is tagged with a :data:`~lanfence.models.FindingKind`
+    rather than left to be inferred from its title later:
+
+    - ``new_device`` is always ``"security"`` - a MAC never seen before is
+      inherently worth a look, regardless of any presence policy (a first
+      discovery is never suppressed - see ``lanfence device --presence``).
+    - A routine, non-allowlisted ``reappeared`` with no high-severity
+      signature match is ``"lifecycle"`` - purely "this MAC came back,"
+      nothing independently security-relevant.
+    - A routine ``reappeared`` that *also* carries a high-severity signature
+      match is split into two findings: a ``"lifecycle"`` one (the routine
+      announcement) and a separate ``"security"`` one (the signature
+      evidence, standing on its own) - so an intermittent-presence device
+      (see :func:`lanfence.engine.process_sighting`) can have the former
+      suppressed without ever losing the latter.
+    - An allowlisted device's reappearance stays a single ``"lifecycle"``
+      finding at ``info`` - trust already downgrades it, and it never
+      carries independent signature-based severity today.
     """
 
     if event_type in (None, "disconnected"):
@@ -67,44 +86,69 @@ def build_findings(device: Device, event_type: EventType | None, matches: list[S
             title = f"New allowlisted device connected: {label}"
         else:
             title = f"Allowlisted device reappeared: {label}"
-        return [
+        result = [
             Finding(
                 mac=device.mac,
                 title=title,
                 severity="info",
+                kind="security" if event_type == "new_device" else "lifecycle",
                 rationale=f"This MAC is on your allowlist as {label!r}. " + rationale,
                 recommendation="No action needed - this device is trusted.",
                 evidence=evidence,
             )
         ]
-
-    if event_type == "new_device":
+    elif event_type == "new_device":
         severity = top or "medium"
         title = "Unknown device connected"
         recommendation = (
             "Verify this device belongs on your network. If it's yours, run "
             f"`lanfence allow {device.mac}` to stop future alerts about it."
         )
-    else:  # reappeared
-        # A device you'd already seen before is lower-signal by default; only
-        # keep shouting if it also carries a high-severity fingerprint match.
-        severity = top if top == "high" else "info"
-        title = "Previously seen (non-allowlisted) device reappeared"
-        recommendation = (
-            "This device was seen before and was not on your allowlist. If it's "
-            f"yours, run `lanfence allow {device.mac}`; otherwise investigate."
-        )
-
-    return [
-        Finding(
+        result = [
+            Finding(
+                mac=device.mac, title=title, severity=severity, kind="security",
+                rationale=rationale, recommendation=recommendation, evidence=evidence,
+            )
+        ]
+    else:
+        # reappeared, not allowlisted: a device you'd already seen before is
+        # lower-signal by default - just the routine lifecycle announcement -
+        # unless it also carries a high-severity fingerprint match, in which
+        # case that evidence stands as its own, independently-suppressible
+        # security finding (see the docstring above).
+        lifecycle_finding = Finding(
             mac=device.mac,
-            title=title,
-            severity=severity,
-            rationale=rationale,
-            recommendation=recommendation,
+            title="Previously seen (non-allowlisted) device reappeared",
+            severity="info",
+            kind="lifecycle",
+            rationale="This device was seen before and was not on your allowlist.",
+            recommendation=(
+                f"If it's yours, run `lanfence allow {device.mac}`; otherwise investigate."
+            ),
             evidence=evidence,
         )
-    ]
+        if top != "high":
+            result = [lifecycle_finding]
+        else:
+            high_matches = [m for m in matches if m.severity == "high"]
+            security_finding = Finding(
+                mac=device.mac,
+                title="Rogue-device signature matched on reappearance",
+                severity="high",
+                kind="security",
+                rationale=" ".join(m.description for m in high_matches),
+                recommendation="Investigate this device - a known rogue-device signature matched.",
+                evidence=evidence + [m.evidence for m in high_matches],
+            )
+            result = [security_finding, lifecycle_finding]
+
+    if device.presence_policy == "intermittent":
+        # Routine come-and-go is expected for this device - drop only the
+        # "sole purpose is announcing routine absence or return" findings.
+        # A first-ever discovery (kind="security" even when untrusted) and
+        # any independent security evidence are never suppressed.
+        result = [f for f in result if f.kind != "lifecycle"]
+    return result
 
 
 def process_sighting(
@@ -131,6 +175,11 @@ def process_sighting(
     ``interface``/``subnet`` are passed straight through to
     :meth:`lanfence.db.DeviceStore.observe` as discovery provenance for the
     offline-grace-period feature - see its docstring.
+
+    An always-on device reappearing after an absence that already triggered
+    an availability (absence) finding gets exactly one additional info-
+    severity recovery finding here, and its episode state is cleared so the
+    next absence starts a fresh one - see ``lanfence device --presence``.
     """
 
     hostname = hostname_hint
@@ -143,15 +192,86 @@ def process_sighting(
     )
 
     allow_entry = allowlist.match(mac)
+    presence = store.get_presence(mac)
     device = device.model_copy(
         update={
             "allowlisted": allow_entry is not None,
             "allowlist_name": allow_entry.name if allow_entry else None,
             "fingerprints": [m.category for m in matches],
+            "presence_policy": presence.policy,
+            "offline_after_seconds": presence.offline_after_seconds,
         }
     )
     findings = build_findings(device, event_type, matches)
+
+    if event_type == "reappeared" and presence.availability_alerted:
+        # Trust must not downgrade an explicitly requested availability
+        # finding - this recovery fires regardless of allowlist status.
+        findings.append(
+            Finding(
+                mac=device.mac,
+                title="Always-on device recovered",
+                severity="info",
+                kind="availability",
+                rationale=(
+                    "This device is policy'd as always-on and had been confirmed absent "
+                    "long enough to trigger an availability alert; it has now reappeared."
+                ),
+                recommendation="No action needed.",
+                evidence=[f"MAC: {device.mac}", f"IP: {device.ip or '[unknown]'}"],
+            )
+        )
+        store.set_availability_alerted(mac, False, updated_at=seen_at)
+
     return device, event_type, findings
+
+
+def evaluate_availability(
+    store: DeviceStore,
+    cfg: Config,
+    *,
+    as_of: datetime,
+    ipv4_covered: bool,
+    ipv4_subnet: str | None,
+    ipv6_covered: bool,
+    interface: str | None,
+) -> list[Finding]:
+    """One medium-severity availability finding per always-on device whose
+    absence has just reached its effective delay - see
+    :meth:`lanfence.db.DeviceStore.evaluate_availability` for the
+    eligibility rule (an already-offline, not-yet-alerted, always-on
+    device, evaluated only against a sweep that actually covered its known
+    discovery path). Trust never downgrades this - it fires at ``medium``
+    regardless of allowlist status. Call this once per eligible active
+    sweep, alongside :func:`run_active_sweep`'s ``mark_offline`` call.
+    """
+
+    due = store.evaluate_availability(
+        as_of=as_of, default_offline_after_seconds=cfg.scan.offline_grace_seconds,
+        ipv4_covered=ipv4_covered, ipv4_subnet=ipv4_subnet,
+        ipv6_covered=ipv6_covered, interface=interface,
+    )
+    findings: list[Finding] = []
+    for item in due:
+        delay = item["offline_after_seconds"]
+        findings.append(
+            Finding(
+                mac=item["mac"],
+                title="Always-on device has been absent longer than expected",
+                severity="medium",
+                kind="availability",
+                rationale=(
+                    "This device is policy'd as always-on and has not been seen for at "
+                    f"least {delay:.0f}s since it was confirmed offline."
+                ),
+                recommendation="Check that this device is powered on and connected.",
+                evidence=[
+                    f"MAC: {item['mac']}", f"IP: {item['ip'] or '[unknown]'}",
+                    f"Hostname: {item['hostname'] or '[unknown]'}",
+                ],
+            )
+        )
+    return findings
 
 
 def run_active_sweep(
@@ -234,11 +354,19 @@ def run_active_sweep(
         findings.extend(dev_findings)
 
     if ipv4_covered or ipv6_covered:
+        as_of = utcnow()
         events.extend(
             store.mark_offline(
-                still_online, as_of=utcnow(),
+                still_online, as_of=as_of,
                 grace_seconds=cfg.scan.offline_grace_seconds,
                 missed_after=cfg.scan.offline_after_missed_scans,
+                ipv4_covered=ipv4_covered, ipv4_subnet=net,
+                ipv6_covered=ipv6_covered, interface=iface,
+            )
+        )
+        findings.extend(
+            evaluate_availability(
+                store, cfg, as_of=as_of,
                 ipv4_covered=ipv4_covered, ipv4_subnet=net,
                 ipv6_covered=ipv6_covered, interface=iface,
             )
@@ -248,6 +376,21 @@ def run_active_sweep(
         started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,
         mode="active", devices=devices, events=events, findings=findings, errors=errors,
     )
+
+
+def _alert_cooldown_key(finding: Finding) -> str:
+    """The cooldown row identity for one finding - plain ``mac`` for every
+    pre-existing finding kind (unchanged behavior), but an availability
+    finding gets its own lane per phase (``mac#availability#<severity>``,
+    and absence is always "medium" while recovery is always "info") so a
+    recent absence alert can never swallow the recovery for the same MAC -
+    they are independent notifications, not escalating variants of the
+    same one. See :meth:`lanfence.db.DeviceStore.due_for_alert`.
+    """
+
+    if finding.kind == "availability":
+        return f"{finding.mac}#availability#{finding.severity}"
+    return finding.mac
 
 
 def filter_rate_limited(
@@ -267,7 +410,8 @@ def filter_rate_limited(
     return [
         finding for finding in ordered
         if store.due_for_alert(
-            finding.mac, finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds
+            finding.mac, finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds,
+            key=_alert_cooldown_key(finding),
         )
     ]
 
@@ -311,12 +455,14 @@ def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
 
 
 def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
-    """Every previously observed device, with current allowlist/review state
-    joined in. Does not perform a scan - purely a database read."""
+    """Every previously observed device, with current allowlist/review/
+    presence state joined in. Does not perform a scan - purely a database
+    read."""
 
     inventory: list[Device] = []
     for device in store.all_devices():
         review = store.get_review(device.mac)
+        presence = store.get_presence(device.mac)
         allow_entry = allowlist.match(device.mac)
         inventory.append(
             device.model_copy(
@@ -326,6 +472,8 @@ def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
                     "review_state": review.state,
                     "review_notes": review.notes,
                     "snoozed_until": review.snoozed_until,
+                    "presence_policy": presence.policy,
+                    "offline_after_seconds": presence.offline_after_seconds,
                 }
             )
         )

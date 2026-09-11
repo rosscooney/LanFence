@@ -31,7 +31,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lanfence.models import SEVERITIES, Device, DeviceEvent, EventType, ReviewState, Severity
+from lanfence.models import SEVERITIES, Device, DeviceEvent, EventType, PresenceState, ReviewState, Severity
 from lanfence.netutil import normalize_mac
 
 _SCHEMA = """
@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS device_review (
     snoozed_until TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS device_presence (
+    mac TEXT PRIMARY KEY,
+    policy TEXT NOT NULL DEFAULT 'unspecified',
+    offline_after_seconds REAL,
+    availability_alerted INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -107,6 +115,27 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str
     for name, decl in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {decl}")
+
+
+def _path_covered(
+    row: sqlite3.Row, *, ipv4_covered: bool, ipv4_subnet: str | None, ipv6_covered: bool, interface: str | None,
+) -> bool:
+    """Whether a sweep with this coverage actually examined ``row``'s known
+    discovery path(s) - shared eligibility rule for both
+    :meth:`DeviceStore.mark_offline` (an eligible miss) and
+    :meth:`DeviceStore.evaluate_availability` (an eligible absence check).
+    See :meth:`DeviceStore.mark_offline` for the full rationale."""
+
+    seen_via_ipv4 = bool(row["seen_via_ipv4"])
+    seen_via_ipv6 = bool(row["seen_via_ipv6"])
+    if not (seen_via_ipv4 or seen_via_ipv6):
+        return False  # no known coverage yet - conservative no-op
+
+    interface_ok = interface is None or row["last_interface"] is None or row["last_interface"] == interface
+    subnet_ok = ipv4_subnet is None or row["ipv4_subnet"] is None or row["ipv4_subnet"] == ipv4_subnet
+    ipv4_ok = (not seen_via_ipv4) or (ipv4_covered and interface_ok and subnet_ok)
+    ipv6_ok = (not seen_via_ipv6) or (ipv6_covered and interface_ok)
+    return ipv4_ok and ipv6_ok
 
 
 def _row_to_device(row: sqlite3.Row) -> Device:
@@ -272,6 +301,93 @@ class DeviceStore:
         review = self.get_review(mac)
         return review.state == "snoozed" and review.snoozed_until is not None and review.snoozed_until > now
 
+    def get_presence(self, mac: str) -> PresenceState:
+        """The persisted presence policy for ``mac`` - ``unspecified`` if it
+        has never had one set. Separate from trust and from review state."""
+
+        mac = normalize_mac(mac)
+        row = self._conn.execute(
+            "SELECT policy, offline_after_seconds, availability_alerted, updated_at "
+            "FROM device_presence WHERE mac = ?",
+            (mac,),
+        ).fetchone()
+        if row is None:
+            return PresenceState(mac=mac)
+        return PresenceState(
+            mac=mac,
+            policy=row["policy"],
+            offline_after_seconds=row["offline_after_seconds"],
+            availability_alerted=bool(row["availability_alerted"]),
+            updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    def _upsert_presence(
+        self, mac: str, *, policy: str, offline_after_seconds: float | None,
+        availability_alerted: bool, updated_at: datetime,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO device_presence (mac, policy, offline_after_seconds, availability_alerted, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(mac) DO UPDATE SET policy = excluded.policy, "
+            "offline_after_seconds = excluded.offline_after_seconds, "
+            "availability_alerted = excluded.availability_alerted, updated_at = excluded.updated_at",
+            (mac, policy, offline_after_seconds, int(availability_alerted), _iso(updated_at)),
+        )
+        self._conn.commit()
+
+    def set_presence_policy(self, mac: str, policy: str, *, updated_at: datetime) -> PresenceState:
+        """Set ``mac``'s presence policy (see :data:`lanfence.models.PresencePolicyName`).
+
+        Moving *away* from ``always-on`` clears any per-device
+        ``--offline-after`` override and any pending availability-alert
+        episode state - there's nothing for either to mean once the device
+        is no longer being watched for sustained absence, and switching back
+        to ``always-on`` later should start a clean episode rather than
+        instantly firing on stale state. Never emits a finding or event
+        itself - purely a policy edit.
+        """
+
+        mac = normalize_mac(mac)
+        if policy == "always-on":
+            current = self.get_presence(mac)
+            self._upsert_presence(
+                mac, policy=policy, offline_after_seconds=current.offline_after_seconds,
+                availability_alerted=current.availability_alerted, updated_at=updated_at,
+            )
+        else:
+            self._upsert_presence(
+                mac, policy=policy, offline_after_seconds=None,
+                availability_alerted=False, updated_at=updated_at,
+            )
+        return self.get_presence(mac)
+
+    def set_offline_after(self, mac: str, seconds: float | None, *, updated_at: datetime) -> PresenceState:
+        """Set (or, with ``seconds=None``, clear back to the global default)
+        the per-device availability-alert delay override. Only meaningful
+        for an ``always-on`` device; does not itself change the policy."""
+
+        mac = normalize_mac(mac)
+        current = self.get_presence(mac)
+        self._upsert_presence(
+            mac, policy=current.policy, offline_after_seconds=seconds,
+            availability_alerted=current.availability_alerted, updated_at=updated_at,
+        )
+        return self.get_presence(mac)
+
+    def set_availability_alerted(self, mac: str, alerted: bool, *, updated_at: datetime) -> None:
+        """Record whether an availability (absence) finding has already
+        fired for ``mac``'s current offline episode - set ``True`` when one
+        fires, and back to ``False`` on recovery (see
+        :func:`lanfence.engine.process_sighting`), so a restart never
+        duplicates either and a recovery only ever follows a real alert."""
+
+        mac = normalize_mac(mac)
+        current = self.get_presence(mac)
+        self._upsert_presence(
+            mac, policy=current.policy, offline_after_seconds=current.offline_after_seconds,
+            availability_alerted=alerted, updated_at=updated_at,
+        )
+
     def observe(
         self,
         *,
@@ -368,7 +484,7 @@ class DeviceStore:
         return device, event_type
 
     def due_for_alert(
-        self, mac: str, severity: Severity, *, now: datetime, cooldown_seconds: float
+        self, mac: str, severity: Severity, *, now: datetime, cooldown_seconds: float, key: str | None = None
     ) -> bool:
         """Whether an external alert for ``mac`` at ``severity`` should fire now.
 
@@ -379,13 +495,24 @@ class DeviceStore:
         last alerted (an escalation always bypasses the cooldown). Returns
         ``False`` without touching the row otherwise.
         ``cooldown_seconds <= 0`` always returns ``True`` (rate limiting off).
+
+        ``key`` is the cooldown row's identity, defaulting to ``mac`` itself
+        (every pre-existing caller's exact old behavior). Pass a distinct
+        key to give some other notification for the same MAC its own,
+        independent cooldown lane - e.g. an always-on availability
+        *recovery* finding must never be swallowed just because that
+        device's *absence* finding shares the same MAC and fired recently
+        (see :func:`lanfence.engine.filter_rate_limited`). ``alert_log``'s
+        ``mac`` column just stores whatever key it's given; no schema change
+        needed for this.
         """
 
         if cooldown_seconds <= 0:
             return True
+        key = key if key is not None else mac
 
         row = self._conn.execute(
-            "SELECT last_alerted_at, last_severity FROM alert_log WHERE mac = ?", (mac,)
+            "SELECT last_alerted_at, last_severity FROM alert_log WHERE mac = ?", (key,)
         ).fetchone()
 
         if row is not None:
@@ -398,7 +525,7 @@ class DeviceStore:
             "INSERT INTO alert_log (mac, last_alerted_at, last_severity) VALUES (?, ?, ?) "
             "ON CONFLICT(mac) DO UPDATE SET last_alerted_at = excluded.last_alerted_at, "
             "last_severity = excluded.last_severity",
-            (mac, _iso(now), severity),
+            (key, _iso(now), severity),
         )
         self._conn.commit()
         return True
@@ -467,20 +594,10 @@ class DeviceStore:
             if mac in still_online_macs:
                 continue
 
-            seen_via_ipv4 = bool(row["seen_via_ipv4"])
-            seen_via_ipv6 = bool(row["seen_via_ipv6"])
-            if not (seen_via_ipv4 or seen_via_ipv6):
-                continue  # no known coverage yet - conservative no-op
-
-            interface_ok = (
-                interface is None or row["last_interface"] is None or row["last_interface"] == interface
-            )
-            subnet_ok = (
-                ipv4_subnet is None or row["ipv4_subnet"] is None or row["ipv4_subnet"] == ipv4_subnet
-            )
-            ipv4_ok = (not seen_via_ipv4) or (ipv4_covered and interface_ok and subnet_ok)
-            ipv6_ok = (not seen_via_ipv6) or (ipv6_covered and interface_ok)
-            if not (ipv4_ok and ipv6_ok):
+            if not _path_covered(
+                row, ipv4_covered=ipv4_covered, ipv4_subnet=ipv4_subnet,
+                ipv6_covered=ipv6_covered, interface=interface,
+            ):
                 continue  # this sweep didn't examine (all of) this device's known paths
 
             missed = row["missed_scans"] + 1
@@ -499,14 +616,73 @@ class DeviceStore:
         self._conn.commit()
         return events
 
+    def evaluate_availability(
+        self,
+        *,
+        as_of: datetime,
+        default_offline_after_seconds: float,
+        ipv4_covered: bool = True,
+        ipv4_subnet: str | None = None,
+        ipv6_covered: bool = True,
+        interface: str | None = None,
+    ) -> list[dict]:
+        """Every currently-offline, ``always-on``, not-yet-alerted device
+        whose absence has now reached its effective availability delay
+        (its own ``--offline-after`` override, or ``default_offline_after_seconds``
+        - normally ``cfg.scan.offline_grace_seconds`` - when unset).
+
+        Call this once per eligible active sweep, alongside
+        :meth:`mark_offline` - eligibility is gated by the same
+        :func:`_path_covered` rule (reusing the existing conservative
+        coverage rules: a failed, skipped, or out-of-scope sweep never
+        creates an availability finding). This is a pure time check against
+        an *already*-offline device, not a new miss - it does not touch
+        ``missed_scans`` or emit a lifecycle event.
+
+        Marks each returned device's episode ``availability_alerted`` before
+        returning, atomically with the query, so a caller building and
+        dispatching the actual :class:`~lanfence.models.Finding` can never
+        double-fire even across a restart. Returns raw dicts (not
+        :class:`Finding`) - building the human-facing finding text is
+        :func:`lanfence.engine.evaluate_availability`'s job.
+        """
+
+        rows = self._conn.execute(
+            "SELECT d.mac, d.ip, d.hostname, d.last_seen, d.seen_via_ipv4, d.seen_via_ipv6, "
+            "d.last_interface, d.ipv4_subnet, p.offline_after_seconds "
+            "FROM devices d JOIN device_presence p ON p.mac = d.mac "
+            "WHERE d.status = 'offline' AND p.policy = 'always-on' AND p.availability_alerted = 0"
+        ).fetchall()
+
+        due: list[dict] = []
+        for row in rows:
+            if not _path_covered(
+                row, ipv4_covered=ipv4_covered, ipv4_subnet=ipv4_subnet,
+                ipv6_covered=ipv6_covered, interface=interface,
+            ):
+                continue
+            effective = row["offline_after_seconds"] or default_offline_after_seconds
+            elapsed = (as_of - _parse_dt(row["last_seen"])).total_seconds()
+            if elapsed >= effective:
+                due.append({
+                    "mac": row["mac"], "ip": row["ip"], "hostname": row["hostname"],
+                    "offline_after_seconds": effective,
+                })
+
+        for item in due:
+            self.set_availability_alerted(item["mac"], True, updated_at=as_of)
+        return due
+
     def reset_all(self) -> None:
         """Permanently delete every device, its lifecycle events, alert-
-        dispatch cooldowns, and review/snooze state - a full wipe back to an
-        empty database. Used by ``lanfence reset``. Cannot be undone; trust
-        (the allowlist) is separate and untouched by this call."""
+        dispatch cooldowns, review/snooze state, and presence policy - a
+        full wipe back to an empty database. Used by ``lanfence reset``.
+        Cannot be undone; trust (the allowlist) is separate and untouched by
+        this call."""
 
         self._conn.execute("DELETE FROM devices")
         self._conn.execute("DELETE FROM events")
         self._conn.execute("DELETE FROM alert_log")
         self._conn.execute("DELETE FROM device_review")
+        self._conn.execute("DELETE FROM device_presence")
         self._conn.commit()
