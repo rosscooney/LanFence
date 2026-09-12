@@ -48,6 +48,7 @@ log = get_logger("digest")
 
 
 def _to_entry(device: Device) -> DigestDeviceEntry:
+    metadata = device.metadata
     return DigestDeviceEntry(
         mac=device.mac,
         name=device.allowlist_name,
@@ -60,6 +61,8 @@ def _to_entry(device: Device) -> DigestDeviceEntry:
         review_notes=device.review_notes,
         first_seen=device.first_seen,
         last_seen=device.last_seen,
+        owner=metadata.owner if metadata else None,
+        group=metadata.group if metadata else None,
     )
 
 
@@ -147,7 +150,11 @@ def _format_section_plain(title: str, section: DigestSection) -> list[str]:
         lines.append("  (none)")
     for entry in section.items:
         label = entry.name or entry.mac
-        lines.append(f"  - {label} ({entry.mac})  {entry.ip or '-'}  {entry.hostname or '[unknown]'}")
+        context = ""
+        if entry.owner or entry.group:
+            bits = [b for b in (entry.owner, entry.group) if b]
+            context = f"  ({', '.join(bits)})"
+        lines.append(f"  - {label} ({entry.mac})  {entry.ip or '-'}  {entry.hostname or '[unknown]'}{context}")
     if section.omitted_count:
         lines.append(f"  ... and {section.omitted_count} more")
     return lines

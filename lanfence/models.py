@@ -58,6 +58,34 @@ NameSource = Literal["dhcp_option_12", "reverse_dns", "legacy_snapshot"]
 AddressAssociationKind = Literal["observed", "lease_reported"]
 
 
+class DeviceMetadata(BaseModel):
+    """Operator-provided inventory context for one device - who's
+    responsible for it, what it's for, which group it belongs to, and
+    where it is. Entirely separate from observed hostname/vendor, trust,
+    review state, and presence policy: nothing here is verified, detected,
+    or authenticated - ``owner`` is a responsibility label, not an
+    authenticated identity, and ``location`` is whatever the operator typed
+    in, not a detected physical position. ``updated_at`` is ``None`` for a
+    MAC with no metadata set yet (every field unset)."""
+
+    mac: str
+    owner: str | None = None
+    purpose: str | None = None
+    group: str | None = None
+    location: str | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+    @field_validator("owner", "purpose", "group", "location")
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=256) if value is not None else None
+
+
 class Device(BaseModel):
     """The current known state of one device, keyed by MAC address.
 
@@ -99,6 +127,12 @@ class Device(BaseModel):
     #: ``lanfence device``/``devices`` rendering). Meaningless when
     #: ``presence_policy`` isn't ``"always-on"``.
     offline_after_seconds: float | None = None
+    #: Operator-provided inventory context (see :class:`DeviceMetadata`) -
+    #: ``None`` unless a device inventory query (``lanfence devices``/
+    #: ``device``) has populated it from the database - same join-at-read
+    #: pattern as ``review_state``/``presence_policy``. Independent of
+    #: trust/review/presence.
+    metadata: DeviceMetadata | None = None
 
     @field_validator("mac")
     @classmethod
@@ -348,13 +382,19 @@ class DigestDeviceEntry(BaseModel):
     review_notes: str | None = None
     first_seen: datetime | None = None
     last_seen: datetime | None = None
+    #: Current owner/group metadata, for context only - see
+    #: ``DeviceMetadata``. Purpose/location are deliberately left out of
+    #: digest rows to keep them terse; the full detail is one `lanfence
+    #: device <MAC>` away.
+    owner: str | None = None
+    group: str | None = None
 
     @field_validator("mac")
     @classmethod
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("name", "ip", "hostname", "vendor", "review_notes")
+    @field_validator("name", "ip", "hostname", "vendor", "review_notes", "owner", "group")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None

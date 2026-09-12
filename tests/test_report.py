@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from lanfence.models import Device, DeviceEvent, Digest, DigestActivity, DigestDeviceEntry, DigestSection, Finding, ScanResult
+from lanfence.models import (
+    Device,
+    DeviceEvent,
+    DeviceMetadata,
+    Digest,
+    DigestActivity,
+    DigestDeviceEntry,
+    DigestSection,
+    Finding,
+    ScanResult,
+)
 from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
@@ -136,6 +146,35 @@ def test_render_device_inventory_no_filter_matches_message(capsys):
     assert "no devices match" in captured.out.lower()
 
 
+def test_render_device_inventory_show_metadata_plain():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(),
+        metadata=DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", owner="Alice", group="staff"),
+    )
+    text = render_device_inventory([device], now=_now(), plain=True, show_metadata=True)
+    assert "owner=Alice" in text
+    assert "group=staff" in text
+    assert "purpose=-" in text
+
+
+def test_render_device_inventory_default_omits_metadata_plain():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now(),
+        metadata=DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", owner="Alice"),
+    )
+    text = render_device_inventory([device], now=_now(), plain=True)
+    assert "owner=" not in text
+
+
+def test_render_device_inventory_show_metadata_handles_unjoined_metadata():
+    """A Device that never went through build_inventory has metadata=None -
+    rendering must not crash, treating it the same as all-unset."""
+
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now())
+    text = render_device_inventory([device], now=_now(), plain=True, show_metadata=True)
+    assert "owner=-" in text
+
+
 # --- render_device_detail -----------------------------------------------
 
 
@@ -154,6 +193,31 @@ def test_render_device_detail_empty_timeline_plain():
     device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
     text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
     assert "0 event(s)" in text
+
+
+def test_render_device_detail_shows_metadata_when_set():
+    now = _now()
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now,
+        metadata=DeviceMetadata(
+            mac="aa:bb:cc:dd:ee:ff", owner="Alice", purpose="Laptop", group="staff", location="Office",
+        ),
+    )
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Owner:      Alice" in text
+    assert "Purpose:    Laptop" in text
+    assert "Group:      staff" in text
+    assert "Location:   Office" in text
+
+
+def test_render_device_detail_shows_not_set_when_metadata_absent():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Owner:      Not set" in text
+    assert "Purpose:    Not set" in text
+    assert "Group:      Not set" in text
+    assert "Location:   Not set" in text
 
 
 # --- presence_label ----------------------------------------------------
@@ -292,3 +356,17 @@ def test_render_digest_empty_sections_say_none(capsys):
     digest = _digest()
     text = render_digest(digest, plain=True)
     assert "(none)" in text
+
+
+def test_render_digest_shows_owner_and_group_context():
+    entry = DigestDeviceEntry(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", owner="Alice", group="staff")
+    digest = _digest(new_devices=DigestSection(items=[entry], total_count=1))
+    text = render_digest(digest, plain=True)
+    assert "Alice, staff" in text
+
+
+def test_render_digest_omits_context_parens_when_no_owner_or_group():
+    entry = DigestDeviceEntry(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5")
+    digest = _digest(new_devices=DigestSection(items=[entry], total_count=1))
+    text = render_digest(digest, plain=True)
+    assert "()" not in text

@@ -39,6 +39,21 @@ Each release is also published to
   `legacy_snapshot` evidence, timestamped as of the import (not backdated),
   the first time it's opened after upgrading.
 
+- **User-managed device inventory metadata.** `lanfence device <MAC>` now
+  accepts `--owner`/`--purpose`/`--group`/`--location` (and matching
+  `--clear-*` flags) to attach your own notes to a device - who owns it,
+  what it's for, its group, and where it lives. Entirely separate from
+  observed hostname/vendor and from trust/review/presence; edits never
+  scan, alert, or create a lifecycle event. `lanfence devices` gained
+  matching `--owner`/`--group`/`--location` filters (exact,
+  case-insensitive) and an opt-in `--details` flag adding metadata columns
+  to the table; JSON output always includes metadata. The interactive
+  `lanfence review` queue offers an optional "Add device details?" step
+  after trusting a device. Owner/group appear as brief context in
+  `lanfence digest` device rows (purpose/location are left out to keep
+  rows terse). `lanfence reset` clears metadata along with the rest of a
+  device's history.
+
 ## [0.3.9] - 2026-09-12
 
 ### Added

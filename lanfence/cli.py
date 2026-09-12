@@ -50,6 +50,7 @@ from lanfence.fsutil import atomic_write
 from lanfence.logging_config import setup_logging
 from lanfence.models import Finding
 from lanfence.netutil import normalize_mac
+from lanfence.sanitize import clean_text
 from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
@@ -851,6 +852,14 @@ def devices(
     presence: Optional[str] = typer.Option(
         None, "--presence", help="Filter by presence policy: unspecified | intermittent | always-on."
     ),
+    owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner metadata (exact, case-insensitive)."),
+    group: Optional[str] = typer.Option(None, "--group", help="Filter by group metadata (exact, case-insensitive)."),
+    location: Optional[str] = typer.Option(
+        None, "--location", help="Filter by location metadata (exact, case-insensitive)."
+    ),
+    details: bool = typer.Option(
+        False, "--details", help="Also show owner/purpose/group/location columns (table format only)."
+    ),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
@@ -860,6 +869,12 @@ def devices(
     devices that are both online and not on the allowlist. Allowlist
     membership is applied fresh from the current allowlist file, not
     whatever it was the last time a scan ran.
+
+    `--owner`/`--group`/`--location` match a device's user-provided
+    metadata exactly (after trimming whitespace, case-insensitive) - a
+    device with that field unset never matches. `--details` adds those
+    metadata fields as extra table columns; JSON output always includes
+    them (nested under `metadata`) regardless of `--details`.
     """
 
     if status is not None and status not in ("online", "offline"):
@@ -892,6 +907,15 @@ def devices(
         inventory = [d for d in inventory if is_review_needed(d, now=now)]
     if presence is not None:
         inventory = [d for d in inventory if d.presence_policy == presence]
+    if owner is not None:
+        needle = owner.strip().casefold()
+        inventory = [d for d in inventory if (d.metadata.owner or "").strip().casefold() == needle]
+    if group is not None:
+        needle = group.strip().casefold()
+        inventory = [d for d in inventory if (d.metadata.group or "").strip().casefold() == needle]
+    if location is not None:
+        needle = location.strip().casefold()
+        inventory = [d for d in inventory if (d.metadata.location or "").strip().casefold() == needle]
 
     if output_format == "json":
         typer.echo(json.dumps([d.model_dump(mode="json") for d in inventory], indent=2))
@@ -899,7 +923,31 @@ def devices(
         render_device_inventory(
             inventory, now=now, total_count=total_count,
             default_offline_after_seconds=cfg.scan.offline_grace_seconds,
+            show_metadata=details,
         )
+
+
+#: Character limits for user-provided device metadata - long enough for a
+#: real value, short enough to keep the database and rendering sane.
+#: Overlong input is rejected with a clear error, never silently truncated.
+_METADATA_LIMITS = {"owner": 128, "purpose": 256, "group": 128, "location": 128}
+
+
+def _validate_metadata_value(field: str, value: str) -> str:
+    """Trim, sanitize, and length-check one metadata field's new value.
+
+    Raises ``ValueError`` (caller renders it and exits 2) for a blank
+    value (use ``--clear-<field>`` instead) or one over its limit - never
+    silently truncates.
+    """
+
+    trimmed = value.strip()
+    if not trimmed:
+        raise ValueError(f"--{field} must not be empty - use --clear-{field} to clear it")
+    limit = _METADATA_LIMITS[field]
+    if len(trimmed) > limit:
+        raise ValueError(f"--{field} must be at most {limit} characters (got {len(trimmed)})")
+    return clean_text(trimmed, max_len=limit)
 
 
 @app.command()
@@ -917,6 +965,14 @@ def device(
     clear_offline_after: bool = typer.Option(
         False, "--clear-offline-after", help="Remove the --offline-after override; restore the global default."
     ),
+    owner: Optional[str] = typer.Option(None, "--owner", help="Set the owner metadata field."),
+    purpose: Optional[str] = typer.Option(None, "--purpose", help="Set the purpose metadata field."),
+    group: Optional[str] = typer.Option(None, "--group", help="Set the group metadata field."),
+    location: Optional[str] = typer.Option(None, "--location", help="Set the location metadata field."),
+    clear_owner: bool = typer.Option(False, "--clear-owner", help="Clear the owner metadata field."),
+    clear_purpose: bool = typer.Option(False, "--clear-purpose", help="Clear the purpose metadata field."),
+    clear_group: bool = typer.Option(False, "--clear-group", help="Clear the group metadata field."),
+    clear_location: bool = typer.Option(False, "--clear-location", help="Clear the location metadata field."),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
@@ -927,11 +983,21 @@ def device(
     connect/reappear/disconnect transitions - not a complete history of
     every address this MAC has ever held (see the timeline's own caveat).
 
-    With `--presence`/`--offline-after`/`--clear-offline-after`, edits that
-    device's presence policy instead of showing it - see
-    `lanfence device <MAC> --presence always-on --offline-after 10m`.
-    Presence is separate from trust: it never changes the allowlist, and a
-    policy edit alone never fabricates a lifecycle event or fires an alert.
+    With `--presence`/`--offline-after`/`--clear-offline-after`, also edits
+    that device's presence policy - see `lanfence device <MAC> --presence
+    always-on --offline-after 10m`. Presence is separate from trust: it
+    never changes the allowlist, and a policy edit alone never fabricates a
+    lifecycle event or fires an alert.
+
+    With `--owner`/`--purpose`/`--group`/`--location` (or their
+    `--clear-*` counterparts), also edits operator-provided inventory
+    metadata - separate from observed hostname, vendor, trust, review, and
+    presence. Any combination of presence and metadata options may be
+    given in one call; an omitted field is left unchanged, and after a
+    successful update the device's resulting details are shown, same as a
+    plain `lanfence device <MAC>`. Metadata edits never scan, alert, or
+    create a lifecycle event, and never create a device that hasn't
+    actually been observed.
     """
 
     if output_format not in ("table", "json"):
@@ -946,6 +1012,13 @@ def device(
     if offline_after is not None and clear_offline_after:
         typer.secho("error: --offline-after and --clear-offline-after are contradictory", fg="red", err=True)
         raise typer.Exit(code=2)
+    for field, set_value, clear_flag in (
+        ("owner", owner, clear_owner), ("purpose", purpose, clear_purpose),
+        ("group", group, clear_group), ("location", location, clear_location),
+    ):
+        if set_value is not None and clear_flag:
+            typer.secho(f"error: --{field} and --clear-{field} are contradictory", fg="red", err=True)
+            raise typer.Exit(code=2)
 
     try:
         norm_mac = normalize_mac(mac)
@@ -953,9 +1026,32 @@ def device(
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(code=2) from exc
 
+    # Validate every requested metadata change before writing any of them.
+    metadata_updates: dict[str, Optional[str]] = {}
+    try:
+        if owner is not None:
+            metadata_updates["owner"] = _validate_metadata_value("owner", owner)
+        if purpose is not None:
+            metadata_updates["purpose"] = _validate_metadata_value("purpose", purpose)
+        if group is not None:
+            metadata_updates["group"] = _validate_metadata_value("group", group)
+        if location is not None:
+            metadata_updates["location"] = _validate_metadata_value("location", location)
+    except ValueError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+    if clear_owner:
+        metadata_updates["owner"] = None
+    if clear_purpose:
+        metadata_updates["purpose"] = None
+    if clear_group:
+        metadata_updates["group"] = None
+    if clear_location:
+        metadata_updates["location"] = None
+
     cfg = _load_config(config)
 
-    mutating = presence is not None or offline_after is not None or clear_offline_after
+    mutating = presence is not None or offline_after is not None or clear_offline_after or metadata_updates
     if mutating:
         with DeviceStore(cfg.resolved_db_path()) as store:
             if store.get_device(norm_mac) is None:
@@ -989,7 +1085,9 @@ def device(
             if clear_offline_after:
                 store.set_offline_after(norm_mac, None, updated_at=now)
                 typer.secho(f"offline-after for {norm_mac} cleared - using the global default", fg="green")
-        return
+            if metadata_updates:
+                store.update_device_metadata(norm_mac, updated_at=now, **metadata_updates)
+                typer.secho(f"metadata for {norm_mac} updated: {', '.join(metadata_updates)}", fg="green")
 
     since_dt = _parse_since(since)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
@@ -1003,6 +1101,7 @@ def device(
             raise typer.Exit(code=2)
         review = store.get_review(norm_mac)
         presence_state = store.get_presence(norm_mac)
+        metadata = store.get_device_metadata(norm_mac)
         events = store.events_for(norm_mac, since=since_dt)
         addresses = store.address_evidence_for(norm_mac)
         names = store.name_evidence_for(norm_mac)
@@ -1017,6 +1116,7 @@ def device(
             "snoozed_until": review.snoozed_until,
             "presence_policy": presence_state.policy,
             "offline_after_seconds": presence_state.offline_after_seconds,
+            "metadata": metadata,
         }
     )
 
@@ -1136,6 +1236,52 @@ def _run_interactive_review(cfg: Config) -> None:
                 if new_policy is not None and new_policy != current_policy:
                     store.set_presence_policy(dev.mac, new_policy, updated_at=utcnow())
                     typer.secho(f"  presence: {new_policy}", fg="green")
+
+                # Inventory details are optional and separate from trust -
+                # default no, and aborting this step never undoes the trust
+                # (already persisted above) or the presence choice just made.
+                try:
+                    add_details = typer.confirm("  Add device details (owner/purpose/group/location)?", default=False)
+                except (typer.Abort, EOFError):
+                    add_details = False
+                if add_details:
+                    existing = store.get_device_metadata(dev.mac)
+                    field_prompts = (
+                        ("owner", "owner"), ("purpose", "purpose"),
+                        ("group", "group"), ("location", "location"),
+                    )
+                    try:
+                        raw_values = {}
+                        for field, label in field_prompts:
+                            current_value = getattr(existing, field)
+                            shown = f" (current: {current_value})" if current_value else ""
+                            raw_values[field] = typer.prompt(
+                                f"  {label}{shown} - blank to leave unchanged, '-' to clear",
+                                default="", show_default=False,
+                            )
+                    except (typer.Abort, EOFError):
+                        typer.echo("  device details unchanged.")
+                        raw_values = None
+                    if raw_values is not None:
+                        try:
+                            updates: dict[str, Optional[str]] = {}
+                            for field, _label in field_prompts:
+                                raw = raw_values[field].strip()
+                                current_value = getattr(existing, field)
+                                if not raw:
+                                    continue
+                                if raw == "-":
+                                    if current_value is not None:
+                                        updates[field] = None
+                                    continue
+                                validated = _validate_metadata_value(field, raw)
+                                if validated != current_value:
+                                    updates[field] = validated
+                            if updates:
+                                store.update_device_metadata(dev.mac, updated_at=utcnow(), **updates)
+                                typer.secho(f"  device details updated: {', '.join(updates)}", fg="green")
+                        except ValueError as exc:
+                            typer.secho(f"  error: {exc} - device details unchanged.", fg="red")
             elif action in ("s", "snooze"):
                 duration_str = typer.prompt("  snooze for", default="24h")
                 seconds = _duration_seconds(duration_str)

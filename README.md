@@ -349,6 +349,51 @@ time the database is opened after upgrading - timestamped as of that
 import, not backdated to the device's original first-seen time, and never
 re-imported on a later restart.
 
+## Device inventory metadata
+
+Beyond what LAN Fence observes on the wire, you can attach your own notes to
+a device - who owns it, what it's for, which group it belongs to, and where
+it physically lives:
+
+```text
+$ lanfence device aa:bb:cc:dd:ee:ff --owner "Alice" --purpose "Work laptop" \
+    --group staff --location "Office"
+metadata for aa:bb:cc:dd:ee:ff updated: owner, purpose, group, location
+
+...
+Inventory details (user-provided)
+Owner:      Alice
+Purpose:    Work laptop
+Group:      staff
+Location:   Office
+```
+
+Any combination of `--owner`/`--purpose`/`--group`/`--location` may be set
+in one call; an omitted field is left unchanged. `--clear-owner` (and the
+`--clear-purpose`/`--clear-group`/`--clear-location` equivalents) removes a
+field - setting and clearing the same field in one call is rejected.
+Metadata edits never scan, alert, fire a lifecycle event, or interact with
+trust/review/presence in any way - they are pure inventory bookkeeping.
+
+`lanfence devices` gained matching filters (`--owner`, `--group`,
+`--location` - exact match, case-insensitive) and an opt-in `--details` flag
+that adds Owner/Purpose/Group/Location columns to the table without
+bloating the default view. JSON output always includes metadata (nested
+under `"metadata"`) regardless of `--details`.
+
+The interactive `lanfence review` queue offers an optional "Add device
+details?" step (default no) right after trusting a device, pre-populated
+with any existing values; skipping it, or aborting partway through, never
+undoes the trust or presence decisions already made in that same session.
+
+Owner/group also appear as brief context alongside a device's row in
+`lanfence digest` output - purpose and location are left out there to keep
+digest rows terse; the full detail is one `lanfence device <MAC>` away.
+
+Like the allowlist name, none of this is authoritative or derived from
+network traffic - it's exactly what you typed, unvalidated against reality,
+and `lanfence reset` clears it along with the rest of a device's history.
+
 ## Starting over
 
 ```text

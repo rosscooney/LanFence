@@ -972,6 +972,174 @@ def test_device_normalizes_mac_case_and_separators(config_path: Path):
     assert "aa:bb:cc:dd:ee:ff" in result.output
 
 
+# --- device metadata: owner/purpose/group/location --------------------------
+
+
+def test_device_shows_not_set_for_unset_metadata_by_default(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Owner:      Not set" in result.output
+
+
+def test_device_set_owner_and_purpose(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--purpose", "Laptop",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 0
+    assert "metadata for aa:bb:cc:dd:ee:ff updated" in result.output.lower()
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Owner:      Alice" in show.output
+    assert "Purpose:    Laptop" in show.output
+
+
+def test_device_metadata_set_persists_across_separate_invocations(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--group", "staff", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--location", "Office", "--config", str(config_path)])
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Group:      staff" in show.output  # still set from the earlier call
+    assert "Location:   Office" in show.output
+
+
+def test_device_clear_metadata_field(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--clear-owner", "--config", str(config_path)])
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Owner:      Not set" in show.output
+
+
+def test_device_set_and_clear_same_field_is_contradictory(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--clear-owner", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "contradictory" in result.output.lower()
+
+
+def test_device_rejects_blank_metadata_value(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "   ", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "empty" in result.output.lower()
+
+
+def test_device_rejects_overlong_metadata_value(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "x" * 200, "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "128 characters" in result.output
+
+
+def test_device_metadata_unknown_mac_fails(config_path: Path):
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "no device" in result.output.lower()
+
+
+def test_device_metadata_and_presence_can_be_set_in_one_call(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--presence", "intermittent",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Owner:      Alice" in show.output
+    assert "Presence: intermittent" in show.output
+
+
+def test_device_metadata_json_output_is_additive(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--format", "json", "--config", str(config_path)])
+    import json
+
+    payload = json.loads(result.output)
+    assert payload["device"]["metadata"]["owner"] == "Alice"
+    assert payload["device"]["metadata"]["purpose"] is None
+
+
+def test_device_metadata_edit_does_not_create_lifecycle_event(config_path: Path):
+    _seed_devices(config_path)
+    before = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--since", "365d", "--format", "json",
+                                  "--config", str(config_path)])
+    import json
+
+    before_count = len(json.loads(before.output)["timeline"])
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
+    after = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--since", "365d", "--format", "json",
+                                 "--config", str(config_path)])
+    after_count = len(json.loads(after.output)["timeline"])
+
+    assert before_count == after_count
+
+
+def test_devices_owner_filter(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
+    by_mac = _devices_json(config_path, "--owner", "Alice")
+    assert set(by_mac) == {"aa:bb:cc:dd:ee:ff"}
+
+
+def test_devices_owner_filter_is_case_insensitive(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
+    by_mac = _devices_json(config_path, "--owner", "alice")
+    assert set(by_mac) == {"aa:bb:cc:dd:ee:ff"}
+
+
+def test_devices_owner_filter_no_match_is_empty(config_path: Path):
+    _seed_devices(config_path)
+    by_mac = _devices_json(config_path, "--owner", "Nobody")
+    assert by_mac == {}
+
+
+def test_devices_group_and_location_filters_combine(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--group", "staff", "--location", "Office", "--config", str(config_path)]
+    )
+    runner.invoke(app, ["device", "11:22:33:44:55:66", "--group", "staff", "--config", str(config_path)])
+
+    by_mac = _devices_json(config_path, "--group", "staff", "--location", "Office")
+    assert set(by_mac) == {"aa:bb:cc:dd:ee:ff"}
+
+
+def test_devices_details_flag_shows_metadata_columns(config_path: Path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
+    result = runner.invoke(app, ["devices", "--details", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Alice" in result.output
+    assert "Owner" in result.output
+
+
+def test_devices_default_table_omits_metadata_columns(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
+    result = runner.invoke(app, ["devices", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Alice" not in result.output
+
+
 # --- review: noninteractive -------------------------------------------------
 
 
@@ -1188,6 +1356,56 @@ def test_review_interactive_trust_then_presence_prompt_aborted_preserves_trust(c
 
     by_mac = _devices_json(config_path)
     assert by_mac["11:22:33:44:55:66"]["presence_policy"] == "unspecified"  # left at the default
+
+
+def test_review_interactive_trust_then_add_device_details(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="t\nNAS\n\nu\ny\nAlice\nLaptop\nstaff\nOffice\n",
+        )
+    assert result.exit_code == 0
+    assert "device details updated" in result.output.lower()
+
+    show = runner.invoke(app, ["device", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert "Owner:      Alice" in show.output
+    assert "Purpose:    Laptop" in show.output
+    assert "Group:      staff" in show.output
+    assert "Location:   Office" in show.output
+
+
+def test_review_interactive_trust_declines_device_details_by_default(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="t\nNAS\n\nu\nn\n",
+        )
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert "Owner:      Not set" in show.output
+
+
+def test_review_interactive_device_details_aborted_preserves_trust_and_presence(config_path: Path):
+    """Exiting the device-details sub-prompt must not undo the trust or
+    presence decisions made moments before."""
+
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="t\nNAS\n\ni\ny\n",  # confirms "yes, add details" but gives no field input
+        )
+    assert result.exit_code == 0
+    assert "device details unchanged" in result.output.lower()
+
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "NAS" in listing.output  # trust preserved
+
+    by_mac = _devices_json(config_path)
+    assert by_mac["11:22:33:44:55:66"]["presence_policy"] == "intermittent"  # presence preserved
 
 
 def test_review_interactive_snooze_flow(config_path: Path):

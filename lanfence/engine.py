@@ -19,7 +19,7 @@ from lanfence.config import AlertConfig, Config
 from lanfence.db import DeviceStore
 from lanfence.fingerprint import SignatureMatch, SignatureSet, fingerprint_device
 from lanfence.logging_config import get_logger
-from lanfence.models import Device, DeviceEvent, EventType, Finding, ScanResult
+from lanfence.models import Device, DeviceEvent, DeviceMetadata, EventType, Finding, ScanResult
 from lanfence.netutil import normalize_mac
 
 log = get_logger("engine")
@@ -501,14 +501,23 @@ def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
 
 def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
     """Every previously observed device, with current allowlist/review/
-    presence state joined in. Does not perform a scan - purely a database
-    read."""
+    presence/metadata state joined in. Does not perform a scan - purely a
+    database read.
 
+    Metadata is fetched in one bulk query for the whole inventory (see
+    :meth:`lanfence.db.DeviceStore.device_metadata_for_macs`) rather than
+    one query per device, since a device list can be large and metadata is
+    shown for every row.
+    """
+
+    devices = store.all_devices()
+    metadata_by_mac = store.device_metadata_for_macs([d.mac for d in devices])
     inventory: list[Device] = []
-    for device in store.all_devices():
+    for device in devices:
         review = store.get_review(device.mac)
         presence = store.get_presence(device.mac)
         allow_entry = allowlist.match(device.mac)
+        metadata = metadata_by_mac.get(device.mac) or DeviceMetadata(mac=device.mac)
         inventory.append(
             device.model_copy(
                 update={
@@ -519,6 +528,7 @@ def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
                     "snoozed_until": review.snoozed_until,
                     "presence_policy": presence.policy,
                     "offline_after_seconds": presence.offline_after_seconds,
+                    "metadata": metadata,
                 }
             )
         )
