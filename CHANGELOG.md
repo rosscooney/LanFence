@@ -13,6 +13,31 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Added
+
+- **`lanfence channels` - interactive communication-channel setup.**
+  Configure Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog without
+  hand-editing YAML: `lanfence channels` shows a status table (enabled/
+  configured/safe destination summary/digest selection - never a password,
+  token, full webhook URL, or credential-bearing path); `channels setup
+  [channel]` walks through each channel's real config fields with local
+  validation, existing-value defaults, a sanitized preview, and an optional
+  post-save test message (defaults to no; Twilio warns about SMS charges);
+  `channels enable/disable <channel>` toggle delivery noninteractively
+  without touching stored credentials; `channels test <channel>` sends one
+  clearly-labeled message via the real transport and reports its actual
+  success/failure (bypassing `alerts.min_severity`, creating no device/
+  finding/lifecycle event/cooldown entry). A secret is never echoed - only
+  "already configured," with an explicit keep/replace/`clear`. Saves are
+  atomic, refuse to overwrite malformed YAML or a concurrent edit, preserve
+  every unrelated setting and disabled channel's own secrets, and restrict
+  the file to owner-only permissions. Uses a new conventional default
+  config path (`~/.config/lanfence/config.yaml`) when `--config` isn't
+  given, since no other command has a default writable config file to
+  reuse - `monitor` needs a restart to pick up a change made this way.
+
 ## [0.3.10] - 2026-09-12
 
 ### Added

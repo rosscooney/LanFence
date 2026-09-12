@@ -436,6 +436,44 @@ def _advertised_service_lines(services: list[AdvertisedService]) -> list[str]:
     return lines
 
 
+def render_channels_table(statuses: list, *, plain: bool = False) -> str:
+    """Render ``lanfence channels`` - one row per communication channel
+    (see :func:`lanfence.channels.list_channel_statuses`). Never shows a
+    password, token, full webhook URL, or credential-bearing path - each
+    row's ``summary`` is already sanitized by the caller."""
+
+    lines = ["Channels:"]
+    for s in statuses:
+        digest_col = "-" if s.digest_selected is None else ("yes" if s.digest_selected else "no")
+        lines.append(
+            f"  {s.channel:<10} enabled={str(s.enabled):<5} configured={str(s.configured):<5} "
+            f"digest={digest_col:<3} {s.summary}"
+        )
+    text = "\n".join(lines)
+    if plain or not _RICH:
+        print(text)
+        return text
+
+    console = Console()
+    table = Table(title="Channels")
+    table.add_column("Channel")
+    table.add_column("Enabled")
+    table.add_column("Configured")
+    table.add_column("Digest")
+    table.add_column("Destination", overflow="fold")
+    for s in statuses:
+        digest_col = "-" if s.digest_selected is None else ("yes" if s.digest_selected else "no")
+        table.add_row(
+            s.channel,
+            "[green]yes[/green]" if s.enabled else "[dim]no[/dim]",
+            "[green]yes[/green]" if s.configured else "[yellow]no[/yellow]",
+            digest_col,
+            _rich_escape(s.summary),
+        )
+    console.print(table)
+    return text
+
+
 def render_advertised_services(
     services: list[AdvertisedService], *, now: datetime, total_count: int | None = None, plain: bool = False,
 ) -> str:

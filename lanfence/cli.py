@@ -26,6 +26,27 @@ import typer
 
 from lanfence import __version__, alerts, discovery, scanner
 from lanfence.allowlist import Allowlist
+from lanfence.channels import (
+    CHANNEL_FIELDS,
+    CHANNEL_NAMES,
+    CLEAR,
+    DEFAULT_CONFIG_PATH,
+    KEEP,
+    ConcurrentModificationError,
+    ConfigFileError,
+    apply_channel_values,
+    apply_digest_selection,
+    check_insecure_permissions,
+    is_channel_configured,
+    list_channel_statuses,
+    load_channels_config_file,
+    resolve_channels_config_path,
+    save_channels_config_file,
+    send_channel_test_message,
+    set_channel_enabled,
+    supports_digest,
+    validate_channel_values,
+)
 from lanfence.config import DIGEST_CHANNELS, Config
 from lanfence.db import DeviceStore
 from lanfence.dhcp_server import (
@@ -55,6 +76,7 @@ from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
     render_advertised_services,
+    render_channels_table,
     render_device_detail,
     render_device_inventory,
     render_digest,
@@ -89,6 +111,13 @@ def _root(
     ),
 ) -> None:
     pass
+
+
+channels_app = typer.Typer(
+    help="Configure Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog destinations.",
+    no_args_is_help=False,
+)
+app.add_typer(channels_app, name="channels")
 
 
 def _load_config(config_path: Optional[Path]) -> Config:
@@ -1937,6 +1966,366 @@ def vendor_refresh(
     typer.secho(f"saved {len(table)} vendor entries to {dest}", fg="green")
     if cfg.vendor_file is None or Path(cfg.vendor_file).expanduser() != dest:
         typer.echo(f"add this to your config to use it:\n  vendor_file: {dest}")
+
+
+# --- lanfence channels -------------------------------------------------
+
+
+def _channels_load_or_exit(config: Optional[Path]):
+    path = resolve_channels_config_path(config)
+    try:
+        return path, load_channels_config_file(path)
+    except ConfigFileError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _channels_new_file_notice(path: Path, existed: bool, explicit_config: Optional[Path]) -> None:
+    if existed:
+        return
+    typer.echo(f"No configuration file exists yet - one will be created at {path}.")
+    if explicit_config is None:
+        typer.echo(
+            "No --config was given, so this uses LAN Fence's default per-user configuration "
+            f"location ({DEFAULT_CONFIG_PATH}). Pass --config {path} (or move the file there) "
+            "for `lanfence monitor` and other commands to use it."
+        )
+
+
+def _channels_save_or_exit(path: Path, loaded, updated_raw: dict) -> None:
+    if path.is_symlink():
+        typer.echo(f"note: {path} is a symlink - the link itself will be replaced, its target left alone.")
+    # Checked *before* saving - `save_channels_config_file` always writes
+    # the replacement at 0o600 (see `lanfence.fsutil.atomic_write`'s
+    # default), so any pre-existing looser permissions are only visible
+    # right up until the save itself fixes them.
+    insecure_mode = check_insecure_permissions(path)
+    try:
+        save_channels_config_file(loaded, updated_raw)
+    except ConcurrentModificationError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+    except ConfigFileError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.secho(f"saved {path}", fg="green")
+    if insecure_mode is not None:
+        typer.secho(
+            f"note: {path} was readable beyond its owner (mode {oct(insecure_mode)}) before this save - "
+            "restricted to owner-only (0o600), since it may hold secrets.",
+            fg="yellow",
+        )
+    typer.echo(
+        f"`lanfence monitor` reads this file once at startup, not while running - restart it "
+        f"(e.g. `lanfence monitor --config {path}`) for this change to take effect."
+    )
+
+
+@channels_app.callback(invoke_without_command=True)
+def channels_default(
+    ctx: typer.Context,
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Configure Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog destinations.
+
+    With no subcommand, shows every channel's enabled/configured status and
+    a safe destination summary (never a password, token, full webhook URL,
+    or credential-bearing path) - a pure read, no network access. See
+    `lanfence channels setup` to configure one interactively.
+    """
+
+    if ctx.invoked_subcommand is not None:
+        return
+    path, loaded = _channels_load_or_exit(config)
+    if not loaded.existed:
+        typer.echo(f"No configuration file at {path} yet - every channel below is unconfigured.")
+    render_channels_table(list_channel_statuses(loaded.cfg))
+
+
+def _prompt_secret_field(f, current_value: Optional[str]):
+    if current_value:
+        typer.echo(f"  {f.label}: already configured (hidden)")
+        raw = typer.prompt(
+            f"  {f.label} - blank to keep it, or type 'clear' to remove it",
+            default="", show_default=False, hide_input=True,
+        )
+        if not raw:
+            return KEEP
+        if raw.strip().lower() == "clear":
+            return CLEAR
+        return raw
+    suffix = "" if f.required else " (optional - blank to leave unset)"
+    raw = typer.prompt(f"  {f.label}{suffix}", default="", show_default=False, hide_input=True)
+    return raw or None
+
+
+def _prompt_channel_fields(channel: str, current_cfg) -> dict:
+    values: dict = {}
+    for f in CHANNEL_FIELDS[channel]:
+        current_value = getattr(current_cfg, f.name, None)
+        if f.help_text:
+            typer.echo(f"  {f.help_text}")
+        if f.kind == "secret":
+            values[f.name] = _prompt_secret_field(f, current_value)
+        elif f.kind == "bool":
+            values[f.name] = typer.confirm(f"  {f.label}", default=bool(current_value))
+        elif f.kind == "choice":
+            default = current_value or f.default
+            values[f.name] = typer.prompt(f"  {f.label} ({'/'.join(f.choices)})", default=default)
+        elif f.kind == "list_str":
+            default_display = ", ".join(current_value or [])
+            raw = typer.prompt(f"  {f.label}", default=default_display, show_default=bool(default_display))
+            values[f.name] = [p.strip() for p in raw.split(",") if p.strip()]
+        elif f.kind in ("int", "float"):
+            default = current_value if current_value is not None else f.default
+            raw = typer.prompt(f"  {f.label}", default=str(default) if default is not None else "")
+            try:
+                values[f.name] = int(raw) if f.kind == "int" else float(raw)
+            except ValueError:
+                values[f.name] = raw  # left as-is - validate_channel_values reports it clearly
+        else:  # text
+            default = current_value or f.default or ""
+            raw = typer.prompt(f"  {f.label}", default=default, show_default=bool(default))
+            values[f.name] = raw or None
+
+    return values
+
+
+def _wizard_webhook_scheme_note(channel: str, values: dict) -> None:
+    url_field = "url" if channel in ("webhook", "ntfy") else "webhook_url"
+    url = values.get(url_field)
+    if isinstance(url, str) and url.startswith("http://"):
+        typer.secho(
+            "  note: this URL uses plain HTTP - the message will be sent unencrypted over the network.",
+            fg="yellow",
+        )
+
+
+def _run_channel_wizard(channel: str, path: Path, loaded, *, explicit_config: Optional[Path]) -> None:
+    typer.secho(f"\n{channel}", fg="cyan", bold=True)
+    while True:
+        current_cfg = getattr(loaded.cfg.alerts, channel)
+        values = _prompt_channel_fields(channel, current_cfg)
+        _wizard_webhook_scheme_note(channel, values)
+        values["enabled"] = typer.confirm("  Enable this channel now?", default=current_cfg.enabled)
+
+        errors = validate_channel_values(channel, values)
+        if errors:
+            typer.secho("\nThe following need fixing:", fg="red")
+            for e in errors:
+                typer.secho(f"  - {e}", fg="red")
+            if not typer.confirm("\nTry entering these values again?", default=True):
+                typer.echo("cancelled - no changes saved.")
+                return
+            continue
+
+        # Sanitized preview against what *would* be saved - never the raw
+        # secret values just entered.
+        preview_raw = apply_channel_values(loaded.raw, channel, values)
+        preview_cfg = Config.model_validate(preview_raw)
+        typer.echo("\nProposed configuration:")
+        for status in list_channel_statuses(preview_cfg):
+            if status.channel == channel:
+                typer.echo(
+                    f"  {status.channel}: enabled={status.enabled} configured={status.configured} "
+                    f"destination={status.summary}"
+                )
+
+        if not typer.confirm("\nSave this configuration?", default=True):
+            typer.echo("cancelled - no changes saved.")
+            return
+
+        digest_choice = None
+        if supports_digest(channel):
+            digest_choice = typer.confirm(
+                "Use this channel for daily digests too?", default=channel in loaded.cfg.digest.channels
+            )
+
+        updated_raw = preview_raw
+        if digest_choice is not None:
+            updated_raw = apply_digest_selection(updated_raw, channel, selected=digest_choice)
+
+        _channels_new_file_notice(path, loaded.existed, explicit_config)
+        _channels_save_or_exit(path, loaded, updated_raw)
+
+        # Re-load so a follow-up test message (or configuring another
+        # channel) sees exactly what's now on disk, and so a second save
+        # this session correctly detects further concurrent edits.
+        loaded.raw = updated_raw
+        loaded.raw_bytes = path.read_bytes()
+        loaded.cfg = Config.model_validate(updated_raw)
+        loaded.existed = True
+
+        if values["enabled"]:
+            send_test = typer.confirm("\nSend a test message now?", default=False)
+            if send_test:
+                if channel == "twilio":
+                    typer.secho("  note: sending a test SMS may incur provider charges.", fg="yellow")
+                ok, message = send_channel_test_message(channel, loaded.cfg)
+                if ok:
+                    typer.secho(f"  test message: {message}", fg="green")
+                else:
+                    typer.secho(f"  test message failed: {message}", fg="red")
+        return
+
+
+@channels_app.command("setup")
+def channels_setup(
+    channel: Optional[str] = typer.Argument(None, help="Channel to configure directly, e.g. slack."),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Interactively configure one channel at a time.
+
+    With no argument, shows every channel's status and lets you choose one;
+    `lanfence channels setup slack` goes straight to that channel's wizard.
+    Needs an interactive terminal - use `lanfence channels enable`/`disable`
+    (and hand-edit the config for field values) for scripted/noninteractive
+    use instead of piping answers into this command.
+    """
+
+    if not _stdin_is_interactive():
+        typer.secho(
+            "error: `lanfence channels setup` needs an interactive terminal. For scripted use, "
+            "edit the config file directly and use `lanfence channels enable/disable`.",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+    if channel is not None and channel not in CHANNEL_NAMES:
+        typer.secho(
+            f"error: unknown channel {channel!r} - choose one of: {', '.join(CHANNEL_NAMES)}",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+
+    path, loaded = _channels_load_or_exit(config)
+
+    try:
+        while True:
+            if channel is None:
+                render_channels_table(list_channel_statuses(loaded.cfg))
+                typer.echo("")
+                choice = typer.prompt(f"Which channel would you like to configure? ({', '.join(CHANNEL_NAMES)})")
+                choice = choice.strip().lower()
+                if choice not in CHANNEL_NAMES:
+                    typer.secho(f"unknown channel {choice!r}", fg="red")
+                    continue
+            else:
+                choice = channel
+                channel = None  # only auto-select once, when given as an argument
+
+            _run_channel_wizard(choice, path, loaded, explicit_config=config)
+
+            if not typer.confirm("\nConfigure another channel?", default=False):
+                break
+    except (typer.Abort, EOFError):
+        typer.echo("\ncancelled - no further changes saved.")
+
+
+@channels_app.command("test")
+def channels_test(
+    channel: str = typer.Argument(..., help="Channel to send a test message to, e.g. slack."),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Send one clearly-labeled test message to CHANNEL using its real transport.
+
+    Running this command is itself explicit authorization to send - no
+    further confirmation is asked. Requires the channel to already be
+    enabled (`lanfence channels enable <channel>` first) and its
+    configuration to be complete; reports the transport's actual outcome
+    (never "success" if it raised) with a nonzero exit code on failure.
+    Bypasses `alerts.min_severity` entirely - it never goes through the
+    finding-severity pipeline - and never touches devices, findings,
+    lifecycle events, or alert-dispatch cooldowns.
+    """
+
+    if channel not in CHANNEL_NAMES:
+        typer.secho(f"error: unknown channel {channel!r} - choose one of: {', '.join(CHANNEL_NAMES)}",
+                    fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    _, loaded = _channels_load_or_exit(config)
+    if not is_channel_configured(channel, loaded.cfg):
+        typer.secho(
+            f"error: {channel} is not fully configured - run `lanfence channels setup {channel}` first",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+    if not getattr(loaded.cfg.alerts, channel).enabled:
+        typer.secho(
+            f"error: {channel} is disabled - run `lanfence channels enable {channel}` first",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+
+    ok, message = send_channel_test_message(channel, loaded.cfg)
+    if ok:
+        typer.secho(f"test message {message}.", fg="green")
+    else:
+        typer.secho(f"test message failed: {message}", fg="red", err=True)
+        raise typer.Exit(code=1)
+
+
+@channels_app.command("enable")
+def channels_enable(
+    channel: str = typer.Argument(..., help="Channel to enable, e.g. slack."),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Enable CHANNEL for immediate alerts - never sends a message by itself.
+
+    Requires its configuration to already be complete (`lanfence channels
+    setup <channel>` first if not); noninteractive, since the requested
+    change is already fully explicit.
+    """
+
+    if channel not in CHANNEL_NAMES:
+        typer.secho(f"error: unknown channel {channel!r} - choose one of: {', '.join(CHANNEL_NAMES)}",
+                    fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    path, loaded = _channels_load_or_exit(config)
+    if not is_channel_configured(channel, loaded.cfg):
+        typer.secho(
+            f"error: cannot enable {channel} - its configuration is incomplete. "
+            f"Run `lanfence channels setup {channel}` first.",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+
+    updated_raw = set_channel_enabled(loaded.raw, channel, enabled=True)
+    _channels_new_file_notice(path, loaded.existed, config)
+    _channels_save_or_exit(path, loaded, updated_raw)
+    typer.secho(f"{channel} enabled.", fg="green")
+
+
+@channels_app.command("disable")
+def channels_disable(
+    channel: str = typer.Argument(..., help="Channel to disable, e.g. slack."),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Disable CHANNEL - preserves its settings and any stored credentials.
+
+    Noninteractive, since the requested change is already fully explicit.
+    If this channel is currently selected for daily digests, that selection
+    is preserved (not cleared) - digest delivery to it is simply inactive
+    while the channel itself is disabled.
+    """
+
+    if channel not in CHANNEL_NAMES:
+        typer.secho(f"error: unknown channel {channel!r} - choose one of: {', '.join(CHANNEL_NAMES)}",
+                    fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    path, loaded = _channels_load_or_exit(config)
+    updated_raw = set_channel_enabled(loaded.raw, channel, enabled=False)
+    _channels_new_file_notice(path, loaded.existed, config)
+    _channels_save_or_exit(path, loaded, updated_raw)
+    typer.secho(f"{channel} disabled.", fg="green")
+    if supports_digest(channel) and channel in loaded.cfg.digest.channels:
+        typer.echo(
+            f"note: {channel} is still selected for daily digests, but digest delivery to it is "
+            "inactive while the channel itself is disabled."
+        )
 
 
 def main() -> None:  # pragma: no cover - entry point shim

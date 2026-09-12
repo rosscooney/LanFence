@@ -619,6 +619,85 @@ immediate-alert pipeline: it ignores `alerts.min_severity` and never reads
 or writes the per-MAC alert cooldown, so sending a digest can never suppress
 (or be suppressed by) an immediate alert for the same device.
 
+## Communication channels
+
+Configuring Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog by hand
+means editing YAML and hunting down each provider's webhook-setup screen.
+`lanfence channels` is an interactive wizard for the same `alerts.<channel>`
+settings above - it doesn't add a new configuration system, just a safer,
+guided way to edit the one that already exists.
+
+```text
+lanfence channels setup          # interactive: pick a channel, configure it, save
+lanfence channels                # status table - enabled? configured? safe summary
+lanfence channels test slack     # send one clearly-labeled test message
+```
+
+```text
+$ lanfence channels
+                          Channels
+┏━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Channel ┃ Enabled ┃ Configured ┃ Digest ┃ Destination    ┃
+┡━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ slack   │ yes     │ yes        │ yes    │ hooks.slack.com│
+│ discord │ no      │ no         │ no     │ not configured │
+│ ...
+```
+
+The status table and every summary shown during setup are deliberately
+**safe to screenshot**: never a password, token, full webhook URL, URL query
+string, or credential-bearing path - only a hostname (Slack/Discord/Teams/
+webhook/ntfy), a masked recipient address or count (email), masked phone
+numbers (Twilio), or a socket path (syslog). "Configured" means the required
+fields are present, never that delivery has actually been tested - use
+`channels test` for that.
+
+`lanfence channels setup [channel]` walks through: choosing a channel (or
+jump straight to one, e.g. `setup slack`), prompting for its real config
+fields (existing values shown as defaults where it's safe to display them),
+a one-line pointer to where to obtain each setting, local validation (URL
+scheme/hostname, port range, E.164 phone numbers, email syntax, timeouts,
+supported priorities/facilities - never a network request, so passing this
+never proves delivery will actually work), a sanitized preview, and a
+save/cancel prompt. A secret (webhook URL, SMTP/Twilio credentials) is never
+echoed back: an existing one shows as "already configured", and you choose
+to leave it, type a new value, or type `clear` to remove it - leaving the
+prompt blank always preserves what's already there. Digest-eligible
+channels (email, webhook, Slack, Discord, Teams, ntfy - not Twilio/syslog)
+get one extra "use this for daily digests too?" prompt, touching only
+`digest.channels`; the digest schedule, severity thresholds, and per-MAC
+cooldowns are never touched by this command. After a successful save you
+can optionally send a test message (defaults to **no**; Twilio warns that a
+test SMS may incur provider charges).
+
+`lanfence channels enable/disable <channel>` make the same edit
+noninteractively, since the requested change is already fully explicit:
+`enable` refuses if required fields are missing, `disable` preserves every
+setting and credential (and any existing digest selection - digest delivery
+to a disabled channel is simply inactive, not removed from the list).
+`lanfence channels test <channel>` requires the channel to already be
+enabled and sends one message via the real transport, reporting its actual
+outcome (never "success" on a swallowed exception) with a nonzero exit code
+on failure - it bypasses `alerts.min_severity` entirely and never creates a
+device, finding, lifecycle event, or alert-dispatch cooldown entry.
+
+**Config file location**: LAN Fence has no other default *writable* config
+file (every other command treats a missing `--config` as "built-in
+defaults, touch no file"), so `channels` uses a conventional per-user path,
+`~/.config/lanfence/config.yaml`, when `--config` isn't given - shown before
+saving, along with a reminder to pass the same `--config` path to `monitor`
+(config is read once at startup, not while running, so a running `monitor`
+needs a restart to pick up a change here). Saving is atomic and safe:
+existing unrelated sections, other channels, and disabled channels' own
+settings/secrets are always preserved; malformed YAML is never overwritten
+(the file is left untouched with a clear error instead); a concurrent edit
+between load and save is detected and refused rather than clobbered; a
+newly-written file is owner-readable/writable only (`0600`), and an
+existing file found more permissive than that is tightened with a clear
+note. Values are always preserved, but - like `lanfence allow`'s own
+YAML writer - hand-written comments and formatting are not, since that
+would need a new dependency this project avoids.
+
 ## Unexpected DHCP servers
 
 Passively detects a DHCP server (a DHCPOFFER/ACK/NAK reply) that isn't on

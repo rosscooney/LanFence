@@ -1844,3 +1844,435 @@ def test_monitor_queued_passive_sighting_prevents_false_disconnect_reappear(
     # Only the original seeding event - no spurious disconnected/reappeared
     # pair generated within this tick.
     assert [e.event_type for e in events] == ["new_device"]
+
+
+# --- lanfence channels -------------------------------------------------
+
+
+def test_channels_bare_listing_empty(tmp_path: Path):
+    missing_config = tmp_path / "does-not-exist.yaml"
+    result = runner.invoke(app, ["channels", "--config", str(missing_config)])
+    assert result.exit_code == 0
+    assert "No configuration file at" in result.output
+    assert "slack" in result.output
+    assert "syslog" in result.output
+
+
+def test_channels_bare_listing_with_existing_file_shows_no_missing_file_notice(config_path: Path):
+    result = runner.invoke(app, ["channels", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "No configuration file at" not in result.output
+
+
+def test_channels_bare_listing_no_network_calls(config_path: Path):
+    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
+        result = runner.invoke(app, ["channels", "--config", str(config_path)])
+    assert result.exit_code == 0
+    mock_urlopen.assert_not_called()
+
+
+def test_channels_bare_listing_shows_safe_summary_not_secret(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/services/T000/SECRETSECRET\n"
+        "    enabled: true\n"
+    )
+    result = runner.invoke(app, ["channels", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "hooks.slack.com" in result.output
+    assert "SECRETSECRET" not in result.output
+
+
+def test_channels_setup_requires_interactive_terminal(config_path: Path):
+    result = runner.invoke(app, ["channels", "setup", "slack", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "interactive terminal" in result.output.lower()
+
+
+def test_channels_setup_rejects_unknown_channel(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["channels", "setup", "carrier-pigeon", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "unknown channel" in result.output.lower()
+
+
+def test_channels_setup_slack_creates_and_saves(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            # webhook_url, timeout(default), enable=y, save=y, digest=n, test=n, another=n
+            input="https://hooks.slack.com/services/T000/B000/xxxx\n\ny\ny\nn\nn\nn\n",
+        )
+    assert result.exit_code == 0
+    assert "saved" in result.output.lower()
+    assert "restart it" in result.output.lower()
+
+    body = config_path.read_text()
+    assert "hooks.slack.com/services/T000/B000/xxxx" in body
+
+
+def test_channels_setup_no_config_flag_uses_default_path_and_says_so(tmp_path: Path, monkeypatch):
+    default_path = tmp_path / "default-config.yaml"
+    monkeypatch.setattr("lanfence.channels.DEFAULT_CONFIG_PATH", default_path)
+    monkeypatch.setattr("lanfence.cli.DEFAULT_CONFIG_PATH", default_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "slack"],
+            input="https://hooks.slack.com/services/x\n\ny\ny\nn\nn\nn\n",
+        )
+    assert result.exit_code == 0
+    assert str(default_path) in result.output
+    assert default_path.is_file()
+
+
+def test_channels_setup_keeps_existing_secret_on_blank(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/services/ORIGINAL\n"
+        "    enabled: true\n"
+    )
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            # blank webhook (keep), blank timeout, enable=y(default), save=y, digest=n, test=n, another=n
+            input="\n\ny\ny\nn\nn\nn\n",
+        )
+    assert result.exit_code == 0
+    assert "already configured" in result.output.lower()
+    assert "ORIGINAL" in config_path.read_text()
+
+
+def test_channels_setup_clears_secret_with_explicit_clear(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  email:\n    from_addr: lanfence@example.com\n    to_addrs: [ops@example.com]\n"
+        "    password: hunter2\n    enabled: false\n"
+    )
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "email", "--config", str(config_path)],
+            input=(
+                "\n"       # smtp_host (keep default localhost)
+                "\n"       # smtp_port (keep default)
+                "\n"       # use_tls (keep default)
+                "\n"       # username (blank, optional)
+                "clear\n"  # password -> clear
+                "\n"       # from_addr (keep existing)
+                "\n"       # to_addrs (keep existing)
+                "n\n"      # enable? default False (was False)
+                "y\n"      # save
+                "n\n"      # digest
+                "n\n"      # another channel
+            ),
+        )
+    assert result.exit_code == 0
+    body = config_path.read_text()
+    assert "hunter2" not in body
+    assert "password: null" in body
+
+
+def test_channels_setup_cancel_before_save_leaves_config_unchanged(config_path: Path):
+    original = config_path.read_text()
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            input="https://hooks.slack.com/services/x\n\ny\nn\n",  # save? -> n
+        )
+    assert result.exit_code == 0
+    assert config_path.read_text() == original
+
+
+def test_channels_setup_invalid_value_reprompts(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            input=(
+                "ftp://not-http\n"   # invalid scheme
+                "5\n"                # timeout
+                "y\n"                # enable
+                "y\n"                # try again? yes
+                "https://hooks.slack.com/services/ok\n"
+                "5\n"
+                "y\n"
+                "y\n"                # save
+                "n\n"                # digest
+                "n\n"                # test
+                "n\n"                # another
+            ),
+        )
+    assert result.exit_code == 0
+    assert "need fixing" in result.output.lower()
+    assert "hooks.slack.com/services/ok" in config_path.read_text()
+
+
+def test_channels_setup_enabling_incomplete_channel_shows_error_and_can_cancel(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            input=(
+                "\n"    # blank webhook_url - no existing value, so left unset
+                "5\n"   # timeout
+                "y\n"   # enable=yes despite missing webhook_url
+                "n\n"   # try again? no -> cancel
+            ),
+        )
+    assert result.exit_code == 0
+    assert "cannot enable" in result.output.lower()
+    assert not config_path.read_text().count("alerts")
+
+
+def test_channels_setup_digest_supported_channel_prompts(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            input="https://hooks.slack.com/services/x\n\ny\ny\ny\nn\nn\n",  # digest=y
+        )
+    assert result.exit_code == 0
+    assert "daily digest" in result.output.lower()
+    assert "slack" in config_path.read_text()
+    body = yaml.safe_load(config_path.read_text())
+    assert body["digest"]["channels"] == ["slack"]
+
+
+def test_channels_setup_twilio_not_offered_digest(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "twilio", "--config", str(config_path)],
+            input=(
+                "AC123\n"             # account_sid
+                "tok123\n"            # auth_token
+                "+15551234567\n"      # from_number
+                "+15559876543\n"      # to_numbers
+                "10\n"                # timeout
+                "n\n"                 # enable
+                "y\n"                 # save
+                "n\n"                 # test
+                "n\n"                 # another
+            ),
+        )
+    assert result.exit_code == 0
+    assert "daily digest" not in result.output.lower()
+
+
+def test_channels_setup_configure_another_channel_loop(config_path: Path):
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["channels", "setup", "--config", str(config_path)],
+            input=(
+                "slack\n"
+                "https://hooks.slack.com/services/x\n\ny\ny\nn\nn\n"  # slack wizard
+                "y\n"   # configure another? yes
+                "discord\n"
+                "https://discord.com/api/webhooks/x\n\ny\ny\nn\nn\n"  # discord wizard
+                "n\n"   # configure another? no
+            ),
+        )
+    assert result.exit_code == 0
+    body = config_path.read_text()
+    assert "hooks.slack.com" in body
+    assert "discord.com" in body
+
+
+def test_channels_setup_test_message_default_is_no(config_path: Path):
+    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
+        with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+            result = runner.invoke(
+                app, ["channels", "setup", "slack", "--config", str(config_path)],
+                # accept every default: webhook set explicitly, then blank for
+                # everything else including the test-message prompt
+                input="https://hooks.slack.com/services/x\n\ny\ny\nn\n\nn\n",
+            )
+    assert result.exit_code == 0
+    mock_urlopen.assert_not_called()
+
+
+def test_channels_setup_twilio_test_message_warns_about_charges(config_path: Path):
+    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
+        with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+            result = runner.invoke(
+                app, ["channels", "setup", "twilio", "--config", str(config_path)],
+                input=(
+                    "AC123\ntok123\n+15551234567\n+15559876543\n10\n"
+                    "y\n"    # enable
+                    "y\n"    # save
+                    "y\n"    # send test? yes
+                    "n\n"    # another
+                ),
+            )
+    assert result.exit_code == 0
+    assert "charges" in result.output.lower()
+
+
+def test_channels_enable_requires_complete_config(config_path: Path):
+    result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "incomplete" in result.output.lower()
+
+
+def test_channels_enable_unknown_channel(config_path: Path):
+    result = runner.invoke(app, ["channels", "enable", "carrier-pigeon", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_channels_enable_succeeds_when_complete(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
+    )
+    result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "enabled" in result.output.lower()
+    assert yaml.safe_load(config_path.read_text())["alerts"]["slack"]["enabled"] is True
+
+
+def test_channels_disable_preserves_secrets(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  twilio:\n    account_sid: AC1\n    auth_token: tok123\n"
+        "    from_number: '+15551234567'\n    to_numbers: ['+15559876543']\n    enabled: true\n"
+    )
+    result = runner.invoke(app, ["channels", "disable", "twilio", "--config", str(config_path)])
+    assert result.exit_code == 0
+    body = yaml.safe_load(config_path.read_text())
+    assert body["alerts"]["twilio"]["enabled"] is False
+    assert body["alerts"]["twilio"]["auth_token"] == "tok123"
+
+
+def test_channels_disable_preserves_digest_selection_with_note(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
+        "digest:\n  channels: [slack]\n"
+    )
+    result = runner.invoke(app, ["channels", "disable", "slack", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "inactive while the channel itself is disabled" in result.output
+    body = yaml.safe_load(config_path.read_text())
+    assert body["digest"]["channels"] == ["slack"]  # preserved, not cleared
+
+
+def test_channels_test_requires_enabled(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
+    )
+    result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "enable slack" in result.output.lower()
+
+
+def test_channels_test_requires_complete_config(config_path: Path):
+    result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "not fully configured" in result.output.lower()
+
+
+def test_channels_test_success_uses_real_transport(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
+    )
+    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
+        result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert mock_urlopen.called
+    request = mock_urlopen.call_args[0][0]
+    assert request.full_url == "https://hooks.slack.com/x"
+    assert b"LAN Fence test message" in request.data
+
+
+def test_channels_test_failure_nonzero_exit(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
+    )
+    with patch("lanfence.channels.urllib.request.urlopen", side_effect=OSError("refused")):
+        result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "failed" in result.output.lower()
+
+
+def test_channels_test_does_not_create_device_or_event(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
+    )
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
+        runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
+
+    with DeviceStore(cfg_dict["db_path"]) as store:
+        assert store.all_devices() == []
+
+
+def test_channels_test_does_not_touch_alert_cooldowns(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
+    )
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
+        runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
+
+    with DeviceStore(cfg_dict["db_path"]) as store:
+        row = store._conn.execute("SELECT COUNT(*) AS n FROM alert_log").fetchone()  # noqa: SLF001
+        assert row["n"] == 0
+
+
+def test_channels_malformed_yaml_leaves_file_untouched(config_path: Path):
+    original = "not: [valid: yaml: at: all"
+    config_path.write_text(original)
+    result = runner.invoke(app, ["channels", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert config_path.read_text() == original
+
+
+def test_channels_concurrent_modification_detected_via_enable(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
+    )
+
+    real_save = __import__("lanfence.channels", fromlist=["save_channels_config_file"]).save_channels_config_file
+
+    def racing_save(loaded, updated_raw):
+        # Simulate another process editing the file after this command
+        # already loaded it, but before it saves.
+        config_path.write_text(config_path.read_text() + "\n# concurrent edit\n")
+        return real_save(loaded, updated_raw)
+
+    with patch("lanfence.cli.save_channels_config_file", side_effect=racing_save):
+        result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "changed on disk" in result.output.lower()
+
+
+def test_channels_restricts_insecure_permissions_on_save(config_path: Path):
+    config_path.chmod(0o644)
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
+    )
+    result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "restricted" in result.output.lower()
+    import stat
+
+    mode = stat.S_IMODE(config_path.stat().st_mode)
+    assert mode == 0o600
+
+
+def test_channels_validation_and_listing_perform_no_network_calls(config_path: Path):
+    config_path.write_text(
+        config_path.read_text()
+        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
+    )
+    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
+        runner.invoke(app, ["channels", "--config", str(config_path)])
+        runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
+        runner.invoke(app, ["channels", "disable", "slack", "--config", str(config_path)])
+    mock_urlopen.assert_not_called()
