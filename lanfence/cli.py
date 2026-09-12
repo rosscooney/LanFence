@@ -653,6 +653,8 @@ def monitor(
         if use_live:
             _refresh_inventory_counts()
         while True:
+            if use_live:
+                display.check_quit()
             now = time.monotonic()
 
             # Drain any queued passive sightings *before* this tick's active
@@ -777,6 +779,8 @@ def monitor(
             if use_live:
                 display.update(stats, activity_log, now_monotonic=time.monotonic())
 
+            if use_live:
+                display.check_quit()
             time.sleep(1.0)
 
     if use_live:

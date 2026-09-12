@@ -13,6 +13,16 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+## [0.3.13] - 2026-09-12
+
+### Added
+
+- Press `q` (without Enter) to exit the live monitor through its normal
+  cleanup and session summary. A visible border hint explains the shortcut;
+  Ctrl+C remains available and redirected input is never consumed.
+
 ## [0.3.12] - 2026-09-12
 
 ### Added
@@ -613,7 +623,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.9...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.13...HEAD
+[0.3.13]: https://github.com/rosscooney/lanfence/compare/v0.3.12...v0.3.13
 [0.3.9]: https://github.com/rosscooney/lanfence/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/rosscooney/lanfence/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/rosscooney/lanfence/compare/v0.3.6...v0.3.7

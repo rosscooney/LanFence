@@ -2458,3 +2458,15 @@ def test_channels_validation_and_listing_perform_no_network_calls(config_path: P
         runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
         runner.invoke(app, ["channels", "disable", "slack", "--config", str(config_path)])
     mock_urlopen.assert_not_called()
+
+
+def test_monitor_quit_key_uses_clean_shutdown(config_path: Path, monkeypatch):
+    monkeypatch.setattr('lanfence.cli.monitor_ui.should_use_live', lambda *args: (True, None))
+    monkeypatch.setattr('lanfence.cli.monitor_ui.MonitorDisplay.check_quit',
+                        lambda self: (_ for _ in ()).throw(KeyboardInterrupt))
+    with patch('lanfence.cli.run_active_sweep') as scan, patch('lanfence.cli.DeviceStore.close') as close:
+        result = runner.invoke(app, ['monitor', '--no-passive', '--config', str(config_path)])
+    assert result.exit_code == 0
+    assert 'Monitoring stopped after' in result.output
+    scan.assert_not_called()
+    close.assert_called_once()

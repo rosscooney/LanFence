@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import logging
 import os
+import select
+import sys
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Deque, Literal, Optional
 
@@ -125,6 +127,7 @@ class HeaderInfo:
     mdns: bool
     ssdp: bool
     dhcp_server_detection: bool
+    quit_key_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -395,7 +398,8 @@ def build_dashboard(
     width = max(1, size.width)
     height = max(1, size.height)
     if width < MIN_USABLE_WIDTH or height < MIN_USABLE_HEIGHT:
-        return render_minimal(snap, width=width)
+        hint = "q: quit" if header.quit_key_enabled else "Ctrl+C: quit"
+        return _one_line(hint + " · " + render_minimal(snap, width=width).plain, width=width)
 
     # Panel border (2) + header (up to 2 lines + 1 blank) + divider (1) +
     # footer (1) - whatever's left goes to the activity area. Every header/
@@ -414,7 +418,8 @@ def build_dashboard(
         Text("─" * max(1, width - 4), style="dim"),
         render_footer(snap, width=width - 4),
     )
-    return Panel(body, title="LAN Fence · Monitoring", border_style="green", expand=True)
+    hint = "Press q to quit · Ctrl+C also works" if header.quit_key_enabled else "Ctrl+C to quit"
+    return Panel(body, title="LAN Fence · Monitoring", subtitle=hint, border_style="green", expand=True)
 
 
 def should_use_live(explicit: Optional[bool], console: Console) -> tuple[bool, Optional[str]]:
@@ -466,6 +471,48 @@ class _ActivityLogHandler(logging.Handler):
             pass
 
 
+class QuitKey:
+    """Nonblocking single-key input on a POSIX TTY; never consume piped input.
+
+    Cbreak leaves signal handling enabled, so Ctrl+C still works. Restore
+    the original terminal attributes on every exit, including exceptions.
+    """
+
+    def __init__(self, stream=None):
+        self.stream = stream if stream is not None else sys.stdin
+        self.fd = None
+        self.saved = None
+
+    def __enter__(self):
+        import termios
+        import tty
+        try:
+            if not self.stream.isatty():
+                return self
+            fd = self.stream.fileno()
+            saved = termios.tcgetattr(fd)
+            # Do not flush input that arrived immediately before startup.
+            tty.setcbreak(fd, termios.TCSANOW)
+            self.fd, self.saved = fd, saved
+        except (OSError, ValueError, termios.error):
+            self.fd = None
+        return self
+
+    def check(self):
+        if self.fd is not None and select.select([self.fd], [], [], 0)[0]:
+            data = os.read(self.fd, 1024)
+            if b"q" in data.lower():
+                raise KeyboardInterrupt
+
+    def __exit__(self, *args):
+        if self.fd is not None:
+            import termios
+            try:
+                termios.tcsetattr(self.fd, termios.TCSANOW, self.saved)
+            finally:
+                self.fd = None
+
+
 class MonitorDisplay:
     """Owns the Rich ``Live`` alternate-screen session for `lanfence
     monitor`.
@@ -493,6 +540,7 @@ class MonitorDisplay:
     ) -> None:
         from rich.live import Live
 
+        self._quit_key = QuitKey()
         self._header = header
         self._activity_log = activity_log
         self._console = console or make_console()
@@ -511,16 +559,28 @@ class MonitorDisplay:
         self._snapshot = stats.snapshot(now_monotonic)
         self._entries = log.snapshot()
 
+    def check_quit(self) -> None:
+        self._quit_key.check()
+
     def __enter__(self) -> "MonitorDisplay":
+        self._quit_key.__enter__()
+        self._header = replace(self._header, quit_key_enabled=self._quit_key.fd is not None)
         root = logging.getLogger()
         self._saved_handlers = root.handlers[:]
         root.handlers = [_ActivityLogHandler(self._activity_log)]
-        self._live.__enter__()
+        try:
+            self._live.__enter__()
+        except BaseException:
+            self._quit_key.__exit__()
+            root.handlers = self._saved_handlers
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool | None:
-        result = self._live.__exit__(exc_type, exc, tb)
-        if self._saved_handlers is not None:
-            logging.getLogger().handlers = self._saved_handlers
-            self._saved_handlers = None
-        return result
+        try:
+            return self._live.__exit__(exc_type, exc, tb)
+        finally:
+            self._quit_key.__exit__()
+            if self._saved_handlers is not None:
+                logging.getLogger().handlers = self._saved_handlers
+                self._saved_handlers = None

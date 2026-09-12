@@ -486,3 +486,50 @@ def test_render_footer_scanning_state_overrides_countdown_text():
     text = render_footer(snap, width=100).plain
     assert "scanning" in text.lower()
     assert "-" not in text.split("Scan:")[1][:5]  # no stray negative countdown
+
+
+def test_quit_key_single_press_and_terminal_restoration():
+    import os
+    import pty
+    import termios
+    from lanfence.monitor_ui import QuitKey
+
+    master, slave = pty.openpty()
+    try:
+        with os.fdopen(os.dup(slave), 'r') as stream:
+            original = termios.tcgetattr(slave)
+            with QuitKey(stream) as keys:
+                assert not termios.tcgetattr(slave)[3] & termios.ICANON
+                os.write(master, b'x')
+                keys.check()
+                os.write(master, b'q')
+                import pytest
+                with pytest.raises(KeyboardInterrupt):
+                    keys.check()
+            restored = termios.tcgetattr(slave)
+            # macOS sets the kernel-managed PENDIN flag after input arrives.
+            restored[3] &= ~getattr(termios, "PENDIN", 0)
+            original[3] &= ~getattr(termios, "PENDIN", 0)
+            assert restored == original
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_quit_key_does_not_read_redirected_input():
+    from io import StringIO
+    from lanfence.monitor_ui import QuitKey
+    stream = StringIO('q')
+    with QuitKey(stream) as keys:
+        keys.check()
+        assert keys.fd is None
+    assert stream.read() == 'q'
+
+
+def test_dashboard_quit_hint_normal_and_small():
+    snap = MonitorSnapshot.empty(passive_enabled=False)
+    for width, height in ((80, 24), (35, 12), (20, 3)):
+        rendered = build_dashboard(_header(quit_key_enabled=True), snap, (),
+                                   size=ConsoleDimensions(width, height))
+        text = '\n'.join(_rendered_lines(rendered, width=width, height=height))
+        assert 'q' in text and 'quit' in text

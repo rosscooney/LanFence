@@ -280,7 +280,10 @@ usable layout falls back to one compact line rather than a garbled one.
 redirected log file, `TERM=dumb`) falls back to plain output with one clear
 message rather than emitting raw control sequences into a file; the default
 (no `--live`/`--no-live`) auto-detects this the same way. Plain/append-only
-mode's output is unchanged from previous versions. On Ctrl+C, the dashboard
+mode's output is unchanged from previous versions. Press **q** (no Enter needed) to exit the live dashboard; the bottom border
+shows the shortcut. **Ctrl+C** also works, including in plain output mode.
+A queued quit takes effect after the current scan or delivery operation
+finishes. Terminal input settings are restored on exit. On shutdown, the dashboard
 exits cleanly (restoring your normal terminal) before printing a short
 session summary with real counters:
 
