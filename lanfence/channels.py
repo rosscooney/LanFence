@@ -446,7 +446,7 @@ def load_channels_config_file(path: Path) -> LoadedConfigFile:
     raw_bytes = path.read_bytes()
     try:
         raw = yaml.safe_load(raw_bytes.decode("utf-8")) or {}
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
         raise ConfigFileError(
             f"{path} contains invalid YAML syntax and was left untouched. Fix it by hand (or start "
             f"fresh at a new --config path) and try again. ({exc.__class__.__name__})"
@@ -457,7 +457,7 @@ def load_channels_config_file(path: Path) -> LoadedConfigFile:
         cfg = Config.model_validate(raw)
     except Exception as exc:  # noqa: BLE001 - pydantic's ValidationError, kept generic to avoid a hard dep here
         raise ConfigFileError(
-            f"{path} does not match LAN Fence's expected configuration schema and was left untouched: {exc}"
+            f"{path} does not match LAN Fence's expected configuration schema and was left untouched. Check field types and names."
         ) from exc
     return LoadedConfigFile(path=path, existed=True, raw=raw, raw_bytes=raw_bytes, cfg=cfg)
 
@@ -491,7 +491,7 @@ def save_channels_config_file(loaded: LoadedConfigFile, updated_raw: dict) -> No
     try:
         Config.model_validate(updated_raw)
     except Exception as exc:  # noqa: BLE001
-        raise ConfigFileError(f"the proposed configuration is invalid: {exc}") from exc
+        raise ConfigFileError("the proposed configuration is invalid; check field types and names") from exc
 
     body = yaml.safe_dump(updated_raw, sort_keys=False)
     atomic_write(loaded.path, body, mode=0o600)
@@ -581,7 +581,7 @@ def _post_json_ok(url: str, payload: dict, *, timeout: float, label: str) -> tup
             resp.read()
         return True, f"accepted by the {label} endpoint"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return False, f"{label} endpoint rejected the request: {exc}"
+        return False, f"{label} endpoint rejected the request: {exc.__class__.__name__}"
 
 
 def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
@@ -631,7 +631,7 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
                 resp.read()
             return True, "accepted by the ntfy server"
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            return False, f"ntfy server rejected the request: {exc}"
+            return False, f"ntfy server rejected the request: {exc.__class__.__name__}"
     if channel == "email":
         msg = EmailMessage()
         msg["Subject"] = _TEST_TITLE

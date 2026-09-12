@@ -2242,12 +2242,11 @@ def test_channels_setup_configure_another_channel_loop(config_path: Path):
         result = runner.invoke(
             app, ["channels", "setup", "--config", str(config_path)],
             input=(
-                "slack\n"
-                "https://hooks.slack.com/services/x\n\ny\ny\nn\nn\n"  # slack wizard
-                "y\n"   # configure another? yes
-                "discord\n"
-                "https://discord.com/api/webhooks/x\n\ny\ny\nn\nn\n"  # discord wizard
-                "n\n"   # configure another? no
+                "1\nslack\n"
+                "https://hooks.slack.com/services/x\n\ny\nn\n"
+                "1\ndiscord\n"
+                "https://discord.com/api/webhooks/x\n\ny\nn\n"
+                "save\ny\nn\nn\nexit\n"
             ),
         )
     assert result.exit_code == 0

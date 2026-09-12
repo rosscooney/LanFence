@@ -13,6 +13,22 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Added
+
+- Expanded `lanfence channels setup` into a numbered application setup menu
+  with a shared unsaved draft for communications, scanning, offline detection,
+  DHCP approvals, passive service discovery, digests, storage paths, and alert
+  delivery. Review redacted changes, reset individual settings to defaults,
+  save atomically, or discard; direct channel setup remains available.
+  DHCP approvals can be selected explicitly from read-only observed inventory.
+
+### Fixed
+
+- Channel configuration validation and test failures no longer include raw
+  Pydantic input or transport exception text that could expose credentials.
+
 ## [0.3.11] - 2026-09-12
 
 ### Added

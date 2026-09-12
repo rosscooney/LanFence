@@ -703,7 +703,9 @@ settings above - it doesn't add a new configuration system, just a safer,
 guided way to edit the one that already exists.
 
 ```text
-lanfence channels setup          # interactive: pick a channel, configure it, save
+lanfence channels setup          # unified setup: communications and application settings
+lanfence channels setup --config /etc/lanfence/config.yaml
+lanfence channels setup slack    # go directly to Slack setup
 lanfence channels                # status table - enabled? configured? safe summary
 lanfence channels test slack     # send one clearly-labeled test message
 ```
@@ -727,8 +729,46 @@ numbers (Twilio), or a socket path (syslog). "Configured" means the required
 fields are present, never that delivery has actually been tested - use
 `channels test` for that.
 
-`lanfence channels setup [channel]` walks through: choosing a channel (or
-jump straight to one, e.g. `setup slack`), prompting for its real config
+`lanfence channels setup` opens a numbered application setup menu. Choose
+Communications to edit destinations, or Scanning, Offline detection, DHCP
+servers, Service discovery, Daily digest, Storage, or Alert delivery. All
+sections share an unsaved draft: **Review** shows a redacted before/after
+summary; **Save** validates everything and asks for confirmation; **Discard**
+restores the last saved configuration. Exit with unsaved edits offers Save,
+Discard, or Return. Ctrl+C/EOF discards only edits since the last save.
+Opening setup, reviewing changes, or saving never scans or sends messages.
+
+Fields show their effective value and whether it is explicit or inherited.
+Blank keeps a value; `reset` removes the override; nullable fields accept
+`null` for explicit auto/unset. Time fields accept seconds or durations such
+as `5m`. Enumerations show their choices; digest destinations are a
+comma-separated list. Cross-setting warnings identify inactive discovery and
+disabled digest destinations. Save does not rewrite a file when nothing changed.
+
+The DHCP server section includes **a — Approved DHCP servers**, with Add,
+Edit, Remove, Observed, Reset, and Back actions. Observed opens a read-only
+inventory: select a server, review its identifier/interface and explicitly
+confirm approval. Its `server_ip` is option 54, not necessarily the source or
+relay IP. VLAN interfaces such as `eth0.20` have separate approval scope.
+Approving a DHCP role does not trust a device. An unavailable inventory never
+prevents manual entry.
+
+Storage edits change paths only: existing databases are not migrated, moved,
+or deleted. Retention periods are currently fixed in code and change-notification
+settings are not implemented; neither is offered as a setting. Schema-unknown
+keys are rejected by the existing configuration model, so files containing them
+are left untouched rather than silently dropping their data. Supported settings
+and unrelated raw values are preserved when editing valid files.
+
+The unified editor refuses to save through a configuration symlink; rerun with
+its intended target path. It warns before replacing comments/formatting or
+restricting file permissions. A running monitor must be restarted with the same
+`--config` path to load saved application/channel settings. No restart or
+schedule installation happens automatically. After saving changed enabled
+channels, it offers an optional test for each destination, defaulting to no.
+
+`lanfence channels setup slack` still goes directly to the channel wizard,
+prompting for its real config
 fields (existing values shown as defaults where it's safe to display them),
 a one-line pointer to where to obtain each setting, local validation (URL
 scheme/hostname, port range, E.164 phone numbers, email syntax, timeouts,

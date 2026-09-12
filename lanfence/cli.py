@@ -2167,6 +2167,9 @@ def _channels_load_or_exit(config: Optional[Path]):
     except ConfigFileError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(code=2) from exc
+    except OSError as exc:
+        typer.secho(f"error: cannot read {path}; check permissions and the --config path.", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
 
 
 def _channels_new_file_notice(path: Path, existed: bool, explicit_config: Optional[Path]) -> None:
@@ -2321,6 +2324,7 @@ def _run_channel_wizard(channel: str, path: Path, loaded, *, explicit_config: Op
                     f"destination={status.summary}"
                 )
 
+        typer.echo("Saving rewrites YAML formatting/comments and restricts the file to owner-only permissions (0600).")
         if not typer.confirm("\nSave this configuration?", default=True):
             typer.echo("cancelled - no changes saved.")
             return
@@ -2364,9 +2368,9 @@ def channels_setup(
     channel: Optional[str] = typer.Argument(None, help="Channel to configure directly, e.g. slack."),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
-    """Interactively configure one channel at a time.
+    """Set up communications and application settings interactively.
 
-    With no argument, shows every channel's status and lets you choose one;
+    With no argument, opens unified setup with a shared unsaved draft;
     `lanfence channels setup slack` goes straight to that channel's wizard.
     Needs an interactive terminal - use `lanfence channels enable`/`disable`
     (and hand-edit the config for field values) for scripted/noninteractive
@@ -2388,8 +2392,14 @@ def channels_setup(
         raise typer.Exit(code=2)
 
     path, loaded = _channels_load_or_exit(config)
+    path = path.absolute()
+    loaded.path = path
 
     try:
+        if channel is None:
+            from lanfence.setup_ui import run_setup
+            run_setup(path, loaded, config)
+            return
         while True:
             if channel is None:
                 render_channels_table(list_channel_statuses(loaded.cfg))
