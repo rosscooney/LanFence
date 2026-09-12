@@ -571,6 +571,189 @@ def test_monitor_dhcp_server_detection_warns_when_no_approvals(tmp_path: Path, m
     assert "every DHCP server observed will be treated as unexpected" in result.output
 
 
+# --- monitor: live dashboard / --live / --no-live --------------------------
+
+
+def test_monitor_no_live_flag_forces_append_only_output(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--no-live", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "LAN Fence" in result.output  # the existing plain startup banner is preserved
+    assert "monitoring (Ctrl+C to stop)" in result.output
+
+
+def test_monitor_default_is_append_only_when_not_a_tty(config_path: Path, monkeypatch):
+    """CliRunner's captured stdout is never a real terminal - default
+    (no --live/--no-live given) must behave like --no-live, not hang or
+    attempt to open an alternate screen."""
+
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "monitoring (Ctrl+C to stop)" in result.output
+
+
+def test_monitor_explicit_live_on_non_tty_falls_back_with_clear_message(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--live", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "not an interactive terminal" in result.output.lower()
+    # having fallen back, the plain banner still appears - never a half-live, corrupted attempt
+    assert "monitoring (Ctrl+C to stop)" in result.output
+
+
+def test_monitor_shutdown_summary_uses_real_counters(tmp_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "scan": {"resolve_hostnames": False, "passive": False, "scan_interval_seconds": 0.001},
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_active_scan(*, subnet, interface=None, timeout=3.0):
+        return [scanner_module.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=_now())]
+
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", fake_active_scan)
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan_v6", lambda *, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    result = runner.invoke(app, ["monitor", "--no-live", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Monitoring stopped after" in result.output
+    assert "Seen this session: 1 devices" in result.output
+    assert "Newly discovered: 1" in result.output
+    assert "Findings: 1" in result.output
+
+
+def test_monitor_shutdown_summary_findings_count_matches_non_live_printed_findings(tmp_path: Path, monkeypatch):
+    """A regression check for the finding counter being wired into
+    MonitorStats regardless of live/non-live rendering path."""
+
+    from lanfence import scanner as scanner_module
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "scan": {"resolve_hostnames": False, "passive": False, "scan_interval_seconds": 0.001},
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_active_scan(*, subnet, interface=None, timeout=3.0):
+        return [
+            scanner_module.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=_now()),
+            scanner_module.ArpSighting(mac="11:22:33:44:55:66", ip="10.0.0.6", seen_at=_now()),
+        ]
+
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", fake_active_scan)
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan_v6", lambda *, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    result = runner.invoke(app, ["monitor", "--no-live", "--config", str(config_path)])
+    printed_finding_lines = result.output.count("] Unknown device connected")
+    assert printed_finding_lines == 2
+    assert "Findings: 2" in result.output
+
+
+def test_monitor_live_mode_never_prints_findings_via_old_console_renderer(tmp_path: Path, monkeypatch):
+    """In live mode, a finding must reach the activity log, never also (or
+    instead) the old bracketed `typer.secho` renderer - avoiding a
+    duplicate/console-corrupting print during an active alternate screen."""
+
+    from lanfence import scanner as scanner_module
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "scan": {"resolve_hostnames": False, "passive": False, "scan_interval_seconds": 0.001},
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_active_scan(*, subnet, interface=None, timeout=3.0):
+        return [scanner_module.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=_now())]
+
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", fake_active_scan)
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan_v6", lambda *, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr("lanfence.cli.monitor_ui.should_use_live", lambda explicit, console: (True, None))
+
+    captured_activity = {}
+    from lanfence import monitor_ui as monitor_ui_module
+
+    original_display_init = monitor_ui_module.MonitorDisplay.__init__
+
+    def capturing_init(self, header, activity_log, **kwargs):
+        captured_activity["log"] = activity_log
+        kwargs["console"] = monitor_ui_module.make_console()
+        original_display_init(self, header, activity_log, **kwargs)
+
+    monkeypatch.setattr("lanfence.cli.monitor_ui.MonitorDisplay.__init__", capturing_init)
+
+    result = runner.invoke(app, ["monitor", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "] Unknown device connected" not in result.output
+    entries = captured_activity["log"].snapshot()
+    assert any("NEW" in e.label for e in entries)
+
+
+def test_monitor_review_count_matches_is_review_needed(tmp_path: Path, monkeypatch):
+    from lanfence.db import DeviceStore
+
+    config_path = tmp_path / "config.yaml"
+    db_path = tmp_path / "lanfence.db"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(db_path),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "scan": {"passive": False},
+        }),
+        encoding="utf-8",
+    )
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+        store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=_now())
+        store.set_investigating("11:22:33:44:55:66", notes="", updated_at=_now())
+
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan_v6", lambda *, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.monitor_ui.should_use_live", lambda explicit, console: (True, None))
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    captured = {}
+    from lanfence import monitor_ui as monitor_ui_module
+    original_update = monitor_ui_module.MonitorDisplay.update
+
+    def capturing_update(self, stats, log, **kwargs):
+        captured["stats"] = stats
+        return original_update(self, stats, log, **kwargs)
+
+    monkeypatch.setattr("lanfence.cli.monitor_ui.MonitorDisplay.update", capturing_update)
+
+    result = runner.invoke(app, ["monitor", "--config", str(config_path)])
+    assert result.exit_code == 0
+    # aa:bb:... is untrusted+pending (needs review); 11:22:... is investigating (excluded).
+    assert captured["stats"].review == 1
+    assert captured["stats"].known == 2
+
+
 # --- dhcp-servers --------------------------------------------------------
 
 
@@ -1715,7 +1898,7 @@ def test_monitor_picks_up_trust_change_without_restart(tmp_path: Path, monkeypat
 
     findings_seen: list[list] = []
 
-    def fake_emit_findings(findings, *, alert, cfg, store):
+    def fake_emit_findings(findings, *, alert, cfg, store, **_kwargs):
         findings_seen.append(list(findings))
 
     monkeypatch.setattr("lanfence.cli._emit_findings", fake_emit_findings)

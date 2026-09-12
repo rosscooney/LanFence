@@ -92,6 +92,20 @@ def test_all_devices_and_online_devices(tmp_path: Path):
         assert online[0].mac == "aa:bb:cc:dd:ee:ff"
 
 
+def test_device_counts_matches_all_devices_and_online_devices(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        assert store.device_counts() == (0, 0)
+
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="1.1.1.1", hostname=None, vendor=None, seen_at=t0)
+        store.observe(mac="11:22:33:44:55:66", ip="2.2.2.2", hostname=None, vendor=None, seen_at=t0)
+        store.mark_offline(still_online_macs={"aa:bb:cc:dd:ee:ff"}, as_of=t0)
+
+        known, online = store.device_counts()
+        assert known == len(store.all_devices()) == 2
+        assert online == len(store.online_devices()) == 1
+
+
 def test_vendor_is_preserved_when_later_observation_has_none(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()

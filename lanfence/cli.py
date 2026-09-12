@@ -24,7 +24,7 @@ from typing import Optional
 
 import typer
 
-from lanfence import __version__, alerts, discovery, scanner
+from lanfence import __version__, alerts, discovery, monitor_ui, scanner
 from lanfence.allowlist import Allowlist
 from lanfence.channels import (
     CHANNEL_FIELDS,
@@ -385,18 +385,91 @@ def scan(
 app.command(name="run")(scan)
 
 
-def _emit_findings(findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore) -> None:
-    colour = {"high": "red", "medium": "yellow", "info": "cyan"}
-    for finding in findings:
-        subject = finding.mac or finding.subject_id or "[no device]"
-        typer.secho(
-            f"[{finding.severity.upper()}] {finding.title} (mac={subject})",
-            fg=colour.get(finding.severity, "white"), bold=(finding.severity == "high"),
-        )
-        if finding.rationale:
-            typer.echo(f"    {finding.rationale}")
-        if finding.recommendation:
-            typer.secho(f"    Recommendation: {finding.recommendation}", fg="cyan")
+def _finding_identity(finding: Finding) -> str:
+    """Best available identity for a compact activity line - prefers an
+    allowlist name already baked into the finding's title (see
+    ``engine.build_findings``'s ``"...connected: {label}"``/``"...
+    reappeared: {label}"`` titles for a trusted device), then a hostname
+    from its evidence lines, then the MAC/subject id."""
+
+    if "allowlisted" in finding.title.lower() and ":" in finding.title:
+        return finding.title.split(":", 1)[1].strip()
+    for ev in finding.evidence:
+        if ev.startswith("Hostname: ") and not ev.endswith("[unknown]"):
+            return ev.removeprefix("Hostname: ")
+    return finding.mac or finding.subject_id or "[no device]"
+
+
+def _finding_ip(finding: Finding) -> Optional[str]:
+    for ev in finding.evidence:
+        if ev.startswith("IP: ") and not ev.endswith("[unknown]"):
+            return ev.removeprefix("IP: ")
+    return None
+
+
+def _finding_activity_label(finding: Finding) -> str:
+    if finding.kind == "availability":
+        base = "AVAILABILITY"
+    elif finding.kind == "network_service":
+        base = "NETWORK"
+    elif "connected" in finding.title.lower():
+        base = "NEW"
+    elif "reappeared" in finding.title.lower():
+        base = "RETURNED"
+    else:
+        base = "FINDING"
+    if finding.severity != "info":
+        base = f"{base} ({finding.severity})"
+    return base
+
+
+def _finding_activity_entry(finding: Finding) -> "monitor_ui.ActivityEntry":
+    identity = _finding_identity(finding)
+    ip = _finding_ip(finding)
+    detail = f"{identity} · {ip}" if ip else identity
+    level: "monitor_ui.ActivityLevel" = "info" if finding.severity == "info" else "finding"
+    return monitor_ui.ActivityEntry(
+        timestamp=monitor_ui.local_now(), level=level, label=_finding_activity_label(finding), detail=detail,
+    )
+
+
+def _emit_findings(
+    findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore,
+    activity: "monitor_ui.ActivityLog | None" = None, stats: "monitor_ui.MonitorStats | None" = None,
+) -> None:
+    """Report ``findings`` to the operator, then dispatch alerts as usual.
+
+    ``activity`` is given only by `lanfence monitor` in live mode - when
+    present, each finding becomes one activity-log line instead of a
+    `typer.secho` call, so the same finding is never shown twice (once
+    live, once via the old console renderer). ``stats`` (also given only
+    by `monitor`, live or not - its session summary needs an accurate
+    count either way) has its finding counter incremented regardless of
+    which rendering path was used. Every other caller (`scan`/`run`) leaves
+    both ``None`` and gets the exact console output this function has
+    always produced.
+    """
+
+    if stats is not None:
+        for _finding in findings:
+            stats.record_finding()
+
+    if activity is not None:
+        for finding in findings:
+            activity.add(_finding_activity_entry(finding))
+    else:
+        colour = {"high": "red", "medium": "yellow", "info": "cyan"}
+        for finding in findings:
+            subject = finding.mac or finding.subject_id or "[no device]"
+            typer.secho(
+                f"[{finding.severity.upper()}] {finding.title} (mac={subject})",
+                fg=colour.get(finding.severity, "white"), bold=(finding.severity == "high"),
+            )
+            if finding.rationale:
+                typer.echo(f"    {finding.rationale}")
+            if finding.recommendation:
+                typer.secho(f"    Recommendation: {finding.recommendation}", fg="cyan")
+
     if alert and findings:
         not_snoozed = filter_snoozed(findings, store, now=utcnow())
         to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
@@ -428,6 +501,11 @@ def monitor(
     ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
     alert: bool = typer.Option(True, "--alert/--no-alert", help="Dispatch alerts for findings as they occur."),
+    live: Optional[bool] = typer.Option(
+        None, "--live/--no-live",
+        help="Live bordered dashboard vs. plain append-only output. Default: auto-detect an "
+        "interactive terminal.",
+    ),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True),
 ) -> None:
     """Continuously watch for new/changed devices until interrupted (Ctrl+C)."""
@@ -458,35 +536,80 @@ def monitor(
     net = subnet or cfg.scan.subnet
     apply_self_trust(allowlist, interface=iface)
 
-    typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
     dhcp_active = cfg.scan.passive and cfg.scan.dhcp_snooping
     dhcp_server_active = dhcp_server_detection_active(cfg)
     mdns_active = cfg.scan.passive and cfg.discovery.mdns
     ssdp_active = cfg.scan.passive and cfg.discovery.ssdp
-    typer.echo(
-        f"interface: {iface or '(auto)'}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
-        f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}   dhcp: {dhcp_active}   "
-        f"dhcp-server-detection: {dhcp_server_active}   mdns: {mdns_active}   ssdp: {ssdp_active}"
+
+    console = monitor_ui.make_console()
+    use_live, fallback_reason = monitor_ui.should_use_live(live, console)
+    if fallback_reason:
+        typer.secho(f"note: {fallback_reason}", fg="yellow", err=True)
+
+    header = monitor_ui.HeaderInfo(
+        version=__version__, interface=iface or "(auto)", network=net or "(auto)",
+        scan_interval_seconds=cfg.scan.scan_interval_seconds, passive=cfg.scan.passive,
+        ipv6=cfg.scan.ipv6, dhcp=dhcp_active, mdns=mdns_active, ssdp=ssdp_active,
+        dhcp_server_detection=dhcp_server_active,
     )
+    stats = monitor_ui.MonitorStats(
+        scan_interval_seconds=cfg.scan.scan_interval_seconds, passive_enabled=cfg.scan.passive,
+        now_monotonic=time.monotonic(),
+    )
+    activity_log = monitor_ui.ActivityLog() if use_live else None
+
+    def _report_warning(text: str) -> None:
+        if activity_log is not None:
+            activity_log.add(monitor_ui.ActivityEntry(
+                timestamp=monitor_ui.local_now(), level="warning", label="WARNING", detail=text,
+            ))
+        else:
+            typer.secho(f"warning: {text}", fg="yellow", err=True)
+
+    def _report_error(text: str, *, label: str = "ERROR") -> None:
+        if activity_log is not None:
+            activity_log.add(monitor_ui.ActivityEntry(
+                timestamp=monitor_ui.local_now(), level="error", label=label, detail=text,
+            ))
+        else:
+            typer.secho(f"error: {text}", fg="red", err=True)
+
+    def _report_lifecycle(label: str, *, mac: str, hostname: str | None, ip: str | None) -> None:
+        # Purely informational lines with no corresponding Finding
+        # (disconnects never produce one; an intermittent-presence device's
+        # "reappeared" finding is deliberately suppressed - see
+        # `engine.build_findings`) - shown only in the live activity feed,
+        # never in append-only mode, to leave its existing output
+        # (unchanged by this feature) exactly as it was.
+        if activity_log is None:
+            return
+        identity = hostname or mac
+        detail = f"{identity} · {ip}" if ip else identity
+        activity_log.add(monitor_ui.ActivityEntry(timestamp=monitor_ui.local_now(), level="info", label=label, detail=detail))
+
+    if not use_live:
+        typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
+        typer.echo(
+            f"interface: {iface or '(auto)'}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
+            f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}   dhcp: {dhcp_active}   "
+            f"dhcp-server-detection: {dhcp_server_active}   mdns: {mdns_active}   ssdp: {ssdp_active}"
+        )
     if cfg.dhcp_servers.enabled and not dhcp_server_active:
-        typer.secho(
-            "warning: dhcp_servers.enabled is true, but passive DHCP capture is off "
+        _report_warning(
+            "dhcp_servers.enabled is true, but passive DHCP capture is off "
             "(scan.passive/scan.dhcp_snooping) - no unexpected-DHCP-server findings will be "
-            "produced until it is. This is not silently \"protected\" in the meantime.",
-            fg="yellow", err=True,
+            "produced until it is. This is not silently \"protected\" in the meantime."
         )
     if dhcp_server_active and not cfg.dhcp_servers.approved:
-        typer.secho(
-            "warning: dhcp_servers.enabled is true with no dhcp_servers.approved entries - "
-            "every DHCP server observed will be treated as unexpected.",
-            fg="yellow",
+        _report_warning(
+            "dhcp_servers.enabled is true with no dhcp_servers.approved entries - "
+            "every DHCP server observed will be treated as unexpected."
         )
     if (cfg.discovery.mdns or cfg.discovery.ssdp) and not cfg.scan.passive:
-        typer.secho(
-            "warning: discovery.mdns/ssdp is enabled, but passive monitoring (scan.passive) is off - "
+        _report_warning(
+            "discovery.mdns/ssdp is enabled, but passive monitoring (scan.passive) is off - "
             "no service advertisements will be parsed until it is. This combination is enabled but "
-            "inactive, not silently \"working anyway\".",
-            fg="yellow", err=True,
+            "inactive, not silently \"working anyway\"."
         )
 
     stop_event = threading.Event()
@@ -494,6 +617,7 @@ def monitor(
     dhcp_server_queue: "queue.Queue[scanner.DhcpServerSighting]" = queue.Queue()
     mdns_queue: "queue.Queue[list]" = queue.Queue()
     ssdp_queue: "queue.Queue[object]" = queue.Queue()
+    passive_error_queue: "queue.Queue[str]" = queue.Queue()
 
     def _run_passive() -> None:
         try:
@@ -506,15 +630,28 @@ def monitor(
                 on_ssdp=ssdp_queue.put if cfg.discovery.ssdp else None,
             )
         except scanner.ScannerUnavailable as exc:
-            typer.secho(f"passive monitoring unavailable: {exc}", fg="yellow", err=True)
+            # Reported via a queue (like every other cross-thread message
+            # here), drained on the main loop's own thread below - never
+            # printed directly from this background thread, which would
+            # otherwise be unsafe alongside a live alternate-screen display.
+            passive_error_queue.put(str(exc))
 
     passive_thread: threading.Thread | None = None
     if cfg.scan.passive:
         passive_thread = threading.Thread(target=_run_passive, daemon=True)
         passive_thread.start()
 
-    try:
+    def _refresh_inventory_counts() -> None:
+        known, online = store.device_counts()
+        review = sum(1 for d in build_inventory(store, allowlist) if is_review_needed(d, now=utcnow()))
+        stats.set_inventory_counts(known=known, online=online, review=review)
+
+    def _loop() -> None:
+        nonlocal net
         last_sweep = 0.0
+        last_stats_refresh = 0.0
+        if use_live:
+            _refresh_inventory_counts()
         while True:
             now = time.monotonic()
 
@@ -533,13 +670,18 @@ def monitor(
                 except queue.Empty:
                     break
                 drained += 1
-                _, _event_type, findings = process_sighting(
+                device, event_type, findings = process_sighting(
                     mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
                     store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
                     hostname_hint=sighting.hostname, interface=iface, subnet=net,
                     source=sighting.source,
                 )
-                _emit_findings(findings, alert=alert, cfg=cfg, store=store)
+                stats.record_event(device.mac, event_type)
+                if event_type == "disconnected":
+                    _report_lifecycle("DISCONNECTED", mac=device.mac, hostname=device.hostname, ip=device.ip)
+                elif event_type == "reappeared" and not findings:
+                    _report_lifecycle("RETURNED", mac=device.mac, hostname=device.hostname, ip=device.ip)
+                _emit_findings(findings, alert=alert, cfg=cfg, store=store, activity=activity_log, stats=stats)
 
             # DHCP server observations are processed the same way, from
             # their own queue - kept separate from `passive_queue` since a
@@ -556,7 +698,7 @@ def monitor(
                 drained_dhcp_servers += 1
                 finding = process_dhcp_server_sighting(server_sighting, store, cfg)
                 if finding is not None:
-                    _emit_findings([finding], alert=alert, cfg=cfg, store=store)
+                    _emit_findings([finding], alert=alert, cfg=cfg, store=store, activity=activity_log, stats=stats)
 
             # Advertised-service evidence, same bounded-drain shape as
             # above - a burst of mDNS/SSDP traffic must never starve device
@@ -583,6 +725,14 @@ def monitor(
                 drained_ssdp += 1
                 discovery.process_ssdp_sighting(ssdp_sighting, store)
 
+            try:
+                passive_err = passive_error_queue.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                stats.mark_passive_failed()
+                _report_error(passive_err, label="PASSIVE")
+
             if now - last_sweep >= cfg.scan.scan_interval_seconds:
                 # Reload on the same cadence as active sweeps, so a `lanfence
                 # allow` / `review --trust` made while this monitor is
@@ -590,10 +740,15 @@ def monitor(
                 # state itself needs no such reload, since it's read fresh
                 # from the database on every finding via filter_snoozed.
                 try:
-                    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-                    apply_self_trust(allowlist, interface=iface)
+                    allowlist_reloaded = Allowlist.load(cfg.resolved_allowlist_file())
+                    apply_self_trust(allowlist_reloaded, interface=iface)
+                    allowlist.entries[:] = allowlist_reloaded.entries
+                    allowlist.path = allowlist_reloaded.path
                 except Exception as exc:  # noqa: BLE001 - a bad edit must not crash monitoring
-                    typer.secho(f"warning: could not reload allowlist: {exc}", fg="yellow", err=True)
+                    _report_warning(f"could not reload allowlist: {exc}")
+                stats.record_sweep_start(now)
+                if use_live:
+                    display.update(stats, activity_log, now_monotonic=time.monotonic())
                 result = run_active_sweep(cfg, store, allowlist, signatures, interface=iface, subnet=net)
                 # Keep using the just-resolved subnet for passive sightings
                 # drained between now and the next sweep, so their coverage
@@ -601,13 +756,47 @@ def monitor(
                 # sweep actually covered rather than staying unresolved.
                 net = result.subnet or net
                 last_sweep = now
+                stats.record_sweep_end(ok=not result.errors, now_monotonic=time.monotonic())
+                event_type_by_mac = {e.mac: e.event_type for e in result.events}
+                for swept_device in result.devices:
+                    stats.record_event(swept_device.mac, event_type_by_mac.get(swept_device.mac))
+                for event in result.events:
+                    if event.event_type == "disconnected":
+                        _report_lifecycle("DISCONNECTED", mac=event.mac, hostname=event.hostname, ip=event.ip)
                 for err in result.errors:
-                    typer.secho(f"error: {err}", fg="red", err=True)
-                _emit_findings(result.findings, alert=alert, cfg=cfg, store=store)
+                    _report_error(err, label="SCAN")
+                _emit_findings(result.findings, alert=alert, cfg=cfg, store=store, activity=activity_log, stats=stats)
+                if use_live:
+                    _refresh_inventory_counts()
+                    last_stats_refresh = now
+
+            if use_live and now - last_stats_refresh >= 5.0:
+                _refresh_inventory_counts()
+                last_stats_refresh = now
+
+            if use_live:
+                display.update(stats, activity_log, now_monotonic=time.monotonic())
 
             time.sleep(1.0)
+
+    if use_live:
+        display = monitor_ui.MonitorDisplay(
+            header, activity_log, passive_enabled=cfg.scan.passive, console=console,
+        )
+    try:
+        if use_live:
+            with display:
+                _loop()
+        else:
+            _loop()
     except KeyboardInterrupt:
         typer.echo("\nstopping monitor...")
+        elapsed = monitor_ui.format_duration(time.monotonic() - stats.session_start_monotonic)
+        typer.echo(
+            f"Monitoring stopped after {elapsed}.\n"
+            f"Seen this session: {len(stats.seen)} devices · "
+            f"Newly discovered: {len(stats.new_macs)} · Findings: {stats.findings_count}"
+        )
     finally:
         stop_event.set()
         store.close()

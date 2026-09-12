@@ -214,6 +214,81 @@ Findings (1)
 Overall: 1 finding(s), highest severity: medium
 ```
 
+## Monitor's live dashboard
+
+`lanfence monitor` shows a bordered, continuously-updating dashboard by
+default when run at an interactive terminal - a compact header, a scrolling
+feed of recent activity, and a statistics footer that's always visible:
+
+```text
+┌─ LAN Fence · Monitoring ───────────────────────────────────────────┐
+│ Interface: eth0  ·  Network: 192.168.1.0/24  ·  Running: 00:14:32  │
+│ lanfence 0.3.10  ·  passive (ipv6, dhcp)  ·  last sweep 10:41:58   │
+│                                                                    │
+│ 10:42:03  NEW         Unknown device · 192.168.1.42                │
+│ 10:42:10  RETURNED    Office laptop · 192.168.1.10                 │
+│ 10:44:01  WARNING     scan.passive is on but discovery.mdns is...  │
+│                                                                    │
+├────────────────────────────────────────────────────────────────────┤
+│ Known: 38 · Seen: 24 · Online: 21 · New: 2 · Review: 3 · Scan: 8s  │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+```text
+lanfence monitor            # live dashboard if the terminal supports it, plain output otherwise
+lanfence monitor --live     # force the live dashboard (fails helpfully, not silently, if unsupported)
+lanfence monitor --no-live  # force plain, append-only output (e.g. when redirecting to a log file)
+```
+
+**Header**: interface, network scope, elapsed session time, LAN Fence's
+version, which discovery mechanisms are active (from actual config, not
+guessed), and the last completed sweep time (or "scanning now" while one is
+in progress). **Activity feed**: new/reappeared/disconnected devices and
+findings, most recent first - a device that also produced a security
+finding gets one combined line, not two, and a routine "still online"
+sighting never adds a line at all. Every timestamp is your system's local
+time. A repeated identical operational error (e.g. a failing sweep) is
+shown once with a growing count rather than flooding the feed.
+
+**Footer statistics** (a device is identified the same way everywhere else
+in LAN Fence - see [Device inventory and review](#device-inventory-and-review)):
+
+- **Known**: distinct devices in the database right now.
+- **Seen**: distinct devices this `monitor` process has *itself* positively
+  observed this session (active or passive, deduplicated across every
+  address/mechanism) - retained even if a device later goes offline. A
+  reported DHCP-offered address or an mDNS/SSDP service target is never
+  counted here; only a direct sighting is.
+- **Online**: currently recorded online, respecting the configured offline
+  grace period - this is *recorded state*, not a live reachability check.
+- **New**: devices this session's positive observations inserted into the
+  database for the first time - a previously-known device reappearing is
+  never counted as new.
+- **Review**: the same needs-review count `lanfence devices --review-needed`
+  uses (trust/snooze/investigation rules included).
+- **Scan**: time until the next scheduled active sweep, or "scanning" while
+  one is running - computed from the real scheduler, never a separate UI
+  timer. A wide enough terminal also shows this session's finding count,
+  sweep success/failure counts, and passive-listener status. An unavailable
+  statistic is always shown as such (e.g. "n/a"), never as a fabricated 0.
+
+Refreshes about once a second and never triggers a scan on its own. On a
+narrow terminal, labels shorten and lower-priority statistics drop off
+(Known/Seen/Online/New are kept longest); a terminal too small for any
+usable layout falls back to one compact line rather than a garbled one.
+`--live` on output that isn't a real interactive terminal (a pipe, a
+redirected log file, `TERM=dumb`) falls back to plain output with one clear
+message rather than emitting raw control sequences into a file; the default
+(no `--live`/`--no-live`) auto-detects this the same way. Plain/append-only
+mode's output is unchanged from previous versions. On Ctrl+C, the dashboard
+exits cleanly (restoring your normal terminal) before printing a short
+session summary with real counters:
+
+```text
+Monitoring stopped after 00:42:18.
+Seen this session: 24 devices · Newly discovered: 2 · Findings: 3
+```
+
 ## Device inventory and review
 
 `scan`/`monitor` find devices; `devices`, `device`, and `review` let you work

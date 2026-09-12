@@ -416,6 +416,19 @@ class DeviceStore:
     def online_devices(self) -> list[Device]:
         return [d for d in self.all_devices() if d.status == "online"]
 
+    def device_counts(self) -> tuple[int, int]:
+        """``(known, online)`` - a single aggregate query, never loading
+        full device rows. Used by `lanfence monitor`'s live status footer,
+        which needs these on a refresh cadence without the cost of
+        ``all_devices()``/``online_devices()`` growing with inventory size.
+        """
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS known, SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online "
+            "FROM devices"
+        ).fetchone()
+        return int(row["known"] or 0), int(row["online"] or 0)
+
     def record_event(self, event: DeviceEvent) -> None:
         self._conn.execute(
             "INSERT INTO events (mac, event_type, timestamp, ip, hostname) VALUES (?, ?, ?, ?, ?)",

@@ -17,6 +17,31 @@ Each release is also published to
 
 ### Added
 
+- **Live bordered dashboard for `lanfence monitor`.** A continuously-
+  updating terminal display (Rich `Live`, alternate screen) with a compact
+  header (interface, network, elapsed time, active discovery mechanisms,
+  last sweep), a scrolling recent-activity feed, and an always-visible
+  statistics footer (`Known`/`Seen`/`Online`/`New`/`Review`/`Scan`
+  countdown, plus finding/sweep/passive-listener status at wider
+  terminals). `Seen`/`New` are exact session counters derived from real
+  scanning results (deduplicated across active/passive sources and
+  addresses, never inferred or double-counted from indirect evidence like
+  a DHCP-offered address or an mDNS service target); `Known`/`Online`/
+  `Review` come from efficient aggregate database queries refreshed after
+  each sweep and on a periodic cadence, not a per-frame full scan. A
+  finding is shown once (in the activity feed, not also via the old
+  console renderer); repeated identical operational errors are coalesced
+  with a count. Small terminals shorten labels and drop optional
+  statistics, falling back to a minimal one-line display below a usable
+  size; presentation state and rendering are unit-tested independently of
+  any terminal or network. `--live`/`--no-live` control it explicitly
+  (default: auto-detect an interactive terminal); an explicit `--live` on
+  unsupported output (a pipe, a log file, `TERM=dumb`) falls back to plain
+  append-only output with one clear message instead of emitting raw
+  control sequences. Ctrl+C exits the alternate screen cleanly before
+  printing a short session summary with real counters. Plain/append-only
+  mode's existing output is unchanged.
+
 - **`lanfence channels` - interactive communication-channel setup.**
   Configure Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog without
   hand-editing YAML: `lanfence channels` shows a status table (enabled/
