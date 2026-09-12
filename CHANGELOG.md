@@ -13,14 +13,7 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
-## [Unreleased]
-
-### Fixed
-
-- Commit passive service-discovery retention cleanup together with each
-  observation. Previously cleanup left an open SQLite write transaction,
-  allowing an idle monitor to block reset or another monitor with
-  `database is locked`, even when cleanup removed no rows.
+## [0.3.11] - 2026-09-12
 
 ### Added
 
@@ -69,6 +62,13 @@ Each release is also published to
   config path (`~/.config/lanfence/config.yaml`) when `--config` isn't
   given, since no other command has a default writable config file to
   reuse - `monitor` needs a restart to pick up a change made this way.
+
+### Fixed
+
+- Commit passive service-discovery retention cleanup together with each
+  observation. Previously cleanup left an open SQLite write transaction,
+  allowing an idle monitor to block reset or another monitor with
+  `database is locked`, even when cleanup removed no rows.
 
 ## [0.3.10] - 2026-09-12
 
