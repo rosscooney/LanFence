@@ -44,8 +44,32 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: How a piece of address/name evidence was obtained. Carried through
+#: explicitly from the observation pipeline rather than inferred later -
+#: see :class:`lanfence.scanner.ArpSighting.source` and
+#: :func:`lanfence.engine.process_sighting`.
+AddressSource = Literal["arp", "ipv6_nd", "dhcp_ack", "legacy_snapshot"]
+NameSource = Literal["dhcp_option_12", "reverse_dns", "legacy_snapshot"]
+
+#: "observed" - LAN Fence itself saw this address in use (ARP/ND, or a name
+#: it resolved/received directly). "lease_reported" - a DHCP server's ACK
+#: *claims* this client was assigned this address; real evidence, but never
+#: alone proof the client is actually using or reachable at it.
+AddressAssociationKind = Literal["observed", "lease_reported"]
+
+
 class Device(BaseModel):
-    """The current known state of one device, keyed by MAC address."""
+    """The current known state of one device, keyed by MAC address.
+
+    ``ip``/``hostname`` are **preferred values** computed from retained
+    evidence (see :class:`AddressEvidence`/:class:`NameEvidence` and
+    :func:`lanfence.db.DeviceStore.preferred_address`/``preferred_name``),
+    not simply "whatever was observed most recently" - directly-observed
+    address evidence outranks a DHCP-reported lease or imported legacy data
+    regardless of recency, and a DHCP-reported name outranks reverse-DNS.
+    They are a convenience, not a claim that other retained evidence is
+    invalid - see ``lanfence device <mac>`` for the full evidence list.
+    """
 
     mac: str
     ip: str | None = None
@@ -159,6 +183,77 @@ class DeviceEvent(BaseModel):
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None
+
+
+class AddressEvidence(BaseModel):
+    """One retained (mac, ip, interface, source) address observation - not
+    a lease interval. ``first_seen``/``last_seen`` summarize when this
+    *specific* evidence row was first and most recently observed; they do
+    not claim the address was continuously assigned throughout that span,
+    and an old, stale-looking entry does not mean the address was released
+    - only that nothing has re-confirmed it recently. See
+    :meth:`lanfence.db.DeviceStore.address_evidence_for`.
+    """
+
+    mac: str
+    ip: str
+    family: Literal["ipv4", "ipv6"]
+    #: The interface this was observed/reported on. ``""`` (never ``None`` -
+    #: deliberately, so this participates correctly in uniqueness/dedup
+    #: rather than SQL's NULL-never-equals-NULL behavior silently defeating
+    #: it) means "not recorded" (e.g. very old legacy data).
+    interface: str = ""
+    source: AddressSource
+    kind: AddressAssociationKind
+    first_seen: datetime
+    last_seen: datetime
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+    @field_validator("interface")
+    @classmethod
+    def _clean_interface(cls, value: str) -> str:
+        return clean_text(value, max_len=64) or ""
+
+
+class NameEvidence(BaseModel):
+    """One retained (mac, name_key, source, ip, interface) name observation.
+
+    ``name`` is the sanitized display text (original case preserved);
+    ``name_key`` is the normalized comparison key (lowercase, trailing DNS
+    root dot stripped) used only for equivalence checks - "printer" and
+    "printer.local" are deliberately *not* treated as the same name just
+    because one is a prefix of the other. ``ip`` is the address this name
+    is evidence *for* (the queried address, for reverse DNS) - ``""`` when
+    not applicable. See :meth:`lanfence.db.DeviceStore.name_evidence_for`.
+    """
+
+    mac: str
+    name: str
+    name_key: str
+    source: NameSource
+    ip: str = ""
+    interface: str = ""
+    first_seen: datetime
+    last_seen: datetime
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+    @field_validator("name")
+    @classmethod
+    def _clean_name(cls, value: str) -> str:
+        return clean_text(value, max_len=256)
+
+    @field_validator("interface")
+    @classmethod
+    def _clean_interface(cls, value: str) -> str:
+        return clean_text(value, max_len=64) or ""
 
 
 class Finding(BaseModel):

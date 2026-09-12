@@ -816,6 +816,10 @@ def test_device_json_output(config_path: Path):
     assert payload["device"]["mac"] == "aa:bb:cc:dd:ee:ff"
     assert "timeline" in payload
     assert "since" in payload
+    assert "addresses" in payload
+    assert "names" in payload
+    assert payload["addresses"][0]["ip"] == "10.0.0.5"
+    assert payload["addresses"][0]["source"] == "arp"
 
 
 def test_device_invalid_mac(config_path: Path):

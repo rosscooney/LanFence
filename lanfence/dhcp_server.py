@@ -38,6 +38,7 @@ from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.logging_config import get_logger
 from lanfence.models import DhcpServerRecord, Finding
+from lanfence.netutil import normalize_mac
 from lanfence.scanner import DhcpServerSighting
 
 log = get_logger("dhcp_server")
@@ -81,6 +82,25 @@ def process_dhcp_server_sighting(
         observed_at=sighting.observed_at, source_ip=sighting.source_ip, source_mac=sighting.source_mac,
         relay_ip=sighting.relay_ip, router=sighting.router, dns=sighting.dns,
     )
+
+    # A confirmed lease (ACK) is real address evidence for the *client* -
+    # identified correctly via chaddr (client_mac_evidence), never the
+    # relay/source MAC - independent of whether the server itself is
+    # approved. Recorded as "lease_reported": a server's claim, not proof
+    # the client is actually using or reachable at that address (see
+    # DeviceStore.observe's docstring). This never touches the client's
+    # presence/reachability tracking - only address evidence.
+    if sighting.message_type == "ack" and sighting.offered_ip and sighting.client_mac_evidence:
+        try:
+            client_mac = normalize_mac(sighting.client_mac_evidence)
+        except ValueError:
+            client_mac = None
+        if client_mac is not None:
+            store.record_address_evidence(
+                client_mac, sighting.offered_ip, interface=interface,
+                source="dhcp_ack", kind="lease_reported", seen_at=sighting.observed_at,
+            )
+            store.refresh_preferred_fields(client_mac)
 
     if not cfg.dhcp_servers.enabled:
         return None

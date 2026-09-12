@@ -285,6 +285,70 @@ from another terminal takes effect without restarting it; review/snooze
 state itself is read fresh from the database on every finding, so it needs
 no such reload.
 
+## Address and name history
+
+Older versions of LAN Fence only ever showed a device's *latest* IP and
+hostname. Every address and name a device has ever presented is now
+retained as durable evidence, each entry tagged with **where it came
+from**, **when** it was first and most recently observed, and **which
+interface** it was seen on:
+
+```text
+$ lanfence device aa:bb:cc:dd:ee:ff
+
+...
+Addresses (2 retained)
+  10.0.0.5
+    Source: ARP · Interface: eth0
+    First observed: 2026-01-01T09:00:00+00:00   Last observed: 2026-01-05T08:00:00+00:00
+  fe80::1234
+    Source: IPv6 ND · Interface: eth0
+    First observed: 2026-01-02T10:00:00+00:00   Last observed: 2026-01-02T10:00:00+00:00
+
+Names (2 retained)
+  office-laptop
+    Source: DHCP option 12
+    First observed: 2026-01-01T09:00:00+00:00   Last observed: 2026-01-05T08:00:00+00:00
+  office-laptop.lan
+    Source: reverse DNS for 10.0.0.5
+    First observed: 2026-01-03T09:00:00+00:00   Last observed: 2026-01-03T09:00:00+00:00
+```
+
+The plain `IP:`/`Hostname:` fields in "Current details" (and `Device.ip`/
+`Device.hostname` in JSON, everywhere a device is returned) are **preferred
+values** computed from this evidence, not simply "whichever was written
+last": a directly-observed address (ARP or IPv6 neighbor discovery) always
+outranks a DHCP-reported lease, which outranks data imported from an
+older database, regardless of which is more recent - only *within* the
+same tier does recency decide. Names work the same way: a DHCP-reported
+name (option 12) always outranks a reverse-DNS name. A failed reverse-DNS
+lookup never erases a name already on file. This is a convenience for a
+quick glance, not a claim that other retained addresses/names are wrong or
+gone - see the full evidence list for that.
+
+A dual-stack device correctly retains **both** its IPv4 and IPv6 addresses
+- they are never collapsed to "whichever was seen last" the way earlier
+versions' one-value-per-device model forced. A DHCP client merely
+*requesting* or being *offered* an address is deliberately **not** treated
+as evidence the device is using it (only a server's confirmed lease - an
+ACK - or LAN Fence directly observing the address via ARP/ND counts); it
+still counts as the device being alive on the network, just not as proof
+of that specific address.
+
+**History, not lease tracking**: first/last-observed timestamps summarize
+when a specific piece of evidence was seen, not a continuous assignment
+interval - an old-looking entry does not mean that address was released,
+only that nothing has re-confirmed it recently, and LAN Fence never
+invents a "device moved networks" or "address changed" narrative from
+this alone.
+
+**Upgrading an existing database**: a device's pre-existing `ip`/
+`hostname` are imported once as `legacy_snapshot` evidence (lowest
+preference tier, since its original source is no longer known) the first
+time the database is opened after upgrading - timestamped as of that
+import, not backdated to the device's original first-seen time, and never
+re-imported on a later restart.
+
 ## Starting over
 
 ```text

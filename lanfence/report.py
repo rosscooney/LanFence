@@ -7,7 +7,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from lanfence.models import Device, DeviceEvent, Digest, DigestSection, Finding, ScanResult
+from lanfence.models import (
+    AddressEvidence,
+    Device,
+    DeviceEvent,
+    Digest,
+    DigestSection,
+    Finding,
+    NameEvidence,
+    ScanResult,
+)
 
 try:  # rich ships with typer, but keep rendering optional
     from rich.console import Console
@@ -301,12 +310,60 @@ def render_device_inventory(
     return text
 
 
+_ADDRESS_SOURCE_LABELS = {
+    "arp": "ARP", "ipv6_nd": "IPv6 ND", "dhcp_ack": "DHCP (lease)", "legacy_snapshot": "legacy",
+}
+_NAME_SOURCE_LABELS = {
+    "dhcp_option_12": "DHCP option 12", "reverse_dns": "reverse DNS", "legacy_snapshot": "legacy",
+}
+
+
+def _address_evidence_lines(addresses: list[AddressEvidence]) -> list[str]:
+    lines = [f"Addresses ({len(addresses)} retained):"]
+    if not addresses:
+        lines.append("  (none)")
+    for a in addresses:
+        label = _ADDRESS_SOURCE_LABELS.get(a.source, a.source)
+        lines.append(f"  {a.ip}")
+        iface = f"  Interface: {a.interface}" if a.interface else ""
+        lines.append(f"    Source: {label}{iface}")
+        if a.kind == "lease_reported":
+            lines.append("    (DHCP-server-reported lease - not itself proof of use)")
+        lines.append(f"    First observed: {a.first_seen.isoformat(timespec='seconds')}")
+        lines.append(f"    Last observed:  {a.last_seen.isoformat(timespec='seconds')}")
+    return lines
+
+
+def _name_evidence_lines(names: list[NameEvidence]) -> list[str]:
+    lines = [f"Names ({len(names)} retained):"]
+    if not names:
+        lines.append("  (none)")
+    for n in names:
+        label = _NAME_SOURCE_LABELS.get(n.source, n.source)
+        if n.source == "reverse_dns" and n.ip:
+            label = f"{label} for {n.ip}"
+        lines.append(f"  {n.name}")
+        lines.append(f"    Source: {label}")
+        lines.append(f"    First observed: {n.first_seen.isoformat(timespec='seconds')}")
+        lines.append(f"    Last observed:  {n.last_seen.isoformat(timespec='seconds')}")
+    return lines
+
+
 def render_device_detail(
     device: Device, events: list[DeviceEvent], since: datetime, *, now: datetime, plain: bool = False,
     default_offline_after_seconds: float | None = None,
+    addresses: list[AddressEvidence] | None = None, names: list[NameEvidence] | None = None,
 ) -> str:
-    """Render ``lanfence device <mac>`` - current details, then the separate,
-    necessarily-incomplete lifecycle timeline (see :meth:`DeviceStore.events_for`)."""
+    """Render ``lanfence device <mac>`` - current (preferred) details, all
+    retained address/name evidence, then the separate, necessarily-
+    incomplete lifecycle timeline (see :meth:`DeviceStore.events_for`).
+
+    ``addresses``/``names`` are retained evidence *summaries* (first/last
+    observed), not a complete history of continuous assignment - an older
+    entry does not mean that address/name was released or replaced, only
+    that nothing has re-confirmed it recently. Omit either (``None``) to
+    skip that section entirely (e.g. a caller that hasn't fetched it).
+    """
 
     trust = f"trusted ({device.allowlist_name})" if device.allowlisted else "untrusted"
     lines = [
@@ -342,6 +399,14 @@ def render_device_detail(
             f"  {event.timestamp.isoformat(timespec='seconds')}  {event.event_type:<12}  "
             f"{event.ip or '-':<15}  {event.hostname or '[unknown]'}"
         )
+
+    if addresses is not None or names is not None:
+        lines.append("")
+        if addresses is not None:
+            lines.extend(_address_evidence_lines(addresses))
+        if names is not None:
+            lines.append("")
+            lines.extend(_name_evidence_lines(names))
 
     text = "\n".join(lines)
     if plain or not _RICH:
@@ -392,6 +457,37 @@ def render_device_detail(
         console.print(table)
     else:
         console.print("[dim](no events in this window)[/dim]")
+
+    if addresses is not None:
+        console.print(f"\n[bold]Addresses[/bold] ({len(addresses)} retained)")
+        if not addresses:
+            console.print("[dim](none)[/dim]")
+        for a in addresses:
+            label = _ADDRESS_SOURCE_LABELS.get(a.source, a.source)
+            iface = f" · Interface: {_rich_escape(a.interface)}" if a.interface else ""
+            lease_note = " [dim](DHCP-reported lease - not itself proof of use)[/dim]" if a.kind == "lease_reported" else ""
+            console.print(f"  [bold]{_rich_escape(a.ip)}[/bold]")
+            console.print(f"    Source: {label}{iface}{lease_note}")
+            console.print(
+                f"    First observed: {a.first_seen.isoformat(timespec='seconds')}   "
+                f"Last observed: {a.last_seen.isoformat(timespec='seconds')}"
+            )
+
+    if names is not None:
+        console.print(f"\n[bold]Names[/bold] ({len(names)} retained)")
+        if not names:
+            console.print("[dim](none)[/dim]")
+        for n in names:
+            label = _NAME_SOURCE_LABELS.get(n.source, n.source)
+            if n.source == "reverse_dns" and n.ip:
+                label = f"{label} for {n.ip}"
+            console.print(f"  [bold]{_rich_escape(n.name)}[/bold]")
+            console.print(f"    Source: {label}")
+            console.print(
+                f"    First observed: {n.first_seen.isoformat(timespec='seconds')}   "
+                f"Last observed: {n.last_seen.isoformat(timespec='seconds')}"
+            )
+
     return text
 
 

@@ -163,6 +163,7 @@ def process_sighting(
     hostname_hint: str | None = None,
     interface: str | None = None,
     subnet: str | None = None,
+    source: str = "arp",
 ) -> tuple[Device, EventType | None, list[Finding]]:
     """Fold one MAC/IP sighting into the database and return what changed.
 
@@ -170,11 +171,21 @@ def process_sighting(
     as-is instead of doing a reverse-DNS lookup: a device telling the network
     its own name moments ago is at least as trustworthy as a PTR record (both
     are equally spoofable), and skips a DNS round-trip. ``None`` (every ARP/
-    NDP sighting) falls back to reverse-DNS exactly as before.
+    NDP sighting) falls back to reverse-DNS exactly as before. Either way,
+    the resulting name (if any) is recorded as durable evidence tagged with
+    which of the two produced it (``dhcp_option_12``/``reverse_dns``) - a
+    failed lookup (``hostname`` stays ``None``) records nothing, never
+    erasing name evidence already on file.
 
     ``interface``/``subnet`` are passed straight through to
     :meth:`lanfence.db.DeviceStore.observe` as discovery provenance for the
-    offline-grace-period feature - see its docstring.
+    offline-grace-period feature - see its docstring. ``source`` (see
+    :data:`lanfence.scanner.SightingSource`) is likewise threaded through as
+    address-evidence provenance - only ``"arp"``/``"ipv6_nd"`` (directly
+    observed) are ever recorded as address evidence; a mere DHCP client
+    request/offer (``"dhcp_client"``) still updates presence/coverage above
+    but is deliberately never trusted as evidence of the address itself
+    (see ``DeviceStore.observe``'s docstring).
 
     An always-on device reappearing after an absence that already triggered
     an availability (absence) finding gets exactly one additional info-
@@ -183,12 +194,15 @@ def process_sighting(
     """
 
     hostname = hostname_hint
+    hostname_source = "dhcp_option_12" if hostname_hint else None
     if not hostname and cfg.scan.resolve_hostnames:
         hostname = scanner.resolve_hostname(ip, timeout=cfg.scan.dns_timeout_seconds)
+        if hostname:
+            hostname_source = "reverse_dns"
     vendor, matches = fingerprint_device(mac, hostname, signatures=signatures, vendor_file=cfg.vendor_file)
     device, event_type = store.observe(
         mac=mac, ip=ip, hostname=hostname, vendor=vendor, seen_at=seen_at,
-        interface=interface, subnet=subnet,
+        interface=interface, subnet=subnet, source=source, hostname_source=hostname_source,
     )
 
     allow_entry = allowlist.match(mac)
@@ -332,26 +346,41 @@ def run_active_sweep(
         except scanner.ScannerUnavailable as exc:
             errors.append(str(exc))
 
-    latest = scanner.dedupe_latest(sightings)
-    devices: list[Device] = []
+    # Every sighting is processed - not deduped down to one per MAC first.
+    # A dual-stack device (or one seen via more than one mechanism in the
+    # same sweep) must have *all* of its addresses reach evidence storage
+    # (see DeviceStore.record_address_evidence), not just whichever sighting
+    # happened to be "latest". This does not risk duplicate lifecycle
+    # events/findings: observe() only ever reports a real transition
+    # (new_device/reappeared) on the *first* call for a MAC that's actually
+    # offline/unknown - a second call for the same MAC, moments later in
+    # the same sweep, always finds it already online and reports a routine
+    # (event_type=None) refresh instead.
+    devices_by_mac: dict[str, Device] = {}
     events: list[DeviceEvent] = []
     findings: list[Finding] = []
     still_online: set[str] = set()
 
-    for mac, sighting in latest.items():
+    for sighting in sightings:
+        try:
+            mac = normalize_mac(sighting.mac)
+        except ValueError:
+            continue
         device, event_type, dev_findings = process_sighting(
             mac=mac, ip=sighting.ip, seen_at=sighting.seen_at,
             store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
-            interface=iface, subnet=net,
+            interface=iface, subnet=net, source=sighting.source,
         )
         still_online.add(mac)
-        devices.append(device)
+        devices_by_mac[mac] = device
         if event_type is not None:
             events.append(
                 DeviceEvent(mac=mac, event_type=event_type, timestamp=sighting.seen_at,
                             ip=sighting.ip, hostname=device.hostname)
             )
         findings.extend(dev_findings)
+
+    devices = list(devices_by_mac.values())
 
     if ipv4_covered or ipv6_covered:
         as_of = utcnow()

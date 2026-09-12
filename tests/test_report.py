@@ -207,6 +207,48 @@ def test_render_device_detail_shows_presence_line_plain():
     assert "180s" in text
 
 
+def test_render_device_detail_shows_address_and_name_evidence_plain():
+    from lanfence.models import AddressEvidence, NameEvidence
+
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    addresses = [
+        AddressEvidence(mac=device.mac, ip="10.0.0.5", family="ipv4", interface="eth0",
+                        source="arp", kind="observed", first_seen=now, last_seen=now),
+        AddressEvidence(mac=device.mac, ip="fe80::1", family="ipv6", interface="eth0",
+                        source="ipv6_nd", kind="observed", first_seen=now, last_seen=now),
+    ]
+    names = [
+        NameEvidence(mac=device.mac, name="office-laptop", name_key="office-laptop",
+                    source="dhcp_option_12", first_seen=now, last_seen=now),
+    ]
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True,
+                                addresses=addresses, names=names)
+    assert "10.0.0.5" in text
+    assert "fe80::1" in text
+    assert "ARP" in text
+    assert "IPv6 ND" in text
+    assert "office-laptop" in text
+    assert "DHCP option 12" in text
+
+
+def test_render_device_detail_omits_evidence_sections_when_not_given():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Addresses" not in text
+    assert "Names (" not in text
+
+
+def test_render_device_detail_empty_evidence_says_none():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True,
+                                addresses=[], names=[])
+    assert "Addresses (0 retained)" in text
+    assert "Names (0 retained)" in text
+
+
 # --- render_digest -------------------------------------------------------
 
 

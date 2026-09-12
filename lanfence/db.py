@@ -18,7 +18,14 @@ Trust itself is *not* stored here - it lives in the YAML allowlist (see
 around a still-untrusted device. ``device_presence`` tracks per-device
 presence policy (see :data:`lanfence.models.PresencePolicyName`).
 ``dhcp_servers``/``dhcp_server_findings`` track observed DHCP servers and
-unexpected-server findings - see :mod:`lanfence.dhcp_server`.
+unexpected-server findings - see :mod:`lanfence.dhcp_server``.
+``device_addresses``/``device_names`` retain *all* observed address/name
+evidence for a MAC, each row keyed by (mac, ip/name_key, interface, source)
+so a real dual-stack or multi-source observation is never overwritten by
+another - see :class:`lanfence.models.AddressEvidence`/``NameEvidence`` and
+:meth:`DeviceStore.preferred_address`/``preferred_name`` for how
+``devices.ip``/``devices.hostname`` are computed from this evidence rather
+than simply "whatever was written last".
 
 ``devices``' ``missed_scans``/``seen_via_ipv4``/``seen_via_ipv6``/
 ``last_interface``/``ipv4_subnet`` columns are provenance for
@@ -38,10 +45,12 @@ from pathlib import Path
 
 from lanfence.models import (
     SEVERITIES,
+    AddressEvidence,
     Device,
     DeviceEvent,
     DhcpServerRecord,
     EventType,
+    NameEvidence,
     PresenceState,
     ReviewState,
     Severity,
@@ -129,6 +138,34 @@ CREATE TABLE IF NOT EXISTS dhcp_server_findings (
 
 CREATE INDEX IF NOT EXISTS idx_dhcp_server_findings_scope
     ON dhcp_server_findings (interface, server_id);
+
+CREATE TABLE IF NOT EXISTS device_addresses (
+    mac TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    family TEXT NOT NULL,
+    interface TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (mac, ip, interface, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_addresses_mac ON device_addresses (mac);
+
+CREATE TABLE IF NOT EXISTS device_names (
+    mac TEXT NOT NULL,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    ip TEXT NOT NULL DEFAULT '',
+    interface TEXT NOT NULL DEFAULT '',
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (mac, name_key, source, ip, interface)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_names_mac ON device_names (mac);
 """
 
 
@@ -138,6 +175,38 @@ def _iso(dt: datetime) -> str:
 
 def _parse_dt(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def _is_usable_address(ip: str) -> bool:
+    """Whether ``ip`` is worth recording as address evidence at all - never
+    an unspecified address (``0.0.0.0``/``::``, e.g. a DAD probe or a
+    not-yet-bound client), a multicast address, or IPv4's limited broadcast
+    address. These are never a usable *device* address, regardless of which
+    protocol produced the sighting."""
+
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if parsed.is_unspecified or parsed.is_multicast:
+        return False
+    if isinstance(parsed, ipaddress.IPv4Address) and str(parsed) == "255.255.255.255":
+        return False
+    return True
+
+
+def _normalize_name_key(name: str) -> str:
+    """The comparison key for a display name: lowercase, with exactly one
+    trailing DNS root dot stripped (``"Printer.local."`` and
+    ``"printer.local"`` are the same key; ``"printer"`` and
+    ``"printer.local"`` are deliberately *not* - a short name is never
+    treated as equivalent to a fully-qualified one just because it's a
+    prefix)."""
+
+    key = name.strip().lower()
+    if key.endswith(".") and len(key) > 1:
+        key = key[:-1]
+    return key
 
 
 #: Columns added after the initial release of each table, applied to an
@@ -206,6 +275,7 @@ class DeviceStore:
         for table, columns in _MIGRATED_COLUMNS.items():
             _ensure_columns(self._conn, table, columns)
         self._conn.commit()
+        self._migrate_legacy_address_and_name_evidence()
 
     def close(self) -> None:
         self._conn.close()
@@ -462,6 +532,252 @@ class DeviceStore:
             availability_alerted=alerted, updated_at=updated_at,
         )
 
+    #: Priority tiers for computing a *preferred* address/name from retained
+    #: evidence (lower wins) - see :meth:`refresh_preferred_fields`. A
+    #: source missing here (shouldn't happen) sorts last.
+    _ADDRESS_SOURCE_PRIORITY = {"arp": 0, "ipv6_nd": 0, "dhcp_ack": 1, "legacy_snapshot": 2}
+    _NAME_SOURCE_PRIORITY = {"dhcp_option_12": 0, "reverse_dns": 1, "legacy_snapshot": 2}
+
+    def record_address_evidence(
+        self, mac: str, ip: str, *, interface: str, source: str, kind: str, seen_at: datetime,
+    ) -> None:
+        """Record one (mac, ip, interface, source) address observation,
+        coalescing repeats into the same row (updating ``last_seen``, and
+        widening ``first_seen`` backwards for a late-arriving older
+        observation - never the other way for either bound) rather than
+        inserting one row per packet. Silently does nothing for an address
+        that's never usable device-address evidence (see
+        :func:`_is_usable_address`) or that fails to parse. Does *not* by
+        itself update ``devices.ip`` - see :meth:`refresh_preferred_fields`.
+        """
+
+        if not _is_usable_address(ip):
+            return
+        mac = normalize_mac(mac)
+        try:
+            family = "ipv4" if ipaddress.ip_address(ip).version == 4 else "ipv6"
+        except ValueError:
+            return
+        interface = interface or ""
+
+        existing = self._conn.execute(
+            "SELECT first_seen, last_seen FROM device_addresses "
+            "WHERE mac = ? AND ip = ? AND interface = ? AND source = ?",
+            (mac, ip, interface, source),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO device_addresses (mac, ip, family, interface, source, kind, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (mac, ip, family, interface, source, kind, _iso(seen_at), _iso(seen_at)),
+            )
+        else:
+            new_first = min(_parse_dt(existing["first_seen"]), seen_at)
+            new_last = max(_parse_dt(existing["last_seen"]), seen_at)
+            self._conn.execute(
+                "UPDATE device_addresses SET first_seen = ?, last_seen = ? "
+                "WHERE mac = ? AND ip = ? AND interface = ? AND source = ?",
+                (_iso(new_first), _iso(new_last), mac, ip, interface, source),
+            )
+        self._conn.commit()
+
+    def record_name_evidence(
+        self, mac: str, name: str, *, source: str, ip: str = "", interface: str = "", seen_at: datetime,
+    ) -> None:
+        """Record one (mac, name_key, source, ip, interface) name
+        observation, coalescing repeats the same way as
+        :meth:`record_address_evidence`. A falsy/whitespace-only ``name`` is
+        silently skipped - a failed lookup must never erase or overwrite
+        previously recorded name evidence, and this is how a caller
+        expresses "nothing new to report" (simply don't call this)."""
+
+        name = (name or "").strip()
+        if not name:
+            return
+        mac = normalize_mac(mac)
+        name_key = _normalize_name_key(name)
+        ip = ip or ""
+        interface = interface or ""
+
+        existing = self._conn.execute(
+            "SELECT first_seen, last_seen FROM device_names "
+            "WHERE mac = ? AND name_key = ? AND source = ? AND ip = ? AND interface = ?",
+            (mac, name_key, source, ip, interface),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO device_names (mac, name, name_key, source, ip, interface, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (mac, name, name_key, source, ip, interface, _iso(seen_at), _iso(seen_at)),
+            )
+        else:
+            new_first = min(_parse_dt(existing["first_seen"]), seen_at)
+            new_last = max(_parse_dt(existing["last_seen"]), seen_at)
+            self._conn.execute(
+                "UPDATE device_names SET name = ?, first_seen = ?, last_seen = ? "
+                "WHERE mac = ? AND name_key = ? AND source = ? AND ip = ? AND interface = ?",
+                (name, _iso(new_first), _iso(new_last), mac, name_key, source, ip, interface),
+            )
+        self._conn.commit()
+
+    def address_evidence_for(self, mac: str) -> list[AddressEvidence]:
+        """Every retained address observation for ``mac``, most recently
+        seen first. A pure database read."""
+
+        mac = normalize_mac(mac)
+        rows = self._conn.execute(
+            "SELECT * FROM device_addresses WHERE mac = ? ORDER BY last_seen DESC", (mac,)
+        ).fetchall()
+        return [
+            AddressEvidence(
+                mac=mac, ip=row["ip"], family=row["family"], interface=row["interface"],
+                source=row["source"], kind=row["kind"],
+                first_seen=_parse_dt(row["first_seen"]), last_seen=_parse_dt(row["last_seen"]),
+            )
+            for row in rows
+        ]
+
+    def name_evidence_for(self, mac: str) -> list[NameEvidence]:
+        """Every retained name observation for ``mac``, most recently seen
+        first. A pure database read."""
+
+        mac = normalize_mac(mac)
+        rows = self._conn.execute(
+            "SELECT * FROM device_names WHERE mac = ? ORDER BY last_seen DESC", (mac,)
+        ).fetchall()
+        return [
+            NameEvidence(
+                mac=mac, name=row["name"], name_key=row["name_key"], source=row["source"],
+                ip=row["ip"], interface=row["interface"],
+                first_seen=_parse_dt(row["first_seen"]), last_seen=_parse_dt(row["last_seen"]),
+            )
+            for row in rows
+        ]
+
+    def preferred_address(self, mac: str) -> str | None:
+        """The single best address for ``mac`` from retained evidence:
+        directly-observed (arp/ipv6_nd) outranks a DHCP-reported lease,
+        which outranks imported legacy data, regardless of recency: only
+        *within* the same tier does the most recently observed win, and a
+        further tie (identical timestamps) breaks on the IP string itself
+        for a fully deterministic result. ``None`` if there is no evidence
+        at all for this MAC yet."""
+
+        mac = normalize_mac(mac)
+        rows = self._conn.execute(
+            "SELECT ip, source, last_seen FROM device_addresses WHERE mac = ?", (mac,)
+        ).fetchall()
+        if not rows:
+            return None
+        best = min(
+            rows,
+            key=lambda r: (
+                self._ADDRESS_SOURCE_PRIORITY.get(r["source"], 99),
+                -_parse_dt(r["last_seen"]).timestamp(),
+                r["ip"],
+            ),
+        )
+        return best["ip"]
+
+    def preferred_name(self, mac: str) -> str | None:
+        """The single best display name for ``mac`` from retained evidence:
+        a nonempty DHCP-reported name outranks reverse DNS, which outranks
+        imported legacy data; within a tier, most recent wins, with the
+        name text itself as the final deterministic tie-breaker. ``None``
+        if there is no name evidence at all for this MAC yet - a failed
+        lookup never gets here, since :meth:`record_name_evidence` was
+        never called for it in the first place."""
+
+        mac = normalize_mac(mac)
+        rows = self._conn.execute(
+            "SELECT name, source, last_seen FROM device_names WHERE mac = ?", (mac,)
+        ).fetchall()
+        if not rows:
+            return None
+        best = min(
+            rows,
+            key=lambda r: (
+                self._NAME_SOURCE_PRIORITY.get(r["source"], 99),
+                -_parse_dt(r["last_seen"]).timestamp(),
+                r["name"],
+            ),
+        )
+        return best["name"]
+
+    def refresh_preferred_fields(self, mac: str) -> None:
+        """Recompute ``devices.ip``/``devices.hostname`` as the preferred
+        value across all retained evidence (see :meth:`preferred_address`/
+        ``preferred_name``) and write them through onto the ``devices`` row,
+        so ordinary reads (``get_device``/``all_devices``) don't need to
+        join evidence tables to show the correct value. When there is no
+        evidence at all yet for this MAC, leaves the existing column value
+        alone (``COALESCE``) rather than blanking it - this only matters for
+        a MAC observed exclusively through an address-evidence-*excluded*
+        path (e.g. only ever a bare DHCP client request - see ``observe``'s
+        ``source`` parameter), where showing that best-effort raw value is
+        more useful than showing nothing.
+        """
+
+        mac = normalize_mac(mac)
+        preferred_ip = self.preferred_address(mac)
+        preferred_name = self.preferred_name(mac)
+        self._conn.execute(
+            "UPDATE devices SET ip = COALESCE(?, ip), hostname = COALESCE(?, hostname) WHERE mac = ?",
+            (preferred_ip, preferred_name, mac),
+        )
+        self._conn.commit()
+
+    def _migrate_legacy_address_and_name_evidence(self) -> None:
+        """One-time (per MAC), idempotent import of pre-existing
+        ``devices.ip``/``devices.hostname`` values as ``legacy_snapshot``
+        evidence, for any device that predates this feature.
+
+        Guarded by "this MAC has no address/name evidence rows at all yet"
+        rather than a separate migration-done flag - naturally idempotent
+        (a MAC gains evidence the moment it's imported, or the moment a
+        real observation arrives, so it's never reconsidered) and needs no
+        extra schema. Uses *now* (the moment this snapshot was captured),
+        not the device's own ``first_seen``, as both first_seen/last_seen
+        for the imported evidence - it was not actually first observed at
+        that IP/hostname back when the device itself first appeared, only
+        confirmed to have it as of this migration.
+        """
+
+        now_dt = datetime.now(timezone.utc)
+        now = _iso(now_dt)
+
+        rows_missing_addresses = self._conn.execute(
+            "SELECT mac, ip FROM devices WHERE ip IS NOT NULL AND ip != '' "
+            "AND mac NOT IN (SELECT DISTINCT mac FROM device_addresses)"
+        ).fetchall()
+        for row in rows_missing_addresses:
+            if not _is_usable_address(row["ip"]):
+                continue
+            try:
+                family = "ipv4" if ipaddress.ip_address(row["ip"]).version == 4 else "ipv6"
+            except ValueError:
+                continue
+            self._conn.execute(
+                "INSERT INTO device_addresses (mac, ip, family, interface, source, kind, first_seen, last_seen) "
+                "VALUES (?, ?, ?, '', 'legacy_snapshot', 'observed', ?, ?)",
+                (row["mac"], row["ip"], family, now, now),
+            )
+
+        rows_missing_names = self._conn.execute(
+            "SELECT mac, hostname FROM devices WHERE hostname IS NOT NULL AND hostname != '' "
+            "AND mac NOT IN (SELECT DISTINCT mac FROM device_names)"
+        ).fetchall()
+        for row in rows_missing_names:
+            name = row["hostname"].strip()
+            if not name:
+                continue
+            self._conn.execute(
+                "INSERT INTO device_names (mac, name, name_key, source, ip, interface, first_seen, last_seen) "
+                "VALUES (?, ?, ?, 'legacy_snapshot', '', '', ?, ?)",
+                (row["mac"], name, _normalize_name_key(name), now, now),
+            )
+        self._conn.commit()
+
     def observe(
         self,
         *,
@@ -472,6 +788,8 @@ class DeviceStore:
         seen_at: datetime,
         interface: str | None = None,
         subnet: str | None = None,
+        source: str = "arp",
+        hostname_source: str | None = "reverse_dns",
     ) -> tuple[Device, EventType | None]:
         """Record that ``mac`` was seen alive at ``seen_at``.
 
@@ -490,6 +808,22 @@ class DeviceStore:
         the device isn't absent: it always resets the missed-sweep count to
         zero and widens known coverage. It only ever guards against moving
         ``last_seen``/``ip``/``hostname`` *backwards* in time.
+
+        ``source``/``hostname_source`` (see :data:`lanfence.models.AddressSource`/
+        ``NameSource``) additionally record durable address/name *evidence*
+        (:meth:`record_address_evidence`/``record_name_evidence``) and
+        recompute ``ip``/``hostname`` as the preferred value across all
+        retained evidence (see :meth:`refresh_preferred_fields`) - a
+        directly-observed address (``source="arp"``/``"ipv6_nd"``, the
+        default) always wins over a merely-requested/offered one, so a
+        caller with only a DHCP client request/offer to report (not yet a
+        confirmed lease) should pass ``source="dhcp_client"``, which is
+        deliberately *not* one of the address-evidence sources - the
+        sighting still updates presence/coverage above, it just isn't
+        trusted as address evidence. ``hostname_source=None`` records no
+        name evidence for this call (the raw ``hostname`` value is still
+        used for other purposes below) - contrast with omitting a hostname
+        entirely (``hostname=None``), which is simply nothing to record.
 
         Returns the updated :class:`Device` and, if this observation is a
         lifecycle transition, the corresponding event type (``new_device`` the
@@ -548,6 +882,16 @@ class DeviceStore:
                 ),
             )
         self._conn.commit()
+
+        if ip and source in ("arp", "ipv6_nd"):
+            self.record_address_evidence(
+                mac, ip, interface=interface or "", source=source, kind="observed", seen_at=seen_at,
+            )
+        if hostname and hostname_source:
+            self.record_name_evidence(
+                mac, hostname, source=hostname_source, ip=ip or "", interface=interface or "", seen_at=seen_at,
+            )
+        self.refresh_preferred_fields(mac)
 
         device = self.get_device(mac)
         assert device is not None
@@ -749,11 +1093,11 @@ class DeviceStore:
 
     def reset_all(self) -> None:
         """Permanently delete every device, its lifecycle events, alert-
-        dispatch cooldowns, review/snooze state, presence policy, and
-        observed DHCP servers/findings - a full wipe back to an empty
-        database. Used by ``lanfence reset``. Cannot be undone; trust (the
-        allowlist) and DHCP server *approval* (config) are separate and
-        untouched by this call."""
+        dispatch cooldowns, review/snooze state, presence policy, observed
+        DHCP servers/findings, and retained address/name evidence - a full
+        wipe back to an empty database. Used by ``lanfence reset``. Cannot
+        be undone; trust (the allowlist) and DHCP server *approval*
+        (config) are separate and untouched by this call."""
 
         self._conn.execute("DELETE FROM devices")
         self._conn.execute("DELETE FROM events")
@@ -762,6 +1106,8 @@ class DeviceStore:
         self._conn.execute("DELETE FROM device_presence")
         self._conn.execute("DELETE FROM dhcp_servers")
         self._conn.execute("DELETE FROM dhcp_server_findings")
+        self._conn.execute("DELETE FROM device_addresses")
+        self._conn.execute("DELETE FROM device_names")
         self._conn.commit()
 
     # --- DHCP server observations -------------------------------------

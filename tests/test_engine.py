@@ -384,6 +384,31 @@ def test_run_active_sweep_merges_ipv4_and_ipv6_sightings(tmp_path: Path):
     assert result.errors == []
 
 
+def test_run_active_sweep_same_mac_dual_stack_retains_both_addresses_one_event(tmp_path: Path):
+    """The core address/name-provenance requirement: multiple addresses for
+    one MAC in the same sweep must all reach evidence storage, without
+    creating duplicate new_device/reappeared events or findings."""
+
+    v4 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now(), source="arp")
+    v6 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="fe80::1", seen_at=_now(), source="ipv6_nd")
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[v4]), \
+         patch.object(scanner, "active_scan_v6", return_value=[v6]):
+        store = DeviceStore(tmp_path / "db.sqlite")
+        result = run_active_sweep(
+            Config(), store, Allowlist.load(None), SignatureSet.load(),
+            interface="eth0", subnet="192.168.1.0/24",
+        )
+        evidence = store.address_evidence_for("aa:bb:cc:dd:ee:ff")
+        store.close()
+
+    assert {e.ip for e in evidence} == {"192.168.1.5", "fe80::1"}
+    assert len(result.events) == 1  # exactly one new_device event, not two
+    assert result.events[0].event_type == "new_device"
+    assert len(result.findings) == 1  # exactly one finding, not two
+
+
 def test_run_active_sweep_skips_ipv6_when_disabled(tmp_path: Path):
     cfg = Config()
     cfg.scan.ipv6 = False

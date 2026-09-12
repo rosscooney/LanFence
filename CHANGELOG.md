@@ -15,6 +15,30 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- **Multiple device addresses and historical names, with provenance.**
+  LAN Fence now retains every address and name a device has presented,
+  not just the latest - each tagged with its source (`arp`, `ipv6_nd`,
+  `dhcp_ack`, or `legacy_snapshot` for pre-upgrade data; names additionally
+  `dhcp_option_12`/`reverse_dns`), the interface it was seen on, and when
+  it was first/most recently observed. `Device.ip`/`Device.hostname` (and
+  `lanfence devices`/`device`) now show a **preferred value** computed from
+  this evidence - directly-observed addresses always outrank a DHCP-
+  reported lease or imported legacy data regardless of recency, and a
+  DHCP-reported name always outranks reverse-DNS - rather than simply
+  whatever was written most recently. A dual-stack device correctly
+  retains both its IPv4 and IPv6 addresses (previously, sighting it via
+  both mechanisms in the same sweep silently discarded one). A DHCP
+  client's own request/offer is deliberately never trusted as address
+  evidence (only a confirmed server ACK, or a direct ARP/ND observation,
+  is) - it still counts as the device being alive on the network. `lanfence
+  device <MAC>` shows the full retained history in new Addresses/Names
+  sections (and `--format json` in new `addresses`/`names` arrays); an
+  existing database's `ip`/`hostname` are imported once as
+  `legacy_snapshot` evidence, timestamped as of the import (not backdated),
+  the first time it's opened after upgrading.
+
 ## [0.3.9] - 2026-09-12
 
 ### Added

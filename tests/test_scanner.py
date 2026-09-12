@@ -164,6 +164,21 @@ def test_active_scan_v6_parses_replies(monkeypatch):
     assert len(sightings) == 1
     assert sightings[0].mac == "aa:bb:cc:dd:ee:ff"
     assert sightings[0].ip == "fe80::1"
+    assert sightings[0].source == "ipv6_nd"
+
+
+def test_active_scan_tags_source_as_arp(monkeypatch):
+    import scapy.all as scapy_module
+
+    received = scapy_module.ARP(hwsrc="aa:bb:cc:dd:ee:ff", psrc="10.0.0.5")
+
+    def fake_srp(pkt, **kwargs):
+        return [(pkt, received)], []
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    sightings = scanner.active_scan(subnet="10.0.0.0/24", interface="eth0", timeout=1)
+    assert len(sightings) == 1
+    assert sightings[0].source == "arp"
 
 
 def test_passive_sniff_uses_combined_arp_and_icmp6_filter(monkeypatch):
@@ -222,6 +237,7 @@ def test_passive_sniff_dispatches_arp_and_ndp_sightings(monkeypatch):
         ("aa:bb:cc:dd:ee:ff", "10.0.0.5"),
         ("11:22:33:44:55:66", "fe80::1"),
     ]
+    assert [s.source for s in sightings] == ["arp", "ipv6_nd"]
 
 
 def _dhcp_packet(*, chaddr_mac="aa:bb:cc:dd:ee:ff", options):
@@ -262,6 +278,7 @@ def test_passive_sniff_dispatches_dhcp_hostname_sighting(monkeypatch):
     assert sightings[0].mac == "aa:bb:cc:dd:ee:ff"
     assert sightings[0].ip == "192.168.1.77"
     assert sightings[0].hostname == "Georges-iPhone"
+    assert sightings[0].source == "dhcp_client"
 
 
 def test_passive_sniff_decodes_bytes_hostname_option(monkeypatch):

@@ -62,6 +62,17 @@ def _looks_like_permission_error(exc: BaseException) -> bool:
     return "permission denied" in str(exc).lower()
 
 
+#: Where an :class:`ArpSighting` came from - carried through explicitly
+#: rather than inferred later, since the discovery pipeline used to discard
+#: it. ``"dhcp_client"`` (a DHCPDISCOVER/REQUEST) is deliberately distinct
+#: from ``"dhcp_ack"`` (the confirmed lease, from a *server* reply - see
+#: :class:`DhcpServerSighting`) - a client asking for or being offered an
+#: address is not proof it's using that address (see
+#: :mod:`lanfence.engine`'s address-evidence handling), even though the
+#: sighting is still perfectly good evidence the MAC is alive on the network.
+SightingSource = str  # "arp" | "ipv6_nd" | "dhcp_client"
+
+
 @dataclass(frozen=True)
 class ArpSighting:
     """One MAC/IP pairing observed on the wire, from any discovery mechanism
@@ -73,6 +84,10 @@ class ArpSighting:
     #: Self-reported hostname (DHCP option 12), when the sighting came from a
     #: DHCP packet. ``None`` for ARP/NDP sightings, which carry no hostname.
     hostname: str | None = None
+    #: See :data:`SightingSource`. Defaults to ``"arp"`` for source
+    #: compatibility with any caller constructing one without this field;
+    #: every real construction site in this module sets it explicitly.
+    source: SightingSource = "arp"
 
 
 def _require_scapy():
@@ -193,7 +208,7 @@ def active_scan(
     now = datetime.now(timezone.utc)
     sightings: list[ArpSighting] = []
     for _sent, received in answered:
-        sightings.append(ArpSighting(mac=received.hwsrc, ip=received.psrc, seen_at=now))
+        sightings.append(ArpSighting(mac=received.hwsrc, ip=received.psrc, seen_at=now, source="arp"))
     return sightings
 
 
@@ -250,6 +265,7 @@ def active_scan_v6(
                 mac=received[scapy_module.Ether].src,
                 ip=received[IPv6].src,
                 seen_at=now,
+                source="ipv6_nd",
             )
         )
     return sightings
@@ -486,6 +502,13 @@ def passive_sniff(
                 ip=ip,
                 hostname=_decode_dhcp_string(options.get("hostname")),
                 seen_at=datetime.now(timezone.utc),
+                # A client asking for (or previously assigned) an address is
+                # not proof it's using it (only a server's ACK confirms a
+                # lease - see DhcpServerSighting/"dhcp_ack") - kept distinct
+                # so address-evidence recording can tell the two apart,
+                # while this is still perfectly good evidence the MAC and
+                # any self-reported hostname are alive on the network.
+                source="dhcp_client",
             )
         )
 
@@ -497,7 +520,7 @@ def passive_sniff(
             # op 1 = who-has (request), op 2 = is-at (reply) - both carry a
             # live sender MAC/IP pairing worth recording.
             if arp.op in (1, 2):
-                on_sighting(ArpSighting(mac=arp.hwsrc, ip=arp.psrc, seen_at=now))
+                on_sighting(ArpSighting(mac=arp.hwsrc, ip=arp.psrc, seen_at=now, source="arp"))
             return
 
         if packet.haslayer(ICMPv6ND_NS) or packet.haslayer(ICMPv6ND_NA):
@@ -510,7 +533,7 @@ def passive_sniff(
             if src_ip in ("::", ""):
                 return
             on_sighting(
-                ArpSighting(mac=packet[scapy_module.Ether].src, ip=src_ip, seen_at=now)
+                ArpSighting(mac=packet[scapy_module.Ether].src, ip=src_ip, seen_at=now, source="ipv6_nd")
             )
             return
 

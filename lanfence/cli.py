@@ -480,6 +480,7 @@ def monitor(
                     mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
                     store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
                     hostname_hint=sighting.hostname, interface=iface, subnet=net,
+                    source=sighting.source,
                 )
                 _emit_findings(findings, alert=alert, cfg=cfg, store=store)
 
@@ -1003,6 +1004,8 @@ def device(
         review = store.get_review(norm_mac)
         presence_state = store.get_presence(norm_mac)
         events = store.events_for(norm_mac, since=since_dt)
+        addresses = store.address_evidence_for(norm_mac)
+        names = store.name_evidence_for(norm_mac)
 
     allow_entry = allowlist.match(norm_mac)
     dev = raw_device.model_copy(
@@ -1022,11 +1025,14 @@ def device(
             "device": dev.model_dump(mode="json"),
             "since": since_dt.isoformat(),
             "timeline": [e.model_dump(mode="json") for e in events],
+            "addresses": [a.model_dump(mode="json") for a in addresses],
+            "names": [n.model_dump(mode="json") for n in names],
         }
         typer.echo(json.dumps(payload, indent=2))
     else:
         render_device_detail(
-            dev, events, since_dt, now=now, default_offline_after_seconds=cfg.scan.offline_grace_seconds
+            dev, events, since_dt, now=now, default_offline_after_seconds=cfg.scan.offline_grace_seconds,
+            addresses=addresses, names=names,
         )
 
 
