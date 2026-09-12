@@ -985,3 +985,51 @@ def test_due_for_alert_independent_keys_do_not_interfere(tmp_path: Path):
             "aa:bb:cc:dd:ee:ff", "info", now=t0, cooldown_seconds=900,
             key="aa:bb:cc:dd:ee:ff#availability#info",
         ) is True
+
+
+def test_discovery_writes_release_lock_and_commit_retention(tmp_path: Path):
+    """An idle discovery monitor must not block reset or another monitor."""
+    import sqlite3
+
+    path = tmp_path / "db.sqlite"
+    now = _now()
+    with DeviceStore(path) as monitor:
+        writes = [
+            lambda when: monitor.record_mdns_ptr(
+                interface="eth0", service_type="_http._tcp.local", instance_name="web",
+                fq_instance="web._http._tcp.local", ttl=60, seen_at=when,
+                source_ip="192.168.1.2", source_mac="aa:bb:cc:dd:ee:ff"),
+            lambda when: monitor.record_mdns_srv(
+                interface="eth0", fq_instance="web._http._tcp.local",
+                target_host="web.local", port=80, ttl=60, seen_at=when),
+            lambda when: monitor.record_mdns_txt(
+                interface="eth0", fq_instance="web._http._tcp.local",
+                attributes={}, ttl=60, seen_at=when),
+            lambda when: monitor.record_mdns_addr(
+                interface="eth0", target_host="web.local", family="ipv4",
+                ip="192.168.1.2", ttl=60, seen_at=when),
+            lambda when: monitor.record_ssdp_advertisement(
+                interface="eth0", usn="uuid:test", nt_or_st="upnp:rootdevice",
+                server=None, location=None, max_age=60, boot_id=None, config_id=None,
+                seen_at=when, source_ip="192.168.1.2",
+                source_mac="aa:bb:cc:dd:ee:ff", family="ipv4"),
+        ]
+        for write in writes:
+            # Seed expired evidence in another table, so cleanup must persist.
+            monitor.record_mdns_txt(
+                interface="eth0", fq_instance="old._http._tcp.local",
+                attributes={}, ttl=1, seen_at=now - timedelta(days=31))
+            write(now)
+            with sqlite3.connect(path, timeout=0) as observer:
+                observer.execute("BEGIN IMMEDIATE")
+                assert observer.execute(
+                    "SELECT COUNT(*) FROM mdns_txt WHERE fq_instance = ?",
+                    ("old._http._tcp.local",),
+                ).fetchone()[0] == 0
+            # Repeat/upsert paths must release the lock too.
+            write(now + timedelta(seconds=1))
+            assert not monitor._conn.in_transaction
+            with DeviceStore(path) as command:
+                command.reset_all()
+            with DeviceStore(path) as restarted:
+                assert restarted.device_counts() == (0, 0)

@@ -15,6 +15,13 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Fixed
+
+- Commit passive service-discovery retention cleanup together with each
+  observation. Previously cleanup left an open SQLite write transaction,
+  allowing an idle monitor to block reset or another monitor with
+  `database is locked`, even when cleanup removed no rows.
+
 ### Added
 
 - **Live bordered dashboard for `lanfence monitor`.** A continuously-

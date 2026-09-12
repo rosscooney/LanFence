@@ -1441,7 +1441,9 @@ class DeviceStore:
         record older than :data:`_DISCOVERY_RETENTION` is opportunistically
         deleted on every discovery write, rather than an unbounded history
         of every service ever glimpsed. A *current* (not yet expired)
-        record is never pruned here, regardless of age."""
+        record is never pruned here, regardless of age. The caller must commit
+        after pruning: even a DELETE matching no rows opens a write
+        transaction and otherwise leaves an idle monitor holding the lock."""
 
         cutoff = _iso(as_of - _DISCOVERY_RETENTION)
         now_iso = _iso(as_of)
@@ -1496,8 +1498,8 @@ class DeviceStore:
                 (instance_name, ttl, _iso(first_seen), _iso(seen_at), _iso(expires_at), source_ip, source_mac,
                  interface, service_type, fq_instance),
             )
-        self._conn.commit()
         self._prune_expired_discovery_evidence(as_of=seen_at)
+        self._conn.commit()
 
     def withdraw_mdns_ptr(self, interface: str, service_type: str, fq_instance: str) -> None:
         """RFC 6762 s10.1 "goodbye" (TTL 0): withdraw a matching PTR if one
@@ -1536,8 +1538,8 @@ class DeviceStore:
                 "expires_at = ?, withdrawn = 0 WHERE interface = ? AND fq_instance = ?",
                 (target_host, port, ttl, _iso(first_seen), _iso(seen_at), _iso(expires_at), interface, fq_instance),
             )
-        self._conn.commit()
         self._prune_expired_discovery_evidence(as_of=seen_at)
+        self._conn.commit()
 
     def withdraw_mdns_srv(self, interface: str, fq_instance: str) -> None:
         self._conn.execute(
@@ -1574,8 +1576,8 @@ class DeviceStore:
                 "withdrawn = 0 WHERE interface = ? AND fq_instance = ?",
                 (payload, ttl, _iso(first_seen), _iso(seen_at), _iso(expires_at), interface, fq_instance),
             )
-        self._conn.commit()
         self._prune_expired_discovery_evidence(as_of=seen_at)
+        self._conn.commit()
 
     def withdraw_mdns_txt(self, interface: str, fq_instance: str) -> None:
         self._conn.execute(
@@ -1626,8 +1628,8 @@ class DeviceStore:
                 "AND ip != ? AND withdrawn = 0 AND last_seen < ?",
                 (interface, target_host, family, ip, grace_cutoff),
             )
-        self._conn.commit()
         self._prune_expired_discovery_evidence(as_of=seen_at)
+        self._conn.commit()
 
     def withdraw_mdns_addr(self, interface: str, target_host: str, family: str, ip: str) -> None:
         self._conn.execute(
@@ -1671,8 +1673,8 @@ class DeviceStore:
                 (nt_or_st, server, location, max_age, boot_id, config_id, _iso(first_seen), _iso(seen_at),
                  expires_iso, source_ip, source_mac, family, interface, usn),
             )
-        self._conn.commit()
         self._prune_expired_discovery_evidence(as_of=seen_at)
+        self._conn.commit()
 
     def withdraw_ssdp_advertisement(self, interface: str, usn: str, *, seen_at: datetime) -> None:
         """``ssdp:byebye`` withdraws only the matching (interface, USN)
