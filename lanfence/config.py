@@ -322,6 +322,29 @@ class DhcpServerConfig(BaseModel):
         return self
 
 
+class DiscoveryConfig(BaseModel):
+    """Passive advertised-service discovery (mDNS/DNS-SD, SSDP/UPnP) - see
+    :mod:`lanfence.discovery`. Both protocols are opt-in and observation-
+    only: enabling either only changes what LAN Fence *parses* out of
+    traffic already being captured; it never sends an mDNS query, an SSDP
+    M-SEARCH request, or any other discovery traffic.
+
+    Effective only when ``scan.passive`` is also true - there is no
+    separate "discovery capture," only a narrow extension of the existing
+    passive capture filter for UDP ports 5353 (mDNS) and 1900 (SSDP). An
+    ``mdns``/``ssdp: true`` with ``scan.passive: false`` is a valid but
+    inert combination (``monitor`` prints a warning rather than silently
+    doing nothing - see ``lanfence/cli.py``). Config is read once at
+    ``monitor`` startup, same as every other ``scan.*``/``discovery.*``
+    setting - a change here needs a monitor restart to take effect.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    mdns: bool = False
+    ssdp: bool = False
+
+
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -329,6 +352,7 @@ class Config(BaseModel):
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)
     dhcp_servers: DhcpServerConfig = Field(default_factory=DhcpServerConfig)
+    discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     #: Where the persistent device database lives.
     db_path: Path = Path("~/.local/share/lanfence/lanfence.db")
     #: YAML allowlist of trusted devices; findings about them are downgraded to info.

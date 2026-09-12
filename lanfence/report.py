@@ -9,6 +9,7 @@ from datetime import datetime
 
 from lanfence.models import (
     AddressEvidence,
+    AdvertisedService,
     Device,
     DeviceEvent,
     DeviceMetadata,
@@ -377,20 +378,146 @@ def _name_evidence_lines(names: list[NameEvidence]) -> list[str]:
     return lines
 
 
+_DISCOVERY_PROTOCOL_LABELS = {"mdns": "mDNS/DNS-SD", "ssdp": "SSDP/UPnP"}
+_ASSOCIATION_LABELS = {
+    "target_address_match": "target IP matched observed device address",
+    "source_address_match": "packet source IP matched observed device address",
+}
+
+
+def _mdns_type_display(service_type: str) -> str:
+    """``"_ipp._tcp.local"`` -> ``"_ipp._tcp"`` for a terser display - the
+    stored ``service_type`` always includes the ``.local`` domain."""
+
+    return service_type.rstrip(".").removesuffix(".local")
+
+
+def _association_label(service: AdvertisedService) -> str:
+    if service.mac:
+        return _ASSOCIATION_LABELS.get(service.attribution_basis, "matched observed device address")
+    return "unassociated - no confident device match"
+
+
+def _advertised_service_lines(services: list[AdvertisedService]) -> list[str]:
+    """Plain-text "Advertised services" section shared by
+    ``render_device_detail`` - see the module's CLI example in the
+    passive-discovery feature's README section for the exact shape."""
+
+    lines = [f"Advertised services ({len(services)} known):"]
+    if not services:
+        lines.append("  (none)")
+    for s in services:
+        type_display = _mdns_type_display(s.service_type) if s.protocol == "mdns" else s.service_type
+        header = f"{s.service_label} — {type_display}" if s.service_label else type_display
+        lines.append(f"  {header}")
+        if s.instance_name:
+            lines.append(f"    Instance: {s.instance_name}")
+        if s.target_host:
+            target = f"{s.target_host}:{s.target_port}" if s.target_port else s.target_host
+            lines.append(f"    Target: {target}")
+        if s.protocol == "ssdp":
+            if s.server:
+                lines.append(f"    Server (advertised claim, unverified): {s.server}")
+            if s.location:
+                lines.append(f"    Location (advertised, never fetched): {s.location}")
+        if s.attributes:
+            attrs = ", ".join(f"{k}={v}" for k, v in s.attributes.items())
+            lines.append(f"    Attributes (advertised claims, unverified): {attrs}")
+        iface = f" · Interface: {s.interface}" if s.interface else ""
+        lines.append(f"    Source: {_DISCOVERY_PROTOCOL_LABELS[s.protocol]}{iface}")
+        lines.append(f"    Last observed: {s.last_seen.isoformat(timespec='seconds')}")
+        if s.status == "withdrawn":
+            lines.append("    Status: withdrawn (the advertiser explicitly announced it's gone)")
+        elif s.status == "expired":
+            lines.append("    Status: expired (no refresh before its advertised lifetime lapsed)")
+        elif s.expires_at:
+            lines.append(f"    Advertisement expires: {s.expires_at.isoformat(timespec='seconds')}")
+        lines.append(f"    Association: {_association_label(s)}")
+    return lines
+
+
+def render_advertised_services(
+    services: list[AdvertisedService], *, now: datetime, total_count: int | None = None, plain: bool = False,
+) -> str:
+    """Render ``lanfence services`` - a pure database read of correlated
+    advertised-service evidence (see
+    :meth:`lanfence.db.DeviceStore.advertised_services`). Never scans or
+    sends discovery traffic; the absence of a service here is not evidence
+    it doesn't exist, only that nothing advertising it has been observed
+    at this capture point yet. ``total_count`` (the unfiltered count, if
+    filters were applied) distinguishes an empty database from a filter
+    matching nothing - the same convention as ``render_device_inventory``.
+    """
+
+    empty_message = (
+        "No advertised services observed yet - mDNS/SSDP discovery may be disabled "
+        "(see `discovery.mdns`/`discovery.ssdp`), or nothing advertising a recognized service has "
+        "been seen at this capture point. Absence of evidence is not evidence of absence."
+        if not total_count
+        else "No advertised services match those filters."
+    )
+
+    lines = [f"Advertised services: {len(services)}"]
+    for s in services:
+        type_display = _mdns_type_display(s.service_type) if s.protocol == "mdns" else s.service_type
+        label = s.service_label or type_display
+        assoc = s.mac or "unassociated"
+        lines.append(
+            f"  - [{s.protocol}] {label:<14} {type_display:<20} {(s.instance_name or '-'):<24} "
+            f"{assoc:<20} {s.status:<10} {s.last_seen.isoformat(timespec='seconds')}"
+        )
+    text = "\n".join(lines)
+    if plain or not _RICH:
+        print(text)
+        return text
+
+    console = Console()
+    if not services:
+        console.print(f"[yellow]{empty_message}[/yellow]")
+        return text
+
+    table = Table(title=f"Advertised services ({len(services)})")
+    table.add_column("Protocol")
+    table.add_column("Service")
+    table.add_column("Type", overflow="fold")
+    table.add_column("Instance", overflow="fold")
+    table.add_column("MAC")
+    table.add_column("Status")
+    table.add_column("Last seen")
+    for s in services:
+        type_display = _mdns_type_display(s.service_type) if s.protocol == "mdns" else s.service_type
+        table.add_row(
+            s.protocol,
+            _rich_escape(s.service_label or "-"),
+            _rich_escape(type_display),
+            _rich_escape(s.instance_name or "-"),
+            s.mac or "[dim]unassociated[/dim]",
+            s.status,
+            s.last_seen.isoformat(timespec="seconds"),
+        )
+    console.print(table)
+    return text
+
+
 def render_device_detail(
     device: Device, events: list[DeviceEvent], since: datetime, *, now: datetime, plain: bool = False,
     default_offline_after_seconds: float | None = None,
     addresses: list[AddressEvidence] | None = None, names: list[NameEvidence] | None = None,
+    services: list[AdvertisedService] | None = None,
 ) -> str:
     """Render ``lanfence device <mac>`` - current (preferred) details, all
-    retained address/name evidence, then the separate, necessarily-
-    incomplete lifecycle timeline (see :meth:`DeviceStore.events_for`).
+    retained address/name evidence, advertised-service evidence, then the
+    separate, necessarily-incomplete lifecycle timeline (see
+    :meth:`DeviceStore.events_for`).
 
     ``addresses``/``names`` are retained evidence *summaries* (first/last
     observed), not a complete history of continuous assignment - an older
     entry does not mean that address/name was released or replaced, only
     that nothing has re-confirmed it recently. Omit either (``None``) to
     skip that section entirely (e.g. a caller that hasn't fetched it).
+    ``services`` (see :meth:`lanfence.db.DeviceStore.advertised_services`)
+    are device-advertised claims, never verified capabilities or proof of
+    reachability - omit (``None``) the same way.
     """
 
     trust = f"trusted ({device.allowlist_name})" if device.allowlisted else "untrusted"
@@ -443,6 +570,10 @@ def render_device_detail(
         if names is not None:
             lines.append("")
             lines.extend(_name_evidence_lines(names))
+
+    if services is not None:
+        lines.append("")
+        lines.extend(_advertised_service_lines(services))
 
     text = "\n".join(lines)
     if plain or not _RICH:
@@ -538,6 +669,38 @@ def render_device_detail(
                 f"Last observed: {n.last_seen.isoformat(timespec='seconds')}"
             )
 
+    if services is not None:
+        console.print(f"\n[bold]Advertised services[/bold] ({len(services)} known)")
+        if not services:
+            console.print("[dim](none)[/dim]")
+        for s in services:
+            type_display = _mdns_type_display(s.service_type) if s.protocol == "mdns" else s.service_type
+            header = f"{s.service_label} — {type_display}" if s.service_label else type_display
+            console.print(f"  [bold]{_rich_escape(header)}[/bold]")
+            if s.instance_name:
+                console.print(f"    Instance: {_rich_escape(s.instance_name)}")
+            if s.target_host:
+                target = f"{s.target_host}:{s.target_port}" if s.target_port else s.target_host
+                console.print(f"    Target: {_rich_escape(target)}")
+            if s.protocol == "ssdp":
+                if s.server:
+                    console.print(f"    Server (advertised claim, unverified): {_rich_escape(s.server)}")
+                if s.location:
+                    console.print(f"    Location (advertised, never fetched): {_rich_escape(s.location)}")
+            if s.attributes:
+                attrs = ", ".join(f"{k}={v}" for k, v in s.attributes.items())
+                console.print(f"    Attributes (advertised claims, unverified): {_rich_escape(attrs)}")
+            iface = f" · Interface: {_rich_escape(s.interface)}" if s.interface else ""
+            console.print(f"    Source: {_DISCOVERY_PROTOCOL_LABELS[s.protocol]}{iface}")
+            console.print(f"    Last observed: {s.last_seen.isoformat(timespec='seconds')}")
+            if s.status == "withdrawn":
+                console.print("    Status: [yellow]withdrawn[/yellow] (the advertiser announced it's gone)")
+            elif s.status == "expired":
+                console.print("    Status: [yellow]expired[/yellow] (no refresh before its lifetime lapsed)")
+            elif s.expires_at:
+                console.print(f"    Advertisement expires: {s.expires_at.isoformat(timespec='seconds')}")
+            console.print(f"    Association: {_rich_escape(_association_label(s))}")
+
     return text
 
 
@@ -551,9 +714,10 @@ def _section_lines(title: str, section: DigestSection) -> list[str]:
         if entry.owner or entry.group:
             bits = [b for b in (entry.owner, entry.group) if b]
             context = f"  ({', '.join(bits)})"
-        lines.append(
-            f"  - {label} ({entry.mac})  {entry.ip or '-':<15}  {entry.hostname or '[unknown]'}{context}"
-        )
+        line = f"  - {label} ({entry.mac})  {entry.ip or '-':<15}  {entry.hostname or '[unknown]'}{context}"
+        if entry.services_summary:
+            line += f"  advertises: {entry.services_summary}"
+        lines.append(line)
     if section.omitted_count:
         lines.append(f"  ... and {section.omitted_count} more")
     return lines
@@ -617,6 +781,7 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         if not section.items:
             console.print(f"\n[dim]{title}: none[/dim]")
             continue
+        show_services = title == "New devices"
         table = Table(title=f"{title} ({section.total_count})")
         table.add_column("MAC")
         table.add_column("Name")
@@ -624,12 +789,17 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         table.add_column("Hostname", overflow="fold")
         table.add_column("Owner", overflow="fold")
         table.add_column("Group", overflow="fold")
+        if show_services:
+            table.add_column("Advertises", overflow="fold")
         for entry in section.items:
-            table.add_row(
+            row = [
                 entry.mac, _rich_escape(entry.name or "-"), entry.ip or "-",
                 _rich_escape(entry.hostname or "[unknown]"),
                 _rich_escape(entry.owner or "-"), _rich_escape(entry.group or "-"),
-            )
+            ]
+            if show_services:
+                row.append(_rich_escape(entry.services_summary or "-"))
+            table.add_row(*row)
         console.print(table)
         if section.omitted_count:
             console.print(f"[dim]... and {section.omitted_count} more[/dim]")

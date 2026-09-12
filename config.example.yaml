@@ -80,6 +80,12 @@ dhcp_servers:
   # Needs scan.passive and scan.dhcp_snooping to actually see any DHCP traffic.
   # An empty `approved` list with enabled: true means every server seen is unexpected.
 
+discovery:
+  mdns: false   # opt-in - parse mDNS/DNS-SD service advertisements (needs scan.passive: true)
+  ssdp: false   # opt-in - parse SSDP/UPnP service advertisements (needs scan.passive: true)
+  # Both only take effect while passively capturing (scan.passive: true) - `monitor` warns if
+  # enabled without it. Read once at `monitor` startup like every other scan.*/discovery.* setting.
+
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
 vendor_file: null             # extra OUI table, merged with the packaged one

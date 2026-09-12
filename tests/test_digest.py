@@ -59,6 +59,61 @@ def test_digest_new_device_includes_owner_and_group_context(tmp_path: Path):
     assert entry.group == "staff"
 
 
+def test_digest_new_device_includes_services_summary(tmp_path: Path):
+    from lanfence.discovery import MdnsRecordSighting, process_mdns_record_sighting
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.50", hostname=None, vendor=None, seen_at=t0)
+        for s in (
+            MdnsRecordSighting(
+                rtype="PTR", ttl=120, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+                family="ipv4", seen_at=t0, service_type="_ipp._tcp.local", instance_name="Office Printer",
+                fq_instance="Office Printer._ipp._tcp.local",
+            ),
+            MdnsRecordSighting(
+                rtype="SRV", ttl=120, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+                family="ipv4", seen_at=t0, fq_instance="Office Printer._ipp._tcp.local",
+                target_host="printer.local", target_port=631,
+            ),
+            MdnsRecordSighting(
+                rtype="A", ttl=120, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+                family="ipv4", seen_at=t0, address_owner="printer.local", address="192.168.1.50",
+            ),
+        ):
+            process_mdns_record_sighting(s, store)
+
+        digest = build_digest(store, Allowlist.load(None), since=t0, until=t0)
+
+    entry = digest.new_devices.items[0]
+    assert entry.services_summary == "Printing"
+
+
+def test_digest_other_sections_never_include_services_summary(tmp_path: Path):
+    """Only new-device rows carry a service summary - needs-review/
+    investigating/missing-always-on rows stay terse (see
+    `lanfence/digest.py`'s `_bounded_section`)."""
+
+    from lanfence.discovery import MdnsRecordSighting, process_mdns_record_sighting
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now() - timedelta(hours=2)
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.50", hostname=None, vendor=None, seen_at=t0)
+        process_mdns_record_sighting(
+            MdnsRecordSighting(
+                rtype="PTR", ttl=120, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+                family="ipv4", seen_at=t0, service_type="_ipp._tcp.local", instance_name="Office Printer",
+                fq_instance="Office Printer._ipp._tcp.local",
+            ),
+            store,
+        )
+        until = _now()
+        digest = build_digest(store, Allowlist.load(None), since=until, until=until)  # empty window - not "new"
+
+    assert digest.needs_review.items
+    assert all(item.services_summary is None for item in digest.needs_review.items)
+
+
 def test_digest_new_device_outside_window_is_excluded(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()

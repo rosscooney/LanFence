@@ -47,7 +47,24 @@ from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, D
 log = get_logger("digest")
 
 
-def _to_entry(device: Device) -> DigestDeviceEntry:
+def _service_summary(store: DeviceStore, mac: str, *, now: datetime) -> str | None:
+    """A terse, bounded one-liner of a device's *current* advertised
+    services (see :meth:`lanfence.db.DeviceStore.advertised_services`), for
+    new-device digest rows only - e.g. ``"Printing, AirPlay"``. ``None`` if
+    nothing is currently advertised for this MAC (not evidence nothing is
+    advertised at all - only that this capture point hasn't seen it)."""
+
+    current = store.advertised_services(mac=mac, now=now)
+    if not current:
+        return None
+    shown = current[:3]
+    summary = ", ".join(s.service_label or s.service_type for s in shown)
+    if len(current) > len(shown):
+        summary += f" (+{len(current) - len(shown)} more)"
+    return summary
+
+
+def _to_entry(device: Device, *, services_summary: str | None = None) -> DigestDeviceEntry:
     metadata = device.metadata
     return DigestDeviceEntry(
         mac=device.mac,
@@ -63,18 +80,26 @@ def _to_entry(device: Device) -> DigestDeviceEntry:
         last_seen=device.last_seen,
         owner=metadata.owner if metadata else None,
         group=metadata.group if metadata else None,
+        services_summary=services_summary,
     )
 
 
-def _bounded_section(devices: list[Device], *, limit: int) -> DigestSection:
+def _bounded_section(
+    devices: list[Device], *, limit: int, store: DeviceStore | None = None, now: datetime | None = None,
+) -> DigestSection:
+    """``store``/``now`` are given only for the ``new_devices`` section -
+    see :func:`_service_summary`. Every other section leaves
+    ``services_summary`` ``None`` to keep routine review/investigating/
+    missing-always-on rows terse."""
+
     ordered = sorted(devices, key=lambda d: d.mac)
     total = len(ordered)
     shown = ordered[:limit]
-    return DigestSection(
-        items=[_to_entry(d) for d in shown],
-        total_count=total,
-        omitted_count=max(0, total - limit),
-    )
+    items = [
+        _to_entry(d, services_summary=_service_summary(store, d.mac, now=now) if store and now else None)
+        for d in shown
+    ]
+    return DigestSection(items=items, total_count=total, omitted_count=max(0, total - limit))
 
 
 def build_digest(
@@ -129,7 +154,7 @@ def build_digest(
         window_end=until,
         known_devices=len(inventory),
         online_devices=sum(1 for d in inventory if d.status == "online"),
-        new_devices=_bounded_section(new_devices, limit=max_devices_per_section),
+        new_devices=_bounded_section(new_devices, limit=max_devices_per_section, store=store, now=until),
         needs_review=_bounded_section(needs_review, limit=max_devices_per_section),
         investigating=_bounded_section(investigating, limit=max_devices_per_section),
         missing_always_on=_bounded_section(missing_always_on, limit=max_devices_per_section),
@@ -154,7 +179,10 @@ def _format_section_plain(title: str, section: DigestSection) -> list[str]:
         if entry.owner or entry.group:
             bits = [b for b in (entry.owner, entry.group) if b]
             context = f"  ({', '.join(bits)})"
-        lines.append(f"  - {label} ({entry.mac})  {entry.ip or '-'}  {entry.hostname or '[unknown]'}{context}")
+        line = f"  - {label} ({entry.mac})  {entry.ip or '-'}  {entry.hostname or '[unknown]'}{context}"
+        if entry.services_summary:
+            line += f"  advertises: {entry.services_summary}"
+        lines.append(line)
     if section.omitted_count:
         lines.append(f"  ... and {section.omitted_count} more")
     return lines

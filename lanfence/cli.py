@@ -24,7 +24,7 @@ from typing import Optional
 
 import typer
 
-from lanfence import __version__, alerts, scanner
+from lanfence import __version__, alerts, discovery, scanner
 from lanfence.allowlist import Allowlist
 from lanfence.config import DIGEST_CHANNELS, Config
 from lanfence.db import DeviceStore
@@ -54,6 +54,7 @@ from lanfence.sanitize import clean_text
 from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
+    render_advertised_services,
     render_device_detail,
     render_device_inventory,
     render_digest,
@@ -388,6 +389,14 @@ def monitor(
         None, "--dhcp/--no-dhcp",
         help="While passive monitoring, also snoop DHCP for a device's self-reported hostname.",
     ),
+    mdns: Optional[bool] = typer.Option(
+        None, "--mdns/--no-mdns",
+        help="While passive monitoring, also parse mDNS/DNS-SD service advertisements.",
+    ),
+    ssdp: Optional[bool] = typer.Option(
+        None, "--ssdp/--no-ssdp",
+        help="While passive monitoring, also parse SSDP/UPnP service advertisements.",
+    ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
     alert: bool = typer.Option(True, "--alert/--no-alert", help="Dispatch alerts for findings as they occur."),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True),
@@ -404,6 +413,10 @@ def monitor(
         cfg.scan.ipv6 = ipv6
     if dhcp is not None:
         cfg.scan.dhcp_snooping = dhcp
+    if mdns is not None:
+        cfg.discovery.mdns = mdns
+    if ssdp is not None:
+        cfg.discovery.ssdp = ssdp
 
     if not _is_root():
         _warn_not_root("monitor")
@@ -419,10 +432,12 @@ def monitor(
     typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
     dhcp_active = cfg.scan.passive and cfg.scan.dhcp_snooping
     dhcp_server_active = dhcp_server_detection_active(cfg)
+    mdns_active = cfg.scan.passive and cfg.discovery.mdns
+    ssdp_active = cfg.scan.passive and cfg.discovery.ssdp
     typer.echo(
         f"interface: {iface or '(auto)'}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
         f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}   dhcp: {dhcp_active}   "
-        f"dhcp-server-detection: {dhcp_server_active}"
+        f"dhcp-server-detection: {dhcp_server_active}   mdns: {mdns_active}   ssdp: {ssdp_active}"
     )
     if cfg.dhcp_servers.enabled and not dhcp_server_active:
         typer.secho(
@@ -437,10 +452,19 @@ def monitor(
             "every DHCP server observed will be treated as unexpected.",
             fg="yellow",
         )
+    if (cfg.discovery.mdns or cfg.discovery.ssdp) and not cfg.scan.passive:
+        typer.secho(
+            "warning: discovery.mdns/ssdp is enabled, but passive monitoring (scan.passive) is off - "
+            "no service advertisements will be parsed until it is. This combination is enabled but "
+            "inactive, not silently \"working anyway\".",
+            fg="yellow", err=True,
+        )
 
     stop_event = threading.Event()
     passive_queue: "queue.Queue[scanner.ArpSighting]" = queue.Queue()
     dhcp_server_queue: "queue.Queue[scanner.DhcpServerSighting]" = queue.Queue()
+    mdns_queue: "queue.Queue[list]" = queue.Queue()
+    ssdp_queue: "queue.Queue[object]" = queue.Queue()
 
     def _run_passive() -> None:
         try:
@@ -448,6 +472,9 @@ def monitor(
                 on_sighting=passive_queue.put, interface=iface, stop_event=stop_event,
                 dhcp=cfg.scan.dhcp_snooping,
                 on_dhcp_server=dhcp_server_queue.put if cfg.dhcp_servers.enabled else None,
+                mdns=cfg.discovery.mdns, ssdp=cfg.discovery.ssdp,
+                on_mdns_records=mdns_queue.put if cfg.discovery.mdns else None,
+                on_ssdp=ssdp_queue.put if cfg.discovery.ssdp else None,
             )
         except scanner.ScannerUnavailable as exc:
             typer.secho(f"passive monitoring unavailable: {exc}", fg="yellow", err=True)
@@ -501,6 +528,31 @@ def monitor(
                 finding = process_dhcp_server_sighting(server_sighting, store, cfg)
                 if finding is not None:
                     _emit_findings([finding], alert=alert, cfg=cfg, store=store)
+
+            # Advertised-service evidence, same bounded-drain shape as
+            # above - a burst of mDNS/SSDP traffic must never starve device
+            # sightings or active sweeps. Never produces findings/alerts or
+            # touches device presence/reachability (see
+            # `lanfence/discovery.py`), so nothing is passed to
+            # `_emit_findings` here.
+            drained_mdns = 0
+            while drained_mdns < 200:
+                try:
+                    records = mdns_queue.get_nowait()
+                except queue.Empty:
+                    break
+                drained_mdns += 1
+                for record in records:
+                    discovery.process_mdns_record_sighting(record, store)
+
+            drained_ssdp = 0
+            while drained_ssdp < 200:
+                try:
+                    ssdp_sighting = ssdp_queue.get_nowait()
+                except queue.Empty:
+                    break
+                drained_ssdp += 1
+                discovery.process_ssdp_sighting(ssdp_sighting, store)
 
             if now - last_sweep >= cfg.scan.scan_interval_seconds:
                 # Reload on the same cadence as active sweeps, so a `lanfence
@@ -744,6 +796,62 @@ def dhcp_servers_cmd(
         if r.last_relay_ip:
             detail += f"  relay={r.last_relay_ip}"
         typer.echo(detail)
+
+
+@app.command()
+def services(
+    protocol: Optional[str] = typer.Option(None, "--protocol", help="Filter by protocol: mdns | ssdp."),
+    unassociated: bool = typer.Option(
+        False, "--unassociated", help="Only services that could not be confidently matched to a device."
+    ),
+    include_expired: bool = typer.Option(
+        False, "--include-expired", help="Also include expired/withdrawn history (default: current only)."
+    ),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """List advertised services observed via passive mDNS/DNS-SD or SSDP/UPnP capture.
+
+    A read-only database query - never scans the network, never sends an
+    mDNS query or SSDP M-SEARCH request. An advertised service is a claim
+    the advertising device makes about itself, not a verified capability or
+    proof it's reachable; an empty (or missing) result means nothing
+    advertising it has been observed at this capture point, never that no
+    such service exists on the network - see README's discovery section.
+    Works whether or not `discovery.mdns`/`discovery.ssdp` are currently
+    enabled (they only gate what's captured going forward, not this read).
+
+    Attribution to a device is deliberately conservative: `--unassociated`
+    shows services that could not be confidently matched to any inventory
+    device (an mDNS proxy/reflector, or an ambiguous/stale IP association,
+    never produces a guessed match - see `lanfence device <MAC>` for a
+    per-device view of that device's own attributed services).
+
+    Filters combine with AND. `--format json` additionally always includes
+    each service's full evidence (attributes, target, expiry, association
+    basis).
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if protocol is not None and protocol not in ("mdns", "ssdp"):
+        typer.secho(f"error: --protocol must be 'mdns' or 'ssdp', got {protocol!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+
+    cfg = _load_config(config)
+    now = utcnow()
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        total_count = len(store.advertised_services(include_expired=True, now=now))
+        records = store.advertised_services(
+            protocol=protocol, include_expired=include_expired, unassociated_only=unassociated, now=now,
+        )
+
+    if output_format == "json":
+        typer.echo(json.dumps([r.model_dump(mode="json") for r in records], indent=2))
+        return
+
+    render_advertised_services(records, now=now, total_count=total_count)
 
 
 @app.command()
@@ -1105,6 +1213,7 @@ def device(
         events = store.events_for(norm_mac, since=since_dt)
         addresses = store.address_evidence_for(norm_mac)
         names = store.name_evidence_for(norm_mac)
+        services = store.advertised_services(mac=norm_mac, now=now)
 
     allow_entry = allowlist.match(norm_mac)
     dev = raw_device.model_copy(
@@ -1127,12 +1236,13 @@ def device(
             "timeline": [e.model_dump(mode="json") for e in events],
             "addresses": [a.model_dump(mode="json") for a in addresses],
             "names": [n.model_dump(mode="json") for n in names],
+            "services": [s.model_dump(mode="json") for s in services],
         }
         typer.echo(json.dumps(payload, indent=2))
     else:
         render_device_detail(
             dev, events, since_dt, now=now, default_offline_after_seconds=cfg.scan.offline_grace_seconds,
-            addresses=addresses, names=names,
+            addresses=addresses, names=names, services=services,
         )
 
 

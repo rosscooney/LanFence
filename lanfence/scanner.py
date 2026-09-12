@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Iterable
 
+from lanfence import discovery
 from lanfence.logging_config import get_logger
 
 log = get_logger("scanner")
@@ -385,9 +386,13 @@ def passive_sniff(
     packet_count: int = 0,
     dhcp: bool = True,
     on_dhcp_server: "Callable[[DhcpServerSighting], None] | None" = None,
+    mdns: bool = False,
+    ssdp: bool = False,
+    on_mdns_records: "Callable[[list], None] | None" = None,
+    on_ssdp: "Callable[[object], None] | None" = None,
 ) -> None:
-    """Listen for ARP/ND/DHCP traffic and call ``on_sighting`` for each
-    sighting seen.
+    """Listen for ARP/ND/DHCP/discovery traffic and call ``on_sighting`` for
+    each sighting seen.
 
     Blocks until ``stop_event`` is set (checked between packets) or
     ``packet_count`` packets have been processed (0 = unbounded - normal use is
@@ -402,6 +407,21 @@ def passive_sniff(
     observation type from ``on_sighting``'s client/ARP/NDP sightings, never
     merged with them. When omitted (the default), no extra parsing for
     server responses happens at all.
+
+    ``mdns``/``ssdp`` (both default ``False`` - opt-in, see
+    ``config.discovery``) narrowly extend the capture filter to UDP port
+    5353/1900 respectively and, when a matching packet arrives, hand its
+    raw UDP payload plus capture metadata (receiving interface, source
+    IP/MAC, address family) to :func:`lanfence.discovery.parse_mdns_packet`/
+    ``parse_ssdp_packet`` - pure parsing functions with no database access
+    (see that module) - and report the result via ``on_mdns_records``
+    (a list of :class:`lanfence.discovery.MdnsRecordSighting`, since one
+    mDNS packet commonly carries several records) / ``on_ssdp`` (one
+    :class:`lanfence.discovery.SsdpSighting`, or nothing called at all if
+    the packet wasn't a recognized advertisement). Never sends an mDNS
+    query, an SSDP M-SEARCH request, or joins any multicast group beyond
+    what receiving already-flowing multicast traffic requires - this is
+    listen-only, exactly like the rest of this function.
     """
 
     scapy_module = _require_scapy()
@@ -539,13 +559,66 @@ def passive_sniff(
 
         if dhcp and packet.haslayer(DHCP):
             _handle_dhcp(packet)
+            return
+
+        if (mdns or ssdp) and packet.haslayer(scapy_module.UDP):
+            udp_layer = packet[scapy_module.UDP]
+            if mdns and discovery.MDNS_PORT in (udp_layer.sport, udp_layer.dport):
+                _handle_mdns(packet, udp_layer)
+            elif ssdp and discovery.SSDP_PORT in (udp_layer.sport, udp_layer.dport):
+                _handle_ssdp(packet, udp_layer)
+
+    def _packet_origin(packet) -> tuple[str | None, str | None, str | None]:
+        """(family, source_ip, source_mac) for a discovery packet - never
+        used for attribution by itself (see :mod:`lanfence.discovery`),
+        only as capture metadata attached to the parsed sighting."""
+
+        family = source_ip = None
+        if packet.haslayer(scapy_module.IP):
+            family, source_ip = "ipv4", packet[scapy_module.IP].src
+        elif packet.haslayer(IPv6):
+            family, source_ip = "ipv6", packet[IPv6].src
+        source_mac = packet[scapy_module.Ether].src if packet.haslayer(scapy_module.Ether) else None
+        return family, source_ip, source_mac
+
+    def _handle_mdns(packet, udp_layer) -> None:
+        if on_mdns_records is None:
+            return
+        family, source_ip, source_mac = _packet_origin(packet)
+        try:
+            payload = bytes(udp_layer.payload)
+        except Exception:  # noqa: BLE001 - malformed capture must never crash monitoring
+            return
+        sightings = discovery.parse_mdns_packet(
+            payload, interface=interface or "", source_ip=source_ip, source_mac=source_mac,
+            family=family, seen_at=datetime.now(timezone.utc),
+        )
+        if sightings:
+            on_mdns_records(sightings)
+
+    def _handle_ssdp(packet, udp_layer) -> None:
+        if on_ssdp is None:
+            return
+        family, source_ip, source_mac = _packet_origin(packet)
+        try:
+            payload = bytes(udp_layer.payload)
+        except Exception:  # noqa: BLE001 - malformed capture must never crash monitoring
+            return
+        sighting = discovery.parse_ssdp_packet(
+            payload, interface=interface or "", source_ip=source_ip, source_mac=source_mac,
+            family=family, seen_at=datetime.now(timezone.utc),
+        )
+        if sighting is not None:
+            on_ssdp(sighting)
 
     def _should_stop(_packet) -> bool:
         return bool(stop_event is not None and stop_event.is_set())
 
     dhcp_filter = " or (udp and (port 67 or port 68))" if dhcp else ""
+    mdns_filter = f" or (udp and port {discovery.MDNS_PORT})" if mdns else ""
+    ssdp_filter = f" or (udp and port {discovery.SSDP_PORT})" if ssdp else ""
     kwargs = {
-        "filter": f"arp or icmp6{dhcp_filter}",
+        "filter": f"arp or icmp6{dhcp_filter}{mdns_filter}{ssdp_filter}",
         "prn": _handle, "store": False, "stop_filter": _should_stop,
     }
     if interface:

@@ -693,6 +693,110 @@ and MAC addresses seen on the wire are claims, not authenticated identities
 - treat a finding as a lead to check, the same as every other signature in
 this tool. This feature does not detect DHCPv6 servers.
 
+## Passive advertised-service discovery
+
+Enriches your device inventory with services devices *advertise about
+themselves* over mDNS/DNS-SD (Bonjour) and SSDP/UPnP - "this device speaks
+printing (IPP)", "this device advertises AirPlay", "this is a UPnP
+MediaRenderer". **These are device-advertised claims, not verified
+capabilities, authenticated identities, or proof a service is actually
+reachable** - treat them the same skeptical way as a vendor OUI or a
+self-reported hostname.
+
+Strictly passive, same as every other discovery mechanism in this project:
+LAN Fence never sends an mDNS query, an SSDP `M-SEARCH` request, an HTTP
+request, or any other discovery traffic, and it never fetches an SSDP
+`LOCATION` URL. It only parses mDNS/SSDP traffic that's already flowing on
+the network and reaching the existing passive capture.
+
+```yaml
+discovery:
+  mdns: false   # opt-in - off by default
+  ssdp: false   # opt-in - off by default
+```
+
+Both narrowly extend the existing passive capture filter (UDP port 5353 for
+mDNS, 1900 for SSDP) and only take effect when `scan.passive` is also true -
+`monitor` prints a warning if you enable one without the other, rather than
+silently doing nothing. Like every other `scan.*`/`discovery.*` setting,
+this is only read at `monitor` startup, so a config change needs a restart
+to take effect - or pass `--mdns`/`--no-mdns`/`--ssdp`/`--no-ssdp` directly:
+
+```text
+lanfence monitor --mdns --ssdp
+```
+
+```text
+$ lanfence device aa:bb:cc:dd:ee:ff
+
+...
+Advertised services (1 known)
+  Printing — _ipp._tcp
+    Instance: Office Printer
+    Target: printer.local:631
+    Source: mDNS/DNS-SD · Interface: eth0
+    Last observed: 2026-01-05T08:00:00+00:00
+    Advertisement expires: 2026-01-05T08:02:00+00:00
+    Association: target IP matched observed device address
+
+$ lanfence services
+lanfence services --protocol mdns
+lanfence services --protocol ssdp
+lanfence services --unassociated       # only services that couldn't be confidently matched to a device
+lanfence services --include-expired    # also show expired/withdrawn history
+lanfence services --format json
+```
+
+**Attribution is deliberately conservative.** *Who transmitted an
+advertisement* and *which device it's actually about* are two different
+questions - an mDNS proxy, reflector, or shared responder can legitimately
+advertise services on behalf of other hosts, so LAN Fence never assigns a
+service to the packet's own Ethernet/IP source. Instead, it correlates the
+service's *target* address (the mDNS SRV record's host, or - for SSDP,
+which has no separate target concept - the packet's own source address)
+against address evidence it has *directly observed* itself (ARP/IPv6 ND -
+never a DHCP-reported lease claim or older imported data). If that match is
+unique, the service is attributed; if it's ambiguous (more than one MAC has
+ever held that address) or there's no match at all, the service is shown as
+**unassociated** rather than guessing. Attribution is recomputed fresh every
+time you look, so it can improve as better evidence arrives - and the
+original advertisement evidence is never rewritten to reflect it.
+
+**TTL and expiry semantics** follow each protocol's own rules: an mDNS
+"goodbye" record (TTL 0) or an SSDP `ssdp:byebye` immediately withdraws that
+specific advertisement (never every service the device advertises); absent
+that, a service's advertised lifetime (its DNS TTL, or SSDP's
+`CACHE-CONTROL: max-age`) determines when it's shown as **expired**. A
+missing/invalid SSDP max-age never grants an immortal advertisement - it
+falls back to a short, bounded default instead. `lanfence services` and
+`lanfence device <MAC>` show only **current** advertisements by default;
+`--include-expired` shows the bounded history too, each status explicitly
+labeled. None of this ever fabricates a device lifecycle event, changes
+presence/reachability, or fires a finding/alert - a service expiring does
+not mean the device went offline, and this feature raises no new findings
+in this release.
+
+**What's retained**: for mDNS, the service type (with a friendly label for
+a small set of well-known types - printing, AirPlay, remote audio, cast,
+generic web service; an unrecognized type is kept with its raw name, never
+guessed at), the instance name, the target host/port, and a small,
+documented allowlist of TXT attributes (bounded in count and size) -
+**never** a raw TXT blob or an arbitrary unknown key. For SSDP: `USN`
+(its stable identity), `NT`/`ST`, `SERVER`, `LOCATION` (stored as
+untrusted advertised metadata - never fetched, followed, or embedded as a
+resource), and `CACHE-CONTROL`'s max-age. `SERVER`/TXT model-like
+attributes are always advertised claims, labeled as such wherever shown -
+never treated as verified vendor/model identity.
+
+**Visibility limitations**: absence of an observation here is not evidence
+a service doesn't exist - only that nothing advertising it has reached this
+capture point yet (a quiet device, a switched/segmented network, or
+discovery simply not having been enabled long enough all look the same as
+"nothing to report"). Expired/withdrawn evidence is retained for a bounded
+period (30 days) then opportunistically pruned - `lanfence services
+--include-expired` shows what's still on file. `lanfence reset` clears all
+discovery evidence along with the rest of a device's history.
+
 ## Running unattended
 
 LAN Fence does not ship its own scheduler; use `systemd` (recommended on a

@@ -39,13 +39,15 @@ sighting establishes real provenance, rather than guessing.
 from __future__ import annotations
 
 import ipaddress
+import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from lanfence.models import (
     SEVERITIES,
     AddressEvidence,
+    AdvertisedService,
     Device,
     DeviceEvent,
     DeviceMetadata,
@@ -176,7 +178,108 @@ CREATE TABLE IF NOT EXISTS device_metadata (
     location TEXT,
     updated_at TEXT NOT NULL
 );
+
+-- mdns_ptr/srv/txt/addr: DNS names are case-insensitive identities (RFC
+-- 1035/6762) - "Printer.local" and "printer.local" are the same name, so
+-- the DNS-name-shaped key columns below use COLLATE NOCASE (ASCII-only
+-- case folding, which is what SQLite's built-in NOCASE provides) so a
+-- repeated observation with different letter case coalesces into the same
+-- evidence row rather than creating a duplicate. This does not fold
+-- non-ASCII text, which mostly affects DNS-SD *instance* labels (an
+-- interoperability edge case, not the common "Printer.local" vs
+-- "printer.local" case this guards against) - see _mdns_advertised_
+-- services' own Python-side .lower() join for the cross-table PTR/SRV/A
+-- correlation, which needs the same case-insensitivity independently of
+-- SQL collation since it happens after rows are already fetched.
+CREATE TABLE IF NOT EXISTS mdns_ptr (
+    interface TEXT NOT NULL DEFAULT '',
+    service_type TEXT NOT NULL COLLATE NOCASE,
+    instance_name TEXT NOT NULL,
+    fq_instance TEXT NOT NULL COLLATE NOCASE,
+    ttl INTEGER NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    expires_at TEXT,
+    withdrawn INTEGER NOT NULL DEFAULT 0,
+    source_ip TEXT,
+    source_mac TEXT,
+    PRIMARY KEY (interface, service_type, fq_instance)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mdns_ptr_fq_instance ON mdns_ptr (interface, fq_instance);
+
+CREATE TABLE IF NOT EXISTS mdns_srv (
+    interface TEXT NOT NULL DEFAULT '',
+    fq_instance TEXT NOT NULL COLLATE NOCASE,
+    target_host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    ttl INTEGER NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    expires_at TEXT,
+    withdrawn INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (interface, fq_instance)
+);
+
+CREATE TABLE IF NOT EXISTS mdns_txt (
+    interface TEXT NOT NULL DEFAULT '',
+    fq_instance TEXT NOT NULL COLLATE NOCASE,
+    attributes TEXT NOT NULL,
+    ttl INTEGER NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    expires_at TEXT,
+    withdrawn INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (interface, fq_instance)
+);
+
+CREATE TABLE IF NOT EXISTS mdns_addr (
+    interface TEXT NOT NULL DEFAULT '',
+    target_host TEXT NOT NULL COLLATE NOCASE,
+    family TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    ttl INTEGER NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    expires_at TEXT,
+    withdrawn INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (interface, target_host, family, ip)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mdns_addr_host ON mdns_addr (interface, target_host);
+CREATE INDEX IF NOT EXISTS idx_mdns_addr_ip ON mdns_addr (ip);
+
+CREATE TABLE IF NOT EXISTS ssdp_advertisements (
+    interface TEXT NOT NULL DEFAULT '',
+    usn TEXT NOT NULL,
+    nt_or_st TEXT,
+    server TEXT,
+    location TEXT,
+    max_age INTEGER,
+    boot_id TEXT,
+    config_id TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    expires_at TEXT,
+    withdrawn INTEGER NOT NULL DEFAULT 0,
+    source_ip TEXT,
+    source_mac TEXT,
+    family TEXT,
+    PRIMARY KEY (interface, usn)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ssdp_source_ip ON ssdp_advertisements (source_ip);
 """
+
+#: Advertised-service evidence rows older than this, and already
+#: expired/withdrawn, are opportunistically pruned on every discovery write
+#: (see ``_prune_expired_discovery_evidence``) - bounded retention rather
+#: than an unbounded history of every service ever glimpsed. A *current*
+#: (not yet expired) advertisement is never pruned, regardless of age.
+_DISCOVERY_RETENTION = timedelta(days=30)
+_DISCOVERY_TABLES_WITH_EXPIRY = (
+    "mdns_ptr", "mdns_srv", "mdns_txt", "mdns_addr", "ssdp_advertisements",
+)
 
 
 def _iso(dt: datetime) -> str:
@@ -1196,11 +1299,12 @@ class DeviceStore:
     def reset_all(self) -> None:
         """Permanently delete every device, its lifecycle events, alert-
         dispatch cooldowns, review/snooze state, presence policy, observed
-        DHCP servers/findings, retained address/name evidence, and
-        operator-provided metadata - a full wipe back to an empty database.
-        Used by ``lanfence reset``. Cannot be undone; trust (the allowlist)
-        and DHCP server *approval* (config) are separate and untouched by
-        this call. Metadata is always cleared here regardless of
+        DHCP servers/findings, retained address/name evidence,
+        operator-provided metadata, and discovered advertised-service
+        evidence - a full wipe back to an empty database. Used by
+        ``lanfence reset``. Cannot be undone; trust (the allowlist) and
+        DHCP server *approval* (config) are separate and untouched by this
+        call. Metadata is always cleared here regardless of
         ``--keep-allowlist`` - that flag's documented scope is the
         allowlist file only, not device inventory data."""
 
@@ -1214,6 +1318,8 @@ class DeviceStore:
         self._conn.execute("DELETE FROM device_addresses")
         self._conn.execute("DELETE FROM device_names")
         self._conn.execute("DELETE FROM device_metadata")
+        for table in _DISCOVERY_TABLES_WITH_EXPIRY:
+            self._conn.execute(f"DELETE FROM {table}")
         self._conn.commit()
 
     # --- DHCP server observations -------------------------------------
@@ -1314,3 +1420,417 @@ class DeviceStore:
              message_type, source_ip, source_mac, relay_ip, router, dns),
         )
         self._conn.commit()
+
+    # --- passive advertised-service discovery (mDNS/DNS-SD, SSDP/UPnP) -
+
+    def _prune_expired_discovery_evidence(self, *, as_of: datetime) -> None:
+        """Bounded retention: an expired or explicitly withdrawn discovery
+        record older than :data:`_DISCOVERY_RETENTION` is opportunistically
+        deleted on every discovery write, rather than an unbounded history
+        of every service ever glimpsed. A *current* (not yet expired)
+        record is never pruned here, regardless of age."""
+
+        cutoff = _iso(as_of - _DISCOVERY_RETENTION)
+        now_iso = _iso(as_of)
+        for table in _DISCOVERY_TABLES_WITH_EXPIRY:
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE last_seen < ? AND "
+                "(withdrawn = 1 OR (expires_at IS NOT NULL AND expires_at < ?))",
+                (cutoff, now_iso),
+            )
+
+    def discovery_diagnostics(self) -> dict[str, int]:
+        """Row counts per discovery table - bounded capacity visibility for
+        troubleshooting (see :data:`_DISCOVERY_RETENTION`)."""
+
+        return {
+            table: self._conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            for table in _DISCOVERY_TABLES_WITH_EXPIRY
+        }
+
+    def record_mdns_ptr(
+        self, *, interface: str, service_type: str, instance_name: str, fq_instance: str,
+        ttl: int, seen_at: datetime, source_ip: str | None, source_mac: str | None,
+    ) -> None:
+        """Upsert one PTR (service-type -> instance) observation - see
+        :class:`lanfence.discovery.MdnsRecordSighting`. Repeated
+        announcements of the same (interface, service_type, fq_instance)
+        update evidence in place rather than accumulating one row per
+        packet; a late-arriving older observation widens ``first_seen``
+        backwards, never the reverse (mirrors
+        :meth:`record_address_evidence`)."""
+
+        interface = interface or ""
+        expires_at = seen_at + timedelta(seconds=ttl)
+        existing = self._conn.execute(
+            "SELECT first_seen FROM mdns_ptr WHERE interface = ? AND service_type = ? AND fq_instance = ?",
+            (interface, service_type, fq_instance),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO mdns_ptr (interface, service_type, instance_name, fq_instance, ttl, "
+                "first_seen, last_seen, expires_at, withdrawn, source_ip, source_mac) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                (interface, service_type, instance_name, fq_instance, ttl,
+                 _iso(seen_at), _iso(seen_at), _iso(expires_at), source_ip, source_mac),
+            )
+        else:
+            first_seen = min(_parse_dt(existing["first_seen"]), seen_at)
+            self._conn.execute(
+                "UPDATE mdns_ptr SET instance_name = ?, ttl = ?, first_seen = ?, last_seen = ?, "
+                "expires_at = ?, withdrawn = 0, source_ip = ?, source_mac = ? "
+                "WHERE interface = ? AND service_type = ? AND fq_instance = ?",
+                (instance_name, ttl, _iso(first_seen), _iso(seen_at), _iso(expires_at), source_ip, source_mac,
+                 interface, service_type, fq_instance),
+            )
+        self._conn.commit()
+        self._prune_expired_discovery_evidence(as_of=seen_at)
+
+    def withdraw_mdns_ptr(self, interface: str, service_type: str, fq_instance: str) -> None:
+        """RFC 6762 s10.1 "goodbye" (TTL 0): withdraw a matching PTR if one
+        exists; a no-op for one never seen - never fabricates a fresh
+        entry just to mark it withdrawn."""
+
+        self._conn.execute(
+            "UPDATE mdns_ptr SET withdrawn = 1 WHERE interface = ? AND service_type = ? AND fq_instance = ?",
+            (interface or "", service_type, fq_instance),
+        )
+        self._conn.commit()
+
+    def record_mdns_srv(
+        self, *, interface: str, fq_instance: str, target_host: str, port: int, ttl: int, seen_at: datetime,
+    ) -> None:
+        """Upsert one SRV (instance -> target host/port) observation. Its
+        own TTL/expiry is tracked independently of the owning PTR's - a
+        refreshed PTR never extends an expired SRV, and vice versa."""
+
+        interface = interface or ""
+        expires_at = seen_at + timedelta(seconds=ttl)
+        existing = self._conn.execute(
+            "SELECT first_seen FROM mdns_srv WHERE interface = ? AND fq_instance = ?",
+            (interface, fq_instance),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO mdns_srv (interface, fq_instance, target_host, port, ttl, "
+                "first_seen, last_seen, expires_at, withdrawn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (interface, fq_instance, target_host, port, ttl, _iso(seen_at), _iso(seen_at), _iso(expires_at)),
+            )
+        else:
+            first_seen = min(_parse_dt(existing["first_seen"]), seen_at)
+            self._conn.execute(
+                "UPDATE mdns_srv SET target_host = ?, port = ?, ttl = ?, first_seen = ?, last_seen = ?, "
+                "expires_at = ?, withdrawn = 0 WHERE interface = ? AND fq_instance = ?",
+                (target_host, port, ttl, _iso(first_seen), _iso(seen_at), _iso(expires_at), interface, fq_instance),
+            )
+        self._conn.commit()
+        self._prune_expired_discovery_evidence(as_of=seen_at)
+
+    def withdraw_mdns_srv(self, interface: str, fq_instance: str) -> None:
+        self._conn.execute(
+            "UPDATE mdns_srv SET withdrawn = 1 WHERE interface = ? AND fq_instance = ?",
+            (interface or "", fq_instance),
+        )
+        self._conn.commit()
+
+    def record_mdns_txt(
+        self, *, interface: str, fq_instance: str, attributes: dict[str, str], ttl: int, seen_at: datetime,
+    ) -> None:
+        """Upsert one TXT observation - ``attributes`` must already be the
+        small, bounded, allowlisted set (see
+        :func:`lanfence.discovery._parse_txt_rdata`); this method stores
+        exactly what it's given and never retains a raw TXT blob."""
+
+        interface = interface or ""
+        expires_at = seen_at + timedelta(seconds=ttl)
+        payload = json.dumps(attributes, separators=(",", ":"), sort_keys=True)
+        existing = self._conn.execute(
+            "SELECT first_seen FROM mdns_txt WHERE interface = ? AND fq_instance = ?",
+            (interface, fq_instance),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO mdns_txt (interface, fq_instance, attributes, ttl, first_seen, last_seen, "
+                "expires_at, withdrawn) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+                (interface, fq_instance, payload, ttl, _iso(seen_at), _iso(seen_at), _iso(expires_at)),
+            )
+        else:
+            first_seen = min(_parse_dt(existing["first_seen"]), seen_at)
+            self._conn.execute(
+                "UPDATE mdns_txt SET attributes = ?, ttl = ?, first_seen = ?, last_seen = ?, expires_at = ?, "
+                "withdrawn = 0 WHERE interface = ? AND fq_instance = ?",
+                (payload, ttl, _iso(first_seen), _iso(seen_at), _iso(expires_at), interface, fq_instance),
+            )
+        self._conn.commit()
+        self._prune_expired_discovery_evidence(as_of=seen_at)
+
+    def withdraw_mdns_txt(self, interface: str, fq_instance: str) -> None:
+        self._conn.execute(
+            "UPDATE mdns_txt SET withdrawn = 1 WHERE interface = ? AND fq_instance = ?",
+            (interface or "", fq_instance),
+        )
+        self._conn.commit()
+
+    def record_mdns_addr(
+        self, *, interface: str, target_host: str, family: str, ip: str, ttl: int, seen_at: datetime,
+        cache_flush: bool = False,
+    ) -> None:
+        """Upsert one A/AAAA (target host -> address) observation.
+
+        ``cache_flush`` implements RFC 6762 s10.2's grace behavior: a
+        cache-flush record asserts the responder now holds the complete
+        RRset for (target_host, family), so any *other* address under the
+        same (interface, target_host, family) - a genuinely related
+        record, never an unrelated name/type - is marked withdrawn, but
+        only once at least one second has passed since it was last seen
+        (the grace window RFC 6762 describes, so records arriving in the
+        same multi-packet response are never mistakenly flushed).
+        """
+
+        interface = interface or ""
+        expires_at = seen_at + timedelta(seconds=ttl)
+        existing = self._conn.execute(
+            "SELECT first_seen FROM mdns_addr WHERE interface = ? AND target_host = ? AND family = ? AND ip = ?",
+            (interface, target_host, family, ip),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO mdns_addr (interface, target_host, family, ip, ttl, first_seen, last_seen, "
+                "expires_at, withdrawn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (interface, target_host, family, ip, ttl, _iso(seen_at), _iso(seen_at), _iso(expires_at)),
+            )
+        else:
+            first_seen = min(_parse_dt(existing["first_seen"]), seen_at)
+            self._conn.execute(
+                "UPDATE mdns_addr SET ttl = ?, first_seen = ?, last_seen = ?, expires_at = ?, withdrawn = 0 "
+                "WHERE interface = ? AND target_host = ? AND family = ? AND ip = ?",
+                (ttl, _iso(first_seen), _iso(seen_at), _iso(expires_at), interface, target_host, family, ip),
+            )
+        if cache_flush:
+            grace_cutoff = _iso(seen_at - timedelta(seconds=1))
+            self._conn.execute(
+                "UPDATE mdns_addr SET withdrawn = 1 WHERE interface = ? AND target_host = ? AND family = ? "
+                "AND ip != ? AND withdrawn = 0 AND last_seen < ?",
+                (interface, target_host, family, ip, grace_cutoff),
+            )
+        self._conn.commit()
+        self._prune_expired_discovery_evidence(as_of=seen_at)
+
+    def withdraw_mdns_addr(self, interface: str, target_host: str, family: str, ip: str) -> None:
+        self._conn.execute(
+            "UPDATE mdns_addr SET withdrawn = 1 WHERE interface = ? AND target_host = ? AND family = ? AND ip = ?",
+            (interface or "", target_host, family, ip),
+        )
+        self._conn.commit()
+
+    def record_ssdp_advertisement(
+        self, *, interface: str, usn: str, nt_or_st: str | None, server: str | None, location: str | None,
+        max_age: int | None, boot_id: str | None, config_id: str | None, seen_at: datetime,
+        source_ip: str | None, source_mac: str | None, family: str | None,
+    ) -> None:
+        """Upsert one SSDP alive/update/response observation, keyed by the
+        stable (interface, USN) identity - never the transient NOTIFY
+        content alone. ``location`` is stored as untrusted advertised
+        metadata only; it is never fetched (see :mod:`lanfence.discovery`).
+        """
+
+        interface = interface or ""
+        expires_at = seen_at + timedelta(seconds=max_age) if max_age else None
+        existing = self._conn.execute(
+            "SELECT first_seen FROM ssdp_advertisements WHERE interface = ? AND usn = ?",
+            (interface, usn),
+        ).fetchone()
+        expires_iso = _iso(expires_at) if expires_at else None
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO ssdp_advertisements (interface, usn, nt_or_st, server, location, max_age, "
+                "boot_id, config_id, first_seen, last_seen, expires_at, withdrawn, source_ip, source_mac, family) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                (interface, usn, nt_or_st, server, location, max_age, boot_id, config_id,
+                 _iso(seen_at), _iso(seen_at), expires_iso, source_ip, source_mac, family),
+            )
+        else:
+            first_seen = min(_parse_dt(existing["first_seen"]), seen_at)
+            self._conn.execute(
+                "UPDATE ssdp_advertisements SET nt_or_st = ?, server = ?, location = ?, max_age = ?, "
+                "boot_id = ?, config_id = ?, first_seen = ?, last_seen = ?, expires_at = ?, withdrawn = 0, "
+                "source_ip = ?, source_mac = ?, family = ? WHERE interface = ? AND usn = ?",
+                (nt_or_st, server, location, max_age, boot_id, config_id, _iso(first_seen), _iso(seen_at),
+                 expires_iso, source_ip, source_mac, family, interface, usn),
+            )
+        self._conn.commit()
+        self._prune_expired_discovery_evidence(as_of=seen_at)
+
+    def withdraw_ssdp_advertisement(self, interface: str, usn: str, *, seen_at: datetime) -> None:
+        """``ssdp:byebye`` withdraws only the matching (interface, USN)
+        advertisement, never every service the device advertises - a
+        device sends one byebye per USN it's withdrawing, each
+        independently keyed. A no-op for a USN never seen."""
+
+        self._conn.execute(
+            "UPDATE ssdp_advertisements SET withdrawn = 1, last_seen = ? WHERE interface = ? AND usn = ?",
+            (_iso(seen_at), interface or "", usn),
+        )
+        self._conn.commit()
+
+    def _directly_observed_mac_for_ip(self, ip: str) -> str | None:
+        """The single MAC directly observed (ARP/IPv6 ND - never a DHCP
+        lease claim or imported legacy data) holding ``ip`` as address
+        evidence, or ``None`` if zero or more than one distinct MAC has
+        ever held it. An ambiguous or merely historical IP-to-MAC
+        association must never produce a confident attribution - see
+        :meth:`advertised_services`."""
+
+        rows = self._conn.execute(
+            "SELECT DISTINCT mac FROM device_addresses WHERE ip = ? AND source IN ('arp', 'ipv6_nd')",
+            (ip,),
+        ).fetchall()
+        macs = {row["mac"] for row in rows}
+        return next(iter(macs)) if len(macs) == 1 else None
+
+    @staticmethod
+    def _discovery_status(row: sqlite3.Row, *, now: datetime) -> str:
+        if row["withdrawn"]:
+            return "withdrawn"
+        expires_at = row["expires_at"]
+        if expires_at and _parse_dt(expires_at) < now:
+            return "expired"
+        return "current"
+
+    def _mdns_advertised_services(self, *, now: datetime) -> list[AdvertisedService]:
+        from lanfence.discovery import well_known_mdns_label
+
+        # DNS names are case-insensitive identities (RFC 1035/6762) - keys
+        # here are lower-cased ASCII-foldable joins so "Printer.local" and
+        # "printer.local" correlate as the same name regardless of which
+        # case any one record happened to use (SQL-level COLLATE NOCASE on
+        # the schema's own key columns handles per-table dedup; this join
+        # happens in Python after fetch, so it needs its own folding).
+        ptr_rows = self._conn.execute("SELECT * FROM mdns_ptr").fetchall()
+        srv_by_key = {
+            (row["interface"], row["fq_instance"].lower()): row
+            for row in self._conn.execute("SELECT * FROM mdns_srv").fetchall()
+        }
+        txt_by_key = {
+            (row["interface"], row["fq_instance"].lower()): row
+            for row in self._conn.execute("SELECT * FROM mdns_txt").fetchall()
+        }
+        addrs_by_host: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for row in self._conn.execute("SELECT * FROM mdns_addr").fetchall():
+            addrs_by_host.setdefault((row["interface"], row["target_host"].lower()), []).append(row)
+
+        results: list[AdvertisedService] = []
+        for ptr in ptr_rows:
+            key = (ptr["interface"], ptr["fq_instance"].lower())
+            srv = srv_by_key.get(key)
+            txt = txt_by_key.get(key)
+
+            target_host = srv["target_host"] if srv else None
+            target_port = srv["port"] if srv else None
+            addresses: list[str] = []
+            candidate_macs: set[str] = set()
+            if target_host:
+                for addr_row in addrs_by_host.get((ptr["interface"], target_host.lower()), []):
+                    if addr_row["withdrawn"]:
+                        continue
+                    addresses.append(addr_row["ip"])
+                    found_mac = self._directly_observed_mac_for_ip(addr_row["ip"])
+                    if found_mac:
+                        candidate_macs.add(found_mac)
+            mac = next(iter(candidate_macs)) if len(candidate_macs) == 1 else None
+
+            attributes: dict[str, str] = {}
+            if txt is not None:
+                try:
+                    attributes = json.loads(txt["attributes"])
+                except (TypeError, ValueError):
+                    attributes = {}
+
+            results.append(
+                AdvertisedService(
+                    protocol="mdns",
+                    interface=ptr["interface"],
+                    service_type=ptr["service_type"],
+                    service_label=well_known_mdns_label(ptr["service_type"]),
+                    instance_name=ptr["instance_name"],
+                    identity=ptr["fq_instance"],
+                    target_host=target_host,
+                    target_port=target_port,
+                    addresses=addresses,
+                    mac=mac,
+                    attribution_basis="target_address_match" if mac else None,
+                    attributes=attributes,
+                    first_seen=_parse_dt(ptr["first_seen"]),
+                    last_seen=_parse_dt(ptr["last_seen"]),
+                    expires_at=_parse_dt(ptr["expires_at"]) if ptr["expires_at"] else None,
+                    status=self._discovery_status(ptr, now=now),
+                )
+            )
+        return results
+
+    def _ssdp_advertised_services(self, *, now: datetime) -> list[AdvertisedService]:
+        rows = self._conn.execute("SELECT * FROM ssdp_advertisements").fetchall()
+        results: list[AdvertisedService] = []
+        for row in rows:
+            mac = self._directly_observed_mac_for_ip(row["source_ip"]) if row["source_ip"] else None
+            results.append(
+                AdvertisedService(
+                    protocol="ssdp",
+                    interface=row["interface"],
+                    family=row["family"],
+                    service_type=row["nt_or_st"] or "",
+                    identity=row["usn"],
+                    server=row["server"],
+                    location=row["location"],
+                    mac=mac,
+                    attribution_basis="source_address_match" if mac else None,
+                    first_seen=_parse_dt(row["first_seen"]),
+                    last_seen=_parse_dt(row["last_seen"]),
+                    expires_at=_parse_dt(row["expires_at"]) if row["expires_at"] else None,
+                    status=self._discovery_status(row, now=now),
+                )
+            )
+        return results
+
+    def advertised_services(
+        self, *, mac: str | None = None, protocol: str | None = None,
+        include_expired: bool = False, unassociated_only: bool = False,
+        now: datetime | None = None,
+    ) -> list[AdvertisedService]:
+        """Every known advertised service (mDNS/DNS-SD or SSDP/UPnP),
+        correlated from the bounded evidence tables - a pure database read;
+        never scans, never sends discovery traffic.
+
+        Attribution (``mac``/``attribution_basis``) is computed fresh on
+        every call from *current* directly-observed address evidence (see
+        :meth:`_directly_observed_mac_for_ip`) - the transmitting frame's
+        own Ethernet/IP source is deliberately never trusted by itself (an
+        mDNS proxy/reflector or a shared responder can advertise services
+        on behalf of other hosts), and an ambiguous or merely historical
+        IP-to-MAC association leaves a service unassociated rather than
+        guessing. This also means attribution can only be *reevaluated* as
+        better evidence arrives - the underlying advertisement rows
+        themselves are never rewritten to reflect it.
+
+        ``include_expired=False`` (the default) returns only
+        ``"current"`` advertisements; ``True`` also includes
+        ``"expired"``/``"withdrawn"`` history, each explicitly labeled via
+        ``status``. Filters combine with AND.
+        """
+
+        now = now or datetime.now(timezone.utc)
+        services: list[AdvertisedService] = []
+        if protocol in (None, "mdns"):
+            services.extend(self._mdns_advertised_services(now=now))
+        if protocol in (None, "ssdp"):
+            services.extend(self._ssdp_advertised_services(now=now))
+
+        if not include_expired:
+            services = [s for s in services if s.status == "current"]
+        if mac is not None:
+            mac_norm = normalize_mac(mac)
+            services = [s for s in services if s.mac == mac_norm]
+        if unassociated_only:
+            services = [s for s in services if s.mac is None]
+        services.sort(key=lambda s: (s.protocol, s.service_type, s.identity))
+        return services

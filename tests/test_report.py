@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from lanfence.models import (
+    AdvertisedService,
     Device,
     DeviceEvent,
     DeviceMetadata,
@@ -18,6 +19,7 @@ from lanfence.report import (
     exit_code_for_findings,
     highest_severity,
     presence_label,
+    render_advertised_services,
     render_device_detail,
     render_device_inventory,
     render_digest,
@@ -311,6 +313,107 @@ def test_render_device_detail_empty_evidence_says_none():
                                 addresses=[], names=[])
     assert "Addresses (0 retained)" in text
     assert "Names (0 retained)" in text
+
+
+# --- advertised services -----------------------------------------------
+
+
+def _service(**overrides) -> AdvertisedService:
+    now = _now()
+    base = dict(
+        protocol="mdns", interface="eth0", service_type="_ipp._tcp.local", service_label="Printing",
+        instance_name="Office Printer", identity="Office Printer._ipp._tcp.local",
+        target_host="printer.local", target_port=631, mac="aa:bb:cc:dd:ee:ff",
+        attribution_basis="target_address_match", first_seen=now, last_seen=now,
+        expires_at=now + timedelta(minutes=2), status="current",
+    )
+    base.update(overrides)
+    return AdvertisedService(**base)
+
+
+def test_render_device_detail_shows_advertised_services_plain():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, services=[_service()],
+    )
+    assert "Advertised services" in text
+    assert "Printing" in text
+    assert "Instance: Office Printer" in text
+    assert "Target: printer.local:631" in text
+    assert "target IP matched observed device address" in text
+
+
+def test_render_device_detail_omits_services_section_when_not_given():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Advertised services" not in text
+
+
+def test_render_device_detail_unassociated_service_shows_clear_label():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    unassoc = _service(mac=None, attribution_basis=None)
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, services=[unassoc],
+    )
+    assert "unassociated" in text.lower()
+
+
+def test_render_device_detail_withdrawn_service_shows_status():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    withdrawn = _service(status="withdrawn", expires_at=None)
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, services=[withdrawn],
+    )
+    assert "withdrawn" in text.lower()
+
+
+def test_render_device_detail_ssdp_service_shows_server_and_location_labeled_unverified():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    ssdp = AdvertisedService(
+        protocol="ssdp", service_type="urn:schemas-upnp-org:device:MediaRenderer:1",
+        identity="uuid:xyz", server="Linux/3.0 UPnP/1.0", location="http://10.0.0.9/desc.xml",
+        first_seen=now, last_seen=now,
+    )
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, services=[ssdp],
+    )
+    assert "Linux/3.0 UPnP/1.0" in text
+    assert "unverified" in text.lower()
+    assert "never fetched" in text.lower()
+
+
+def test_render_device_detail_txt_attributes_labeled_as_claims():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    svc = _service(attributes={"model": "Widget9000"})
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True, services=[svc])
+    assert "model=Widget9000" in text
+    assert "unverified" in text.lower()
+
+
+# --- render_advertised_services (the `lanfence services` command) ---------
+
+
+def test_render_advertised_services_plain():
+    text = render_advertised_services([_service()], now=_now(), plain=True)
+    assert "Office Printer" in text or "_ipp._tcp" in text
+
+
+def test_render_advertised_services_empty_database_message(capsys):
+    render_advertised_services([], now=_now(), total_count=0, plain=False)
+    captured = capsys.readouterr()
+    assert "no advertised services" in captured.out.lower()
+
+
+def test_render_advertised_services_no_filter_matches_message(capsys):
+    render_advertised_services([], now=_now(), total_count=3, plain=False)
+    captured = capsys.readouterr()
+    assert "no advertised services match" in captured.out.lower()
 
 
 # --- render_digest -------------------------------------------------------

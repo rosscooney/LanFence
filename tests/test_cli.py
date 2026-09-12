@@ -494,6 +494,45 @@ def test_monitor_dhcp_server_detection_banner_off_by_default(config_path: Path, 
     assert "dhcp-server-detection: False" in result.output
 
 
+def test_monitor_mdns_ssdp_off_by_default(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--no-passive", "--config", str(config_path)])
+    assert "mdns: False" in result.output
+    assert "ssdp: False" in result.output
+
+
+def test_monitor_mdns_flag_is_reflected_in_banner(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    with patch("lanfence.cli.scanner.passive_sniff"):
+        result = runner.invoke(app, ["monitor", "--mdns", "--config", str(config_path)])
+    assert "mdns: True" in result.output
+
+
+def test_monitor_ssdp_flag_is_reflected_in_banner(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    with patch("lanfence.cli.scanner.passive_sniff"):
+        result = runner.invoke(app, ["monitor", "--ssdp", "--config", str(config_path)])
+    assert "ssdp: True" in result.output
+
+
+def test_monitor_mdns_disabled_when_passive_disabled_even_if_mdns_flag_true(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--mdns", "--no-passive", "--config", str(config_path)])
+    assert "mdns: False" in result.output
+
+
+def test_monitor_warns_when_discovery_enabled_but_passive_disabled(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--mdns", "--no-passive", "--config", str(config_path)])
+    assert "enabled but inactive" in result.output.lower()
+
+
+def test_monitor_no_warning_when_discovery_disabled_and_passive_disabled(config_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--no-passive", "--config", str(config_path)])
+    assert "enabled but inactive" not in result.output.lower()
+
+
 def test_monitor_dhcp_server_detection_warns_when_enabled_but_passive_off(tmp_path: Path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -609,6 +648,151 @@ def test_dhcp_servers_is_read_only_never_scans(config_path: Path):
     assert result.exit_code == 0
     mock_scan.assert_not_called()
     mock_sniff.assert_not_called()
+
+
+# --- services (advertised-service discovery) -------------------------------
+
+
+def _seed_mdns_service(config_path: Path, *, mac: str | None = "aa:bb:cc:dd:ee:ff") -> None:
+    from lanfence.discovery import process_mdns_record_sighting
+    from lanfence.discovery import MdnsRecordSighting
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    now = _now()
+    if mac is not None:
+        store.observe(mac=mac, ip="192.168.1.50", hostname=None, vendor=None, seen_at=now)
+    ptr = MdnsRecordSighting(
+        rtype="PTR", ttl=120, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+        family="ipv4", seen_at=now, service_type="_ipp._tcp.local", instance_name="Office Printer",
+        fq_instance="Office Printer._ipp._tcp.local",
+    )
+    srv = MdnsRecordSighting(
+        rtype="SRV", ttl=120, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+        family="ipv4", seen_at=now, fq_instance="Office Printer._ipp._tcp.local",
+        target_host="printer.local", target_port=631,
+    )
+    addr = MdnsRecordSighting(
+        rtype="A", ttl=120, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+        family="ipv4", seen_at=now, address_owner="printer.local", address="192.168.1.50",
+    )
+    for s in (ptr, srv, addr):
+        process_mdns_record_sighting(s, store)
+    store.close()
+
+
+def test_services_empty_result(config_path: Path):
+    result = runner.invoke(app, ["services", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "No advertised services observed" in result.output
+
+
+def test_services_lists_observed_service(config_path: Path):
+    _seed_mdns_service(config_path)
+    result = runner.invoke(app, ["services", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Printing" in result.output or "_ipp._tcp" in result.output
+
+
+def test_services_json_output_includes_full_evidence(config_path: Path):
+    import json
+
+    _seed_mdns_service(config_path)
+    result = runner.invoke(app, ["services", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["target_host"] == "printer.local"
+    assert payload[0]["target_port"] == 631
+    assert payload[0]["mac"] == "aa:bb:cc:dd:ee:ff"
+
+
+def test_services_protocol_filter(config_path: Path):
+    import json
+
+    _seed_mdns_service(config_path)
+    result = runner.invoke(app, ["services", "--protocol", "ssdp", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == []
+
+
+def test_services_rejects_invalid_protocol(config_path: Path):
+    result = runner.invoke(app, ["services", "--protocol", "bogus", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_services_unassociated_filter_shows_only_unmatched(config_path: Path):
+    import json
+
+    _seed_mdns_service(config_path, mac=None)
+    result = runner.invoke(
+        app, ["services", "--unassociated", "--format", "json", "--config", str(config_path)]
+    )
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["mac"] is None
+
+
+def test_services_include_expired_shows_history(config_path: Path):
+    import json
+
+    from lanfence.db import DeviceStore as _Store
+    from lanfence.discovery import MdnsRecordSighting, process_mdns_record_sighting
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = _Store(cfg_dict["db_path"])
+    ptr = MdnsRecordSighting(
+        rtype="PTR", ttl=1, cache_flush=False, interface="eth0", source_ip=None, source_mac=None,
+        family="ipv4", seen_at=_now() - timedelta(hours=1), service_type="_ipp._tcp.local",
+        instance_name="Old Printer", fq_instance="Old Printer._ipp._tcp.local",
+    )
+    process_mdns_record_sighting(ptr, store)
+    store.close()
+
+    default_result = runner.invoke(app, ["services", "--format", "json", "--config", str(config_path)])
+    assert json.loads(default_result.output) == []
+
+    history_result = runner.invoke(
+        app, ["services", "--include-expired", "--format", "json", "--config", str(config_path)]
+    )
+    payload = json.loads(history_result.output)
+    assert len(payload) == 1
+    assert payload[0]["status"] == "expired"
+
+
+def test_services_rejects_invalid_format(config_path: Path):
+    result = runner.invoke(app, ["services", "--format", "xml", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_services_never_scans_or_sends_discovery_traffic(config_path: Path):
+    with patch("lanfence.cli.scanner.active_scan") as mock_scan, \
+         patch("lanfence.cli.scanner.passive_sniff") as mock_sniff:
+        result = runner.invoke(app, ["services", "--config", str(config_path)])
+    assert result.exit_code == 0
+    mock_scan.assert_not_called()
+    mock_sniff.assert_not_called()
+
+
+def test_device_json_includes_services_key(config_path: Path):
+    import json
+
+    _seed_devices(config_path)
+    _seed_mdns_service(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--format", "json", "--config", str(config_path)]
+    )
+    payload = json.loads(result.output)
+    assert len(payload["services"]) == 1
+    assert payload["services"][0]["target_host"] == "printer.local"
+
+
+def test_device_table_shows_advertised_services_section(config_path: Path):
+    _seed_devices(config_path)
+    _seed_mdns_service(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Advertised services" in result.output
+    assert "printer.local" in result.output
 
 
 class _FakeUrlopenResponse:
@@ -1634,7 +1818,7 @@ def test_monitor_queued_passive_sighting_prevents_false_disconnect_reappear(
         def start(self) -> None:
             self._target()
 
-    def fake_passive_sniff(*, on_sighting, interface=None, stop_event=None, dhcp=True, on_dhcp_server=None):
+    def fake_passive_sniff(*, on_sighting, interface=None, stop_event=None, dhcp=True, on_dhcp_server=None, **_kwargs):
         on_sighting(scanner_module.ArpSighting(mac=sighting_mac, ip="10.0.0.5", seen_at=_now()))
 
     monkeypatch.setattr("lanfence.cli.threading.Thread", _SyncThread)

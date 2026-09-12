@@ -388,13 +388,19 @@ class DigestDeviceEntry(BaseModel):
     #: device <MAC>` away.
     owner: str | None = None
     group: str | None = None
+    #: A terse, bounded summary of currently-advertised services (see
+    #: :mod:`lanfence.discovery`) - populated only for ``new_devices``
+    #: entries (see ``lanfence/digest.py``'s ``_bounded_section``); every
+    #: other section leaves this ``None`` to keep routine rows terse.
+    #: Advertised claims, never verified capabilities.
+    services_summary: str | None = None
 
     @field_validator("mac")
     @classmethod
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("name", "ip", "hostname", "vendor", "review_notes", "owner", "group")
+    @field_validator("name", "ip", "hostname", "vendor", "review_notes", "owner", "group", "services_summary")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None
@@ -526,3 +532,82 @@ class DhcpServerRecord(BaseModel):
             # Untrusted wire evidence - keep the raw (sanitized) value
             # rather than dropping it or crashing, if it's ever malformed.
             return clean_text(value, max_len=64)
+
+
+#: mDNS/DNS-SD (RFC 6762/6763) or SSDP/UPnP - the two passive discovery
+#: mechanisms this project parses. See :mod:`lanfence.discovery`.
+DiscoveryProtocol = Literal["mdns", "ssdp"]
+
+#: "current": not expired/withdrawn - not a claim the service was ever
+#: probed or verified reachable, only that its last-advertised lifetime
+#: hasn't lapsed. "expired": its TTL/max-age lapsed with no refresh.
+#: "withdrawn": the advertiser explicitly announced it's gone (mDNS
+#: goodbye / SSDP ssdp:byebye) - a stronger, earlier signal than expiry.
+AdvertisedServiceStatus = Literal["current", "expired", "withdrawn"]
+
+
+class AdvertisedService(BaseModel):
+    """One device-advertised service, correlated from mDNS/DNS-SD or SSDP/
+    UPnP evidence (see :mod:`lanfence.discovery`) - a claim the advertising
+    device makes about itself, never a verified capability, an
+    authenticated identity, or proof the service is reachable.
+
+    ``identity`` is the stable protocol-specific key evidence is correlated
+    on: the full DNS-SD instance name (e.g.
+    ``"Office Printer._ipp._tcp.local"``) for mDNS, or the ``USN`` for
+    SSDP. ``mac``/``attribution_basis`` are computed at read time from
+    current address evidence, never stored statically - see
+    :meth:`lanfence.db.DeviceStore.advertised_services` for why a
+    transmitting frame's own Ethernet/IP source is deliberately *not*
+    trusted as attribution (mDNS proxies/reflectors and shared responders
+    can advertise services for other hosts), and why an ambiguous or
+    merely historical IP-to-MAC association leaves ``mac`` ``None`` rather
+    than guessing. ``server``/``location`` (SSDP only) and ``attributes``
+    (mDNS TXT only, bounded and allowlisted - see
+    ``lanfence/discovery.py``) are all advertised claims, never verified;
+    ``location`` in particular is never fetched, followed, or embedded as
+    a resource - see the SSDP section of :mod:`lanfence.discovery`.
+    """
+
+    protocol: DiscoveryProtocol
+    interface: str = ""
+    family: Literal["ipv4", "ipv6"] | None = None
+    service_type: str
+    service_label: str | None = None
+    instance_name: str | None = None
+    identity: str
+    target_host: str | None = None
+    target_port: int | None = None
+    addresses: list[str] = Field(default_factory=list)
+    mac: str | None = None
+    attribution_basis: str | None = None
+    attributes: dict[str, str] = Field(default_factory=dict)
+    server: str | None = None
+    location: str | None = None
+    first_seen: datetime
+    last_seen: datetime
+    expires_at: datetime | None = None
+    status: AdvertisedServiceStatus = "current"
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str | None) -> str | None:
+        return normalize_mac(value) if value is not None else None
+
+    @field_validator(
+        "interface", "service_type", "service_label", "instance_name", "identity",
+        "target_host", "attribution_basis", "server", "location",
+    )
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=512) if value is not None else value
+
+    @field_validator("addresses")
+    @classmethod
+    def _clean_addresses(cls, value: list[str]) -> list[str]:
+        return [clean_text(v, max_len=64) for v in value]
+
+    @field_validator("attributes")
+    @classmethod
+    def _clean_attributes(cls, value: dict[str, str]) -> dict[str, str]:
+        return {clean_text(k, max_len=64): clean_text(v, max_len=256) for k, v in value.items()}

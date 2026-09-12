@@ -220,3 +220,20 @@ def test_dhcp_servers_rejects_non_finite_cooldown():
 def test_dhcp_servers_cooldown_zero_is_allowed():
     cfg = Config(dhcp_servers={"alert_cooldown_seconds": 0})
     assert cfg.dhcp_servers.alert_cooldown_seconds == 0
+
+
+def test_discovery_defaults_are_opt_in():
+    cfg = Config()
+    assert cfg.discovery.mdns is False
+    assert cfg.discovery.ssdp is False
+
+
+def test_discovery_can_be_enabled():
+    cfg = Config(discovery={"mdns": True, "ssdp": True})
+    assert cfg.discovery.mdns is True
+    assert cfg.discovery.ssdp is True
+
+
+def test_discovery_rejects_unknown_field():
+    with pytest.raises(Exception):
+        Config(discovery={"unknown_field": True})

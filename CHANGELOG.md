@@ -54,6 +54,30 @@ Each release is also published to
   rows terse). `lanfence reset` clears metadata along with the rest of a
   device's history.
 
+- **Passive advertised-service discovery (mDNS/DNS-SD, SSDP/UPnP).**
+  Enriches inventory with services a device advertises about itself
+  (printing, AirPlay, remote audio, cast, generic web service, and any
+  other valid service type retained with its raw name) - opt-in via
+  `discovery.mdns`/`discovery.ssdp`, narrowly extending the existing
+  passive capture filter (UDP 5353/1900); needs `scan.passive` too, and
+  `monitor` warns if enabled without it. Strictly passive: no mDNS query,
+  SSDP `M-SEARCH`, or other discovery traffic is ever sent, and an SSDP
+  `LOCATION` URL is never fetched. Attribution to a device is deliberately
+  conservative - a service's target address (or, for SSDP, its packet
+  source) is matched only against *directly-observed* (ARP/IPv6 ND)
+  address evidence, never the transmitting frame's own Ethernet/IP source
+  (an mDNS proxy/reflector can advertise on behalf of other hosts) and
+  never an ambiguous or merely historical IP association; unmatched
+  services are shown as unassociated rather than guessed. TTL/`ssdp:byebye`/
+  goodbye semantics are honored per-record, independently, with a small
+  documented allowlist for mDNS TXT attributes (bounded count/size, never a
+  raw TXT blob) - all advertised claims, never verified capabilities.
+  `lanfence device <MAC>` shows a new "Advertised services" section (and
+  `--format json` a new `services` array); a new `lanfence services`
+  command lists everything observed (`--protocol`, `--unassociated`,
+  `--include-expired`). New-device digest rows get a terse services
+  summary; no new findings/alerts are raised by this feature.
+
 ## [0.3.9] - 2026-09-12
 
 ### Added

@@ -566,3 +566,164 @@ def test_dhcp_ip_option_handles_str_bytes_and_malformed():
     assert scanner._dhcp_ip_option(None) is None
     assert scanner._dhcp_ip_option(b"\xff\xfe\x00") is None
     assert scanner._dhcp_ip_option(1234) is None
+
+
+# --- passive_sniff: mDNS/SSDP discovery dispatch ---------------------------
+
+
+def _capture_prn(monkeypatch, **passive_sniff_kwargs):
+    import scapy.all as scapy_module
+
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    scanner.passive_sniff(on_sighting=lambda s: None, interface="eth0", **passive_sniff_kwargs)
+    return captured
+
+
+def test_passive_sniff_filter_omits_discovery_ports_by_default(monkeypatch):
+    captured = _capture_prn(monkeypatch)
+    assert "5353" not in captured["filter"]
+    assert "1900" not in captured["filter"]
+
+
+def test_passive_sniff_filter_includes_mdns_port_when_enabled(monkeypatch):
+    captured = _capture_prn(monkeypatch, mdns=True)
+    assert "port 5353" in captured["filter"]
+    assert "1900" not in captured["filter"]
+
+
+def test_passive_sniff_filter_includes_ssdp_port_when_enabled(monkeypatch):
+    captured = _capture_prn(monkeypatch, ssdp=True)
+    assert "port 1900" in captured["filter"]
+    assert "5353" not in captured["filter"]
+
+
+def _mdns_scapy_packet(dns_payload: bytes, *, src_mac="aa:bb:cc:dd:ee:ff", src_ip="10.0.0.5"):
+    import scapy.all as scapy_module
+
+    pkt = (
+        scapy_module.Ether(src=src_mac, dst="01:00:5e:00:00:fb")
+        / scapy_module.IP(src=src_ip, dst="224.0.0.251")
+        / scapy_module.UDP(sport=5353, dport=5353)
+        / scapy_module.Raw(load=dns_payload)
+    )
+    return scapy_module.Ether(bytes(pkt))  # round-trip through wire format, like a real capture
+
+
+def _ssdp_scapy_packet(text: bytes, *, src_mac="11:22:33:44:55:66", src_ip="10.0.0.9"):
+    import scapy.all as scapy_module
+
+    pkt = (
+        scapy_module.Ether(src=src_mac, dst="01:00:5e:7f:ff:fa")
+        / scapy_module.IP(src=src_ip, dst="239.255.255.250")
+        / scapy_module.UDP(sport=1900, dport=1900)
+        / scapy_module.Raw(load=text)
+    )
+    return scapy_module.Ether(bytes(pkt))
+
+
+def _simple_mdns_ptr_message() -> bytes:
+    import struct
+
+    def name(labels):
+        out = b""
+        for label in labels:
+            out += bytes([len(label)]) + label
+        return out + b"\x00"
+
+    owner = [b"_ipp", b"_tcp", b"local"]
+    target = [b"Printer", b"_ipp", b"_tcp", b"local"]
+    rdata = name(target)
+    header = struct.pack(">HHHHHH", 0, 0x8400, 0, 1, 0, 0)
+    return header + name(owner) + struct.pack(">HHI", 12, 1, 120) + struct.pack(">H", len(rdata)) + rdata
+
+
+def test_passive_sniff_dispatches_mdns_records_with_capture_metadata(monkeypatch):
+    records = []
+    captured = _capture_prn(monkeypatch, mdns=True, on_mdns_records=records.append)
+    handler = captured["prn"]
+
+    handler(_mdns_scapy_packet(_simple_mdns_ptr_message()))
+
+    assert len(records) == 1
+    sightings = records[0]
+    assert sightings[0].rtype == "PTR"
+    assert sightings[0].interface == "eth0"
+    assert sightings[0].source_ip == "10.0.0.5"
+    assert sightings[0].source_mac == "aa:bb:cc:dd:ee:ff"
+    assert sightings[0].family == "ipv4"
+
+
+def test_passive_sniff_ignores_mdns_when_disabled(monkeypatch):
+    records = []
+    captured = _capture_prn(monkeypatch, mdns=False, on_mdns_records=records.append)
+    handler = captured["prn"]
+
+    handler(_mdns_scapy_packet(_simple_mdns_ptr_message()))
+
+    assert records == []
+
+
+def test_passive_sniff_dispatches_ssdp_sighting_with_capture_metadata(monkeypatch):
+    sightings = []
+    captured = _capture_prn(monkeypatch, ssdp=True, on_ssdp=sightings.append)
+    handler = captured["prn"]
+
+    ssdp_text = (
+        b"NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nCACHE-CONTROL: max-age=1800\r\n"
+        b"NT: upnp:rootdevice\r\nNTS: ssdp:alive\r\nUSN: uuid:abc::upnp:rootdevice\r\n\r\n"
+    )
+    handler(_ssdp_scapy_packet(ssdp_text))
+
+    assert len(sightings) == 1
+    assert sightings[0].usn == "uuid:abc::upnp:rootdevice"
+    assert sightings[0].interface == "eth0"
+    assert sightings[0].source_ip == "10.0.0.9"
+    assert sightings[0].source_mac == "11:22:33:44:55:66"
+
+
+def test_passive_sniff_ignores_ssdp_when_disabled(monkeypatch):
+    sightings = []
+    captured = _capture_prn(monkeypatch, ssdp=False, on_ssdp=sightings.append)
+    handler = captured["prn"]
+
+    ssdp_text = b"NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nNT: upnp:rootdevice\r\nUSN: uuid:abc::x\r\n\r\n"
+    handler(_ssdp_scapy_packet(ssdp_text))
+
+    assert sightings == []
+
+
+def test_passive_sniff_mdns_malformed_packet_does_not_crash_or_call_back(monkeypatch):
+    records = []
+    captured = _capture_prn(monkeypatch, mdns=True, on_mdns_records=records.append)
+    handler = captured["prn"]
+
+    handler(_mdns_scapy_packet(b"\x00\x01"))  # truncated header
+
+    assert records == []
+
+
+def test_passive_sniff_arp_still_works_with_discovery_enabled(monkeypatch):
+    """Existing ARP capture must remain functional alongside mDNS/SSDP."""
+
+    import scapy.all as scapy_module
+
+    sightings = []
+    captured = {}
+
+    def fake_sniff(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scapy_module, "sniff", fake_sniff)
+    scanner.passive_sniff(on_sighting=sightings.append, interface="eth0", mdns=True, ssdp=True)
+
+    arp_request = scapy_module.Ether() / scapy_module.ARP(hwsrc="aa:bb:cc:dd:ee:ff", psrc="10.0.0.5", op=1)
+    captured["prn"](arp_request)
+
+    assert len(sightings) == 1
+    assert sightings[0].mac == "aa:bb:cc:dd:ee:ff"
+    assert sightings[0].source == "arp"
