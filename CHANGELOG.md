@@ -15,6 +15,8 @@ Each release is also published to
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-09-12
+
 ### Added
 
 - **Unexpected DHCP server detection.** Passively detects a DHCPOFFER/ACK/
@@ -475,7 +477,8 @@ webhook alerting.
   destination (syslog target, SMTP host, webhook URL) is one the operator
   configures themselves.
 
-[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/rosscooney/lanfence/compare/v0.3.9...HEAD
+[0.3.9]: https://github.com/rosscooney/lanfence/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/rosscooney/lanfence/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/rosscooney/lanfence/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/rosscooney/lanfence/compare/v0.3.5...v0.3.6
