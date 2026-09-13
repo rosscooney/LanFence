@@ -2062,7 +2062,14 @@ def test_channels_bare_listing_shows_safe_summary_not_secret(config_path: Path):
     )
     result = runner.invoke(app, ["channels", "--config", str(config_path)])
     assert result.exit_code == 0
-    assert "hooks.slack.com" in result.output
+    # Exact token match, not a raw substring search on the rendered output -
+    # a substring check against a bare-looking hostname is exactly what
+    # CodeQL's py/incomplete-url-substring-sanitization rule flags (it can't
+    # tell this apart from checking a URL's host for security purposes),
+    # and word-splitting first is also a strictly more precise check: a raw
+    # substring search would spuriously pass if "hooks.slack.com" merely
+    # appeared as part of a longer token.
+    assert any("hooks.slack.com" in line.split() for line in result.output.splitlines())
     assert "SECRETSECRET" not in result.output
 
 
