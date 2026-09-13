@@ -2250,9 +2250,16 @@ def test_channels_setup_configure_another_channel_loop(config_path: Path):
             ),
         )
     assert result.exit_code == 0
-    body = config_path.read_text()
-    assert "hooks.slack.com" in body
-    assert "discord.com" in body
+    # Exact equality on the parsed field, not a substring check on the raw
+    # file text - a substring check against a bare-looking hostname like
+    # "discord.com" is flagged by CodeQL (py/incomplete-url-substring-
+    # sanitization) as the same unsafe pattern used for (incomplete) host
+    # allowlisting, even though this is only a test assertion with no
+    # security role; asserting the exact stored value sidesteps that
+    # while also being a strictly more precise check.
+    saved = yaml.safe_load(config_path.read_text())
+    assert saved["alerts"]["slack"]["webhook_url"] == "https://hooks.slack.com/services/x"
+    assert saved["alerts"]["discord"]["webhook_url"] == "https://discord.com/api/webhooks/x"
 
 
 def test_channels_setup_test_message_default_is_no(config_path: Path):
