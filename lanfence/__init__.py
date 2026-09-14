@@ -3,4 +3,4 @@
 
 """LAN Fence - defensive LAN device monitor."""
 
-__version__ = "0.3.13"
+__version__ = "0.4.1"

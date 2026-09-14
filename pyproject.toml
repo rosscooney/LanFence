@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lanfence"
-version = "0.3.13"
+version = "0.4.1"
 description = "Defensive LAN device monitor - detect and alert on unauthorized devices joining your network"
 readme = "README.md"
 requires-python = ">=3.11"
