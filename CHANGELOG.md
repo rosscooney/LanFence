@@ -28,10 +28,10 @@ Each release is also published to
   device" section.
 - **`lanfence review`'s interactive queue** now shows this dossier
   compactly before asking what to do, with a richer action menu
-  (`[T]rust`/`[I]nvestigate`/`[S]nooze`/`[D] Full details`/`[N]ext`/
-  `[Q]uit`), and walks the queue in **review-priority order** (Priority /
-  Needs identification / Likely familiar - a deterministic, plain-language
-  tier, never a numeric risk score) instead of MAC order.
+  (`[T]rust`/`[I]nvestigate`/`[S]nooze`/`[X] Inspect`/`[D] Full details`/
+  `[N]ext`/`[Q]uit`), and walks the queue in **review-priority order**
+  (Priority / Needs identification / Likely familiar - a deterministic,
+  plain-language tier, never a numeric risk score) instead of MAC order.
 - **`lanfence allow <MAC>`** shows the same compact dossier before asking
   for confirmation when trusting an already-observed device at an
   interactive terminal; a new `--yes` flag skips the prompt, and
@@ -42,6 +42,20 @@ Each release is also published to
   higher-priority security characteristics", plus how many are already
   reviewed) shown alongside the existing compact device table - not new
   table columns, and not part of the stable JSON output.
+- **`lanfence inspect <MAC>`: optional active device inspection.** A
+  bounded TCP connect-scan of a short, curated list of common service ports
+  on one already-known device - a dependency-free built-in scan always
+  works, and the optional `nmap` binary is used automatically when present
+  for better service labels (`--no-nmap` to force the built-in scan
+  either way). Confirmed open ports are always shown separately from
+  inferred service labels and an overall, confidence-labeled "probable
+  platform" guess (never OS fingerprinting, never definitive). Never run
+  automatically by `scan`/`monitor`/passive discovery/`review` - only an
+  explicit `lanfence inspect` invocation, or an explicit yes to the offer
+  `lanfence review` makes (with a clear warning) for the device on screen.
+  Results are persisted per MAC and shown again, labeled with their age
+  and flagged stale past 24 hours, by `lanfence device <MAC>` and
+  `review`'s `[D] Full details` view.
 
 ## [0.3.13] - 2026-09-12
 

@@ -24,7 +24,7 @@ from typing import Optional
 
 import typer
 
-from lanfence import __version__, alerts, discovery, monitor_ui, scanner
+from lanfence import __version__, active_inspect, alerts, discovery, monitor_ui, scanner
 from lanfence.allowlist import Allowlist
 from lanfence.channels import (
     CHANNEL_FIELDS,
@@ -85,6 +85,7 @@ from lanfence.report import (
     render_digest,
     render_events,
     render_findings,
+    render_inspection_result,
     render_scan_result,
     render_triage_summary,
 )
@@ -1510,13 +1511,79 @@ def device(
             # matching this device, never presented as verified fact.
             "classification": dossier.classification.model_dump(mode="json"),
             "fingerprint_matches": [m.model_dump(mode="json") for m in dossier.fingerprint_matches],
+            # None when never actively inspected (see `lanfence inspect`) -
+            # distinct from an inspection that ran and found nothing.
+            "inspection": dossier.inspection.model_dump(mode="json") if dossier.inspection else None,
         }
         typer.echo(json.dumps(payload, indent=2))
     else:
         render_device_detail(
             dev, events, since_dt, now=now, default_offline_after_seconds=cfg.scan.offline_grace_seconds,
             addresses=addresses, names=names, services=services, classification=dossier.classification,
+            inspection=dossier.inspection,
         )
+
+
+@app.command()
+def inspect(
+    mac: str = typer.Argument(..., help="MAC address of an already-known device to actively inspect."),
+    nmap: bool = typer.Option(
+        True, "--nmap/--no-nmap",
+        help="Prefer the optional nmap binary when available (falls back to a built-in scan either way).",
+    ),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Actively inspect one already-known device: a bounded TCP connect-scan
+    of a short list of common service ports, plus a conservative platform
+    guess from which ports responded.
+
+    Unlike every other LAN Fence command, this sends probe traffic directly
+    to the device - never run automatically by `scan`/`monitor`/passive
+    discovery/`review`. Confirmed open ports are a fact (the connection
+    succeeded); the service label next to each one and the overall platform
+    guess are inferences, never verified capabilities or OS fingerprinting.
+    Results are persisted (one row per MAC, replacing any earlier run) so
+    `lanfence device <MAC>` and `lanfence review` can show them again later,
+    labeled with their age.
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    try:
+        norm_mac = normalize_mac(mac)
+    except ValueError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+
+    cfg = _load_config(config)
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interface)
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        dev = build_device(store, allowlist, norm_mac)
+        if dev is None:
+            typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
+            raise typer.Exit(code=2)
+        if not dev.ip:
+            typer.secho(
+                f"error: {norm_mac} has no known IP address to inspect - it must be seen by a "
+                "scan/monitor first", fg="red", err=True,
+            )
+            raise typer.Exit(code=2)
+
+        if output_format != "json":
+            typer.secho(f"Sending active inspection probes to {dev.ip} ({norm_mac})...", fg="yellow")
+
+        result = active_inspect.inspect_device(norm_mac, dev.ip, use_nmap=nmap)
+        store.record_inspection(result)
+
+    if output_format == "json":
+        typer.echo(result.model_dump_json(indent=2))
+    else:
+        typer.echo("")
+        typer.echo(render_inspection_result(result, now=utcnow()))
 
 
 def _stdin_is_interactive() -> bool:
@@ -1564,7 +1631,7 @@ def _run_interactive_review(cfg: Config) -> None:
         candidates = [d for d in build_inventory(store, display_allowlist) if is_review_needed(d, now=now)]
         dossiers = [
             build_device_dossier(store, display_allowlist, d.mac, signatures=signatures,
-                                  vendor_file=cfg.vendor_file, now=now, device=d)
+                                  vendor_file=cfg.vendor_file, now=now, device=d, inspection=None)
             for d in candidates
         ]
         queue = sorted(dossiers, key=lambda dos: (review_priority(dos)[0], dos.device.mac))
@@ -1583,7 +1650,7 @@ def _run_interactive_review(cfg: Config) -> None:
                 typer.echo(render_dossier_compact(dossier, index=index, total=total, priority_label=priority_label))
                 typer.echo("")
                 typer.secho(
-                    "Actions: [T]rust  [I]nvestigate  [S]nooze  [D] Full details  [N]ext  [Q]uit",
+                    "Actions: [T]rust  [I]nvestigate  [S]nooze  [X] Inspect  [D] Full details  [N]ext  [Q]uit",
                     fg="cyan",
                 )
                 action = typer.prompt("  choice", default="n").strip().lower()
@@ -1597,6 +1664,23 @@ def _run_interactive_review(cfg: Config) -> None:
                         addresses=dossier.addresses, names=dossier.names, services=dossier.services,
                         classification=dossier.classification,
                     )
+                    typer.echo("")
+                    continue
+                if action in ("x", "inspect"):
+                    typer.echo("")
+                    if not dev.ip:
+                        typer.secho(f"  {dev.mac} has no known IP address to inspect.", fg="yellow")
+                    else:
+                        typer.secho(
+                            "  More information may be available by actively inspecting this device.\n"
+                            f"  Active inspection sends probe traffic directly to {dev.ip}.",
+                            fg="yellow",
+                        )
+                        if typer.confirm("  Run active inspection?", default=False):
+                            result = active_inspect.inspect_device(dev.mac, dev.ip)
+                            store.record_inspection(result)
+                            typer.echo("")
+                            typer.echo(render_inspection_result(result, now=now))
                     typer.echo("")
                     continue
                 break

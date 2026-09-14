@@ -611,3 +611,74 @@ class AdvertisedService(BaseModel):
     @classmethod
     def _clean_attributes(cls, value: dict[str, str]) -> dict[str, str]:
         return {clean_text(k, max_len=64): clean_text(v, max_len=256) for k, v in value.items()}
+
+
+#: How one active-inspection result was obtained - "socket" is the always-
+#: available bounded TCP connect-scan (see :mod:`lanfence.active_inspect`),
+#: "nmap" the optional richer scan used only when the ``nmap`` binary is
+#: present. Persisted so a stale result never silently looks more (or less)
+#: thorough than it was.
+InspectionMethod = Literal["socket", "nmap"]
+InspectionConfidence = Literal["medium", "low"]
+
+
+class InspectedPort(BaseModel):
+    """One TCP port confirmed open on one device during active inspection
+    (see :mod:`lanfence.active_inspect`) - ``service`` is an *inferred*
+    label from the port number/banner, never a verified capability. Direct,
+    targeted probe traffic to the device itself, unlike every other
+    evidence model in this file, which is built entirely from passive
+    observation or a response to a routine ARP/ND request.
+    """
+
+    port: int
+    protocol: Literal["tcp"] = "tcp"
+    service: str | None = None
+    banner: str | None = None
+
+    @field_validator("service", "banner")
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=256) if value is not None else value
+
+
+class InspectionResult(BaseModel):
+    """The outcome of one ``lanfence inspect <mac>`` run against one device,
+    persisted so it can be shown again (labeled with its age) without
+    re-probing - see :meth:`lanfence.db.DeviceStore.record_inspection`/
+    ``inspection_for``. Never produced by ``scan``/``monitor``/passive
+    discovery/``review`` on their own - only an explicit, operator-initiated
+    probe of one already-known device.
+
+    ``platform_guess`` is a coarse, low-confidence inference from open-port
+    patterns (see :mod:`lanfence.active_inspect`) - not OS fingerprinting,
+    and never presented as definitive.
+    """
+
+    mac: str
+    ip: str
+    method: InspectionMethod
+    observed_at: datetime
+    open_ports: list[InspectedPort] = Field(default_factory=list)
+    platform_guess: str | None = None
+    platform_confidence: InspectionConfidence | None = None
+    platform_reasons: list[str] = Field(default_factory=list)
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+    @field_validator("ip", "platform_guess")
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=256) if value is not None else value
+
+    @field_validator("platform_reasons")
+    @classmethod
+    def _clean_reasons(cls, value: list[str]) -> list[str]:
+        return [clean_text(v, max_len=256) for v in value]
+
+    @property
+    def is_known_platform(self) -> bool:
+        return self.platform_confidence is not None

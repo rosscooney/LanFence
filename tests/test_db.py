@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from lanfence.db import DeviceStore
+from lanfence.models import InspectedPort, InspectionResult
 
 
 def _now():
@@ -746,6 +747,49 @@ def test_reset_all_on_empty_database_is_a_noop(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         store.reset_all()  # must not raise
         assert store.all_devices() == []
+
+
+# --- active inspection results ----------------------------------------------
+
+
+def _inspection(**overrides) -> InspectionResult:
+    base = dict(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", method="socket", observed_at=_now(),
+        open_ports=[InspectedPort(port=22, service="ssh"), InspectedPort(port=80, service="http", banner="nginx")],
+        platform_guess="Linux/Unix-like device (SSH only)", platform_confidence="low",
+        platform_reasons=["Open port: 22 (SSH), nothing else responded"],
+    )
+    base.update(overrides)
+    return InspectionResult(**base)
+
+
+def test_inspection_for_unknown_mac_is_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        assert store.inspection_for("aa:bb:cc:dd:ee:ff") is None
+
+
+def test_record_and_read_back_inspection_result(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        result = _inspection()
+        store.record_inspection(result)
+        fetched = store.inspection_for("aa:bb:cc:dd:ee:ff")
+        assert fetched == result
+
+
+def test_record_inspection_replaces_rather_than_accumulates(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        store.record_inspection(_inspection(method="socket"))
+        store.record_inspection(_inspection(method="nmap", open_ports=[InspectedPort(port=443, service="https")]))
+        fetched = store.inspection_for("aa:bb:cc:dd:ee:ff")
+        assert fetched.method == "nmap"
+        assert [p.port for p in fetched.open_ports] == [443]
+
+
+def test_reset_all_clears_inspection_results(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        store.record_inspection(_inspection())
+        store.reset_all()
+        assert store.inspection_for("aa:bb:cc:dd:ee:ff") is None
 
 
 # --- presence policy -------------------------------------------------------

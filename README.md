@@ -163,6 +163,8 @@ lanfence review <MAC> --trust --name "Kitchen speaker"
 lanfence review <MAC> --snooze 24h
 lanfence review <MAC> --investigate --notes "..."
 lanfence review <MAC> --clear
+lanfence inspect <MAC>          # optional: actively probe one known device's open ports
+lanfence inspect <MAC> --no-nmap  # force the built-in scan, skip the optional nmap integration
 lanfence report --since 24h     # summarize events/findings from the database
 lanfence digest                 # preview a 24h summary; add --send to deliver it
 lanfence digest --since 7d --send --channel email
@@ -460,6 +462,73 @@ allowlist on its normal sweep cadence, so a `review --trust` or `allow` made
 from another terminal takes effect without restarting it; review/snooze
 state itself is read fresh from the database on every finding, so it needs
 no such reload.
+
+## Active device inspection
+
+Everything above is built entirely from **passive** evidence - LAN Fence
+never sends traffic aimed at a specific device during `scan`, `monitor`,
+passive discovery, or `review`. `lanfence inspect <MAC>` is the one
+explicit, opt-in exception: a bounded TCP connect-scan of a short, curated
+list of common service ports on one already-known device, to help answer
+"what is this thing" when passive evidence isn't enough.
+
+```text
+$ lanfence inspect aa:bb:cc:dd:ee:ff
+
+Sending active inspection probes to 192.168.1.47 (aa:bb:cc:dd:ee:ff)...
+
+Active inspection of aa:bb:cc:dd:ee:ff (192.168.1.47)
+Method: nmap  ·  Observed: 14 Sep 2026 09:41 (just now)
+
+Confirmed open ports:
+  22/tcp   inferred service: ssh
+  80/tcp   inferred service: http
+
+Probable platform: not enough evidence to guess
+
+This is an inference from which ports responded, not OS fingerprinting -
+treat it as a hint, not a verified fact.
+```
+
+**Confirmed vs. inferred, always kept separate**: an open port is a fact -
+the TCP handshake succeeded. The service label next to it, and any overall
+"Probable platform" guess, are inferences from the port number and (for a
+couple of cleartext protocols) a passively-read greeting banner or a single
+harmless `HEAD /` request - never a verified capability, and never OS
+fingerprinting. A platform guess is always labeled Medium or Low confidence,
+never presented as definitive.
+
+**Two ways to scan, no hard dependency**: a dependency-free, bounded
+`ThreadPoolExecutor` connect-scan (pure standard library) always works; if
+the optional [`nmap`](https://nmap.org/) binary is installed, `inspect`
+prefers it (`-sT -sV`, no raw sockets, no root required) for better service
+labels, falling back to the built-in scan if nmap is missing or fails to
+run. Pass `--no-nmap` to force the built-in scan. Neither path ever shells
+out with untrusted text - the target is validated as a literal IP address
+before either scan runs.
+
+**Never automatic**: `inspect` only ever runs when you explicitly invoke it,
+or explicitly accept the offer `lanfence review` makes for the device
+currently on screen:
+
+```text
+Actions: [T]rust  [I]nvestigate  [S]nooze  [X] Inspect  [D] Full details  [N]ext  [Q]uit
+  choice: x
+
+  More information may be available by actively inspecting this device.
+  Active inspection sends probe traffic directly to 192.168.1.47.
+  Run active inspection? [y/N]:
+```
+
+Declining leaves the device untouched and returns you to its menu. Results
+are persisted (one row per MAC, the latest run replacing any earlier one)
+and shown again - labeled with their age, and flagged `STALE` past 24
+hours - by `lanfence device <MAC>` and inside `review`'s `[D] Full details`
+view, so old inspection data is never presented as current.
+
+Identification only, by design: no exploitation, no credential testing, no
+protocol negotiation beyond a bare connect and reading a greeting a service
+sends unprompted - the same defensive scope as the rest of LAN Fence.
 
 ## Address and name history
 

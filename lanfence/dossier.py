@@ -34,9 +34,15 @@ from lanfence.classify import DeviceClassification, classify_device
 from lanfence.db import DeviceStore
 from lanfence.engine import build_device, is_review_needed
 from lanfence.fingerprint import SignatureSet, fingerprint_device
-from lanfence.models import AddressEvidence, AdvertisedService, Device, NameEvidence, Severity
+from lanfence.models import AddressEvidence, AdvertisedService, Device, InspectionResult, NameEvidence, Severity
 from lanfence.netutil import is_locally_administered
 from lanfence.sanitize import clean_text
+
+
+#: Sentinel distinguishing "not given" (fetch fresh) from an explicit
+#: ``None`` ("skip the lookup") for :func:`build_device_dossier`'s
+#: ``inspection`` parameter - see its docstring.
+_UNSET = object()
 
 
 class FingerprintMatchInfo(BaseModel):
@@ -67,6 +73,12 @@ class DeviceDossier(BaseModel):
     fingerprint_matches: list[FingerprintMatchInfo] = Field(default_factory=list)
     classification: DeviceClassification = Field(default_factory=DeviceClassification)
     is_locally_administered_mac: bool = False
+    #: The most recent `lanfence inspect` result for this device, if it has
+    #: ever been actively inspected - see :mod:`lanfence.active_inspect`.
+    #: ``None`` (the common case) means never inspected, not "inspected and
+    #: found nothing" (an empty ``open_ports`` list on a real result means
+    #: that).
+    inspection: Optional[InspectionResult] = None
 
     @property
     def label(self) -> str:
@@ -113,12 +125,20 @@ def build_device_dossier(
     addresses: Optional[list[AddressEvidence]] = None,
     names: Optional[list[NameEvidence]] = None,
     services: Optional[list[AdvertisedService]] = None,
+    inspection: Optional[InspectionResult] | object = _UNSET,
 ) -> Optional[DeviceDossier]:
     """Gather one device's full dossier. ``None`` if this MAC has never
     been observed. Every optional keyword lets a caller that already
     fetched a piece (e.g. `lanfence device`, which needs the same evidence
     for its own JSON payload) pass it straight through instead of a second
     database round trip; omitted pieces are fetched fresh here.
+
+    ``inspection`` is tri-state, unlike the other overrides: omit it (the
+    default) to look up any persisted `lanfence inspect` result fresh;
+    pass ``None`` explicitly to skip that lookup entirely (e.g. the review
+    queue building many dossiers at once, where inspection results are
+    rare and not needed for priority ordering); pass an actual
+    :class:`~lanfence.models.InspectionResult` to reuse one already fetched.
     """
 
     now = now or datetime.now(timezone.utc)
@@ -134,6 +154,8 @@ def build_device_dossier(
         names = store.name_evidence_for(mac)
     if services is None:
         services = store.advertised_services(mac=mac, now=now)
+    if inspection is _UNSET:
+        inspection = store.inspection_for(mac)
 
     _vendor, matches = fingerprint_device(mac, device.hostname, signatures=signatures, vendor_file=vendor_file)
     fingerprint_matches = [
@@ -161,6 +183,7 @@ def build_device_dossier(
         fingerprint_matches=fingerprint_matches,
         classification=classification,
         is_locally_administered_mac=is_locally_administered(mac),
+        inspection=inspection,
     )
 
 

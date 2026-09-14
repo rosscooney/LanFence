@@ -14,6 +14,8 @@ from lanfence.models import (
     DigestDeviceEntry,
     DigestSection,
     Finding,
+    InspectedPort,
+    InspectionResult,
     NameEvidence,
     ScanResult,
 )
@@ -28,6 +30,7 @@ from lanfence.report import (
     render_digest,
     render_dossier_compact,
     render_findings,
+    render_inspection_result,
     render_scan_result,
     render_triage_summary,
     review_status_label,
@@ -559,6 +562,83 @@ def test_render_triage_summary_partial_review_progress_message():
 
 def test_render_triage_summary_empty_inventory_returns_empty_string():
     assert render_triage_summary(TriageSummary()) == ""
+
+
+# --- render_inspection_result (`lanfence inspect`) --------------------------
+
+
+def _inspection(**overrides) -> InspectionResult:
+    now = _now()
+    base = dict(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", method="nmap", observed_at=now,
+        open_ports=[
+            InspectedPort(port=22, service="ssh", banner="OpenSSH 8.2p1"),
+            InspectedPort(port=80, service="http", banner="nginx 1.18.0"),
+        ],
+        platform_guess="Windows (RDP plus SMB/RPC exposed)", platform_confidence="medium",
+        platform_reasons=["Open ports: 135, 445, 3389"],
+    )
+    base.update(overrides)
+    return InspectionResult(**base)
+
+
+def test_render_inspection_result_shows_confirmed_ports_and_inferred_services():
+    text = render_inspection_result(_inspection(), now=_now())
+    assert "Confirmed open ports:" in text
+    assert "22/tcp" in text
+    assert "inferred service: ssh" in text
+    assert "80/tcp" in text
+    assert "inferred service: http" in text
+
+
+def test_render_inspection_result_shows_platform_guess_with_confidence_never_definitive():
+    text = render_inspection_result(_inspection(), now=_now())
+    assert "Probable platform: Windows (RDP plus SMB/RPC exposed)" in text
+    assert "Confidence:        Medium" in text
+    assert "not OS fingerprinting" in text
+    assert "not a verified fact" in text
+
+
+def test_render_inspection_result_unknown_platform_says_not_enough_evidence():
+    inspection = _inspection(platform_guess=None, platform_confidence=None, platform_reasons=[])
+    text = render_inspection_result(inspection, now=_now())
+    assert "Probable platform: not enough evidence to guess" in text
+
+
+def test_render_inspection_result_no_open_ports():
+    inspection = _inspection(open_ports=[], platform_guess=None, platform_confidence=None, platform_reasons=[])
+    text = render_inspection_result(inspection, now=_now())
+    assert "No open ports found among the scanned ports." in text
+
+
+def test_render_inspection_result_flags_stale_results():
+    old = _now() - timedelta(hours=48)
+    inspection = _inspection(observed_at=old)
+    text = render_inspection_result(inspection, now=_now())
+    assert "STALE" in text
+
+
+def test_render_inspection_result_recent_result_not_flagged_stale():
+    text = render_inspection_result(_inspection(observed_at=_now()), now=_now())
+    assert "STALE" not in text
+
+
+def test_render_device_detail_shows_inspection_summary_when_given():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, inspection=_inspection(observed_at=now),
+    )
+    assert "Active inspection" in text
+    assert "Confirmed open ports: 22/tcp, 80/tcp" in text
+    assert "Probable platform: Windows (RDP plus SMB/RPC exposed)" in text
+
+
+def test_render_device_detail_omits_inspection_when_not_given():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Active inspection" not in text
 
 
 # --- render_advertised_services (the `lanfence services` command) ---------

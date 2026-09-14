@@ -583,6 +583,136 @@ def test_scan_triage_summary_reflects_already_trusted_devices(config_path: Path,
     assert "1 of 1 have been reviewed." in result.output or "All devices have been reviewed." in result.output
 
 
+# --- inspect: active device inspection --------------------------------------
+
+
+def _fake_inspection(mac="11:22:33:44:55:66", ip="10.0.0.6"):
+    from lanfence.models import InspectedPort, InspectionResult
+
+    return InspectionResult(
+        mac=mac, ip=ip, method="socket", observed_at=_now(),
+        open_ports=[InspectedPort(port=22, service="ssh", banner="OpenSSH 8.9")],
+        platform_guess="Linux/Unix-like device (SSH only)", platform_confidence="low",
+        platform_reasons=["Open port: 22 (SSH), nothing else responded"],
+    )
+
+
+def test_inspect_unknown_mac_fails(config_path: Path):
+    result = runner.invoke(app, ["inspect", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "no device with mac" in result.output.lower()
+
+
+def test_inspect_invalid_mac_fails(config_path: Path):
+    result = runner.invoke(app, ["inspect", "not-a-mac", "--config", str(config_path)])
+    assert result.exit_code == 2
+
+
+def test_inspect_device_with_no_known_ip_fails(config_path: Path):
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    store.observe(mac="11:22:33:44:55:66", ip=None, hostname=None, vendor=None, seen_at=_now())
+    store.close()
+
+    result = runner.invoke(app, ["inspect", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "no known ip address" in result.output.lower()
+
+
+def test_inspect_runs_and_persists_result(config_path: Path):
+    _seed_devices(config_path)  # 11:22:33:44:55:66 has ip 10.0.0.6
+    fake = _fake_inspection()
+    with patch("lanfence.cli.active_inspect.inspect_device", return_value=fake) as inspect_mock:
+        result = runner.invoke(app, ["inspect", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    inspect_mock.assert_called_once()
+    assert inspect_mock.call_args.kwargs.get("use_nmap", True) is True
+    assert "Confirmed open ports:" in result.output
+    assert "22/tcp" in result.output
+    assert "Probable platform: Linux/Unix-like device (SSH only)" in result.output
+    assert "not OS fingerprinting" in result.output
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    persisted = store.inspection_for("11:22:33:44:55:66")
+    store.close()
+    assert persisted == fake
+
+
+def test_inspect_no_nmap_flag_is_passed_through(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli.active_inspect.inspect_device", return_value=_fake_inspection()) as inspect_mock:
+        runner.invoke(app, ["inspect", "11:22:33:44:55:66", "--no-nmap", "--config", str(config_path)])
+    assert inspect_mock.call_args.kwargs["use_nmap"] is False
+
+
+def test_inspect_json_output(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli.active_inspect.inspect_device", return_value=_fake_inspection()):
+        result = runner.invoke(app, ["inspect", "11:22:33:44:55:66", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    import json as json_module
+
+    payload = json_module.loads(result.output)
+    assert payload["mac"] == "11:22:33:44:55:66"
+    assert payload["open_ports"][0]["port"] == 22
+    assert payload["platform_confidence"] == "low"
+
+
+def test_inspect_is_never_triggered_by_scan(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    sightings = [scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())]
+    with patch("lanfence.cli.active_inspect.inspect_device") as inspect_mock:
+        _scan_with_sightings(config_path, monkeypatch, sightings)
+    inspect_mock.assert_not_called()
+
+
+# --- review: interactive active-inspection offer -----------------------------
+
+
+def test_review_interactive_inspect_declined_makes_no_active_probe(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli.active_inspect.inspect_device") as inspect_mock, \
+         patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="x\nn\nk\n",
+        )
+    assert result.exit_code == 0
+    assert "sends probe traffic directly to 10.0.0.6" in result.output.lower()
+    inspect_mock.assert_not_called()
+
+
+def test_review_interactive_inspect_accepted_runs_and_shows_result(config_path: Path):
+    _seed_devices(config_path)
+    fake = _fake_inspection()
+    with patch("lanfence.cli.active_inspect.inspect_device", return_value=fake) as inspect_mock, \
+         patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="x\ny\nk\n",
+        )
+    assert result.exit_code == 0
+    inspect_mock.assert_called_once()
+    assert "Confirmed open ports:" in result.output
+    assert "22/tcp" in result.output
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    persisted = store.inspection_for("11:22:33:44:55:66")
+    store.close()
+    assert persisted == fake
+
+
+def test_review_interactive_inspect_never_runs_automatically(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli.active_inspect.inspect_device") as inspect_mock, \
+         patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        runner.invoke(app, ["review", "--config", str(config_path)], input="k\n")
+    inspect_mock.assert_not_called()
+
+
 def test_monitor_no_ipv6_flag_is_reflected_in_banner(config_path: Path, monkeypatch):
     # monitor() loops forever; stop it after the startup banner is printed by
     # making the first thing it does (the scan-interval sleep loop) raise.
@@ -1935,7 +2065,7 @@ def test_review_interactive_shows_compact_dossier_before_the_action_menu(config_
     assert result.exit_code == 0
     assert "Device 1 of 1" in result.output
     assert "Likely device:" in result.output
-    assert "Actions: [T]rust  [I]nvestigate  [S]nooze  [D] Full details  [N]ext  [Q]uit" in result.output
+    assert "Actions: [T]rust  [I]nvestigate  [S]nooze  [X] Inspect  [D] Full details  [N]ext  [Q]uit" in result.output
 
 
 def test_review_interactive_full_details_shows_full_dossier_then_returns_to_menu(config_path: Path):

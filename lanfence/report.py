@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from lanfence.classify import DeviceClassification
 from lanfence.dossier import DeviceDossier, TriageSummary
@@ -18,6 +18,7 @@ from lanfence.models import (
     Digest,
     DigestSection,
     Finding,
+    InspectionResult,
     NameEvidence,
     ScanResult,
 )
@@ -231,6 +232,70 @@ def render_triage_summary(summary: TriageSummary) -> str:
     if summary.pending > 0:
         lines.append("")
         lines.append("Run `lanfence review` to work through them.")
+
+    return "\n".join(lines)
+
+
+#: Beyond this age, a persisted inspection result is labeled "stale" rather
+#: than presented as current - a device's open ports/platform can easily
+#: have changed since (see :mod:`lanfence.active_inspect`).
+INSPECTION_STALE_AFTER = timedelta(hours=24)
+
+
+def _age_label(observed_at: datetime, *, now: datetime) -> str:
+    seconds = max(0.0, (now - observed_at).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} minute(s) ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} hour(s) ago"
+    return f"{int(seconds // 86400)} day(s) ago"
+
+
+def render_inspection_result(result: InspectionResult, *, now: datetime) -> str:
+    """The output of `lanfence inspect <mac>` - and of showing a
+    previously-persisted result again. Every open port is a confirmed fact
+    (the TCP handshake succeeded); every ``service``/banner label next to it
+    is an *inferred* identification, never a verified capability.
+    ``platform_guess`` (see :func:`lanfence.active_inspect.infer_platform`)
+    is a coarse, confidence-labeled pattern match over which ports
+    responded - explicitly never presented as OS fingerprinting or a
+    definitive result.
+    """
+
+    age = _age_label(result.observed_at, now=now)
+    stale = (now - result.observed_at) > INSPECTION_STALE_AFTER
+    lines = [
+        f"Active inspection of {result.mac} ({result.ip})",
+        f"Method: {result.method}  ·  Observed: {result.observed_at.strftime('%d %b %Y %H:%M')} ({age})"
+        + ("  [STALE - re-run for current data]" if stale else ""),
+        "",
+    ]
+
+    if not result.open_ports:
+        lines.append("No open ports found among the scanned ports.")
+    else:
+        lines.append("Confirmed open ports:")
+        for p in result.open_ports:
+            label = f"  {p.port}/{p.protocol}"
+            if p.service:
+                label += f"   inferred service: {p.service}"
+            lines.append(label)
+
+    lines.append("")
+    if result.is_known_platform:
+        lines.append(f"Probable platform: {result.platform_guess}")
+        lines.append(f"Confidence:        {result.platform_confidence.capitalize()}")
+        for reason in result.platform_reasons:
+            lines.append(f"  - {reason}")
+    else:
+        lines.append("Probable platform: not enough evidence to guess")
+    lines.append("")
+    lines.append(
+        "This is an inference from which ports responded, not OS fingerprinting "
+        "- treat it as a hint, not a verified fact."
+    )
 
     return "\n".join(lines)
 
@@ -688,12 +753,31 @@ def render_advertised_services(
     return text
 
 
+def _inspection_summary_lines(inspection: InspectionResult, *, now: datetime) -> list[str]:
+    age = _age_label(inspection.observed_at, now=now)
+    stale = (now - inspection.observed_at) > INSPECTION_STALE_AFTER
+    lines = [
+        "Active inspection (see `lanfence inspect` for a probe-by-probe breakdown):",
+        f"  Observed: {inspection.observed_at.strftime('%d %b %Y %H:%M')} ({age})"
+        + ("  [STALE - re-run for current data]" if stale else ""),
+    ]
+    if inspection.open_ports:
+        ports = ", ".join(f"{p.port}/{p.protocol}" for p in inspection.open_ports)
+        lines.append(f"  Confirmed open ports: {ports}")
+    else:
+        lines.append("  Confirmed open ports: none found among the scanned ports")
+    if inspection.is_known_platform:
+        lines.append(f"  Probable platform: {inspection.platform_guess} (confidence: {inspection.platform_confidence})")
+    return lines
+
+
 def render_device_detail(
     device: Device, events: list[DeviceEvent], since: datetime, *, now: datetime, plain: bool = False,
     default_offline_after_seconds: float | None = None,
     addresses: list[AddressEvidence] | None = None, names: list[NameEvidence] | None = None,
     services: list[AdvertisedService] | None = None,
     classification: DeviceClassification | None = None,
+    inspection: InspectionResult | None = None,
 ) -> str:
     """Render ``lanfence device <mac>`` - current (preferred) details, all
     retained address/name evidence, advertised-service evidence, then the
@@ -772,6 +856,10 @@ def render_device_detail(
         lines.append("")
         lines.extend(_advertised_service_lines(services))
 
+    if inspection is not None:
+        lines.append("")
+        lines.extend(_inspection_summary_lines(inspection, now=now))
+
     text = "\n".join(lines)
     if plain or not _RICH:
         print(text)
@@ -812,6 +900,9 @@ def render_device_detail(
             title="Inventory details (user-provided)",
         )
     )
+
+    if inspection is not None:
+        console.print(Panel("\n".join(_inspection_summary_lines(inspection, now=now)), title="Active inspection"))
 
     console.print(
         f"\n[bold]Lifecycle timeline[/bold] since {since.isoformat(timespec='seconds')} "

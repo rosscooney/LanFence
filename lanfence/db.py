@@ -25,7 +25,10 @@ so a real dual-stack or multi-source observation is never overwritten by
 another - see :class:`lanfence.models.AddressEvidence`/``NameEvidence`` and
 :meth:`DeviceStore.preferred_address`/``preferred_name`` for how
 ``devices.ip``/``devices.hostname`` are computed from this evidence rather
-than simply "whatever was written last".
+than simply "whatever was written last". ``device_inspections`` holds the
+*latest* explicit `lanfence inspect <mac>` result per MAC (see
+:mod:`lanfence.active_inspect`) - never written by any passive/automatic
+path.
 
 ``devices``' ``missed_scans``/``seen_via_ipv4``/``seen_via_ipv6``/
 ``last_interface``/``ipv4_subnet`` columns are provenance for
@@ -53,6 +56,8 @@ from lanfence.models import (
     DeviceMetadata,
     DhcpServerRecord,
     EventType,
+    InspectedPort,
+    InspectionResult,
     NameEvidence,
     PresenceState,
     ReviewState,
@@ -269,6 +274,20 @@ CREATE TABLE IF NOT EXISTS ssdp_advertisements (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ssdp_source_ip ON ssdp_advertisements (source_ip);
+
+-- One row per MAC (the *latest* run only - see DeviceStore.record_inspection)
+-- from an explicit, operator-initiated `lanfence inspect <mac>`. Never
+-- written by scan/monitor/passive discovery/review on their own.
+CREATE TABLE IF NOT EXISTS device_inspections (
+    mac TEXT PRIMARY KEY,
+    ip TEXT NOT NULL,
+    method TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    open_ports TEXT NOT NULL,
+    platform_guess TEXT,
+    platform_confidence TEXT,
+    platform_reasons TEXT NOT NULL
+);
 """
 
 #: Advertised-service evidence rows older than this, and already
@@ -872,6 +891,51 @@ class DeviceStore:
             for row in rows
         ]
 
+    def record_inspection(self, result: InspectionResult) -> None:
+        """Persist ``result`` as the *latest* active-inspection run for its
+        MAC - one row per device, replacing any earlier run rather than
+        accumulating a history (see :class:`lanfence.models.InspectionResult`
+        - a re-run is a deliberate refresh, and the whole point of storing
+        ``observed_at`` is so a caller can judge how stale this one row is,
+        not to keep old scans around)."""
+
+        mac = normalize_mac(result.mac)
+        self._conn.execute(
+            "INSERT INTO device_inspections "
+            "(mac, ip, method, observed_at, open_ports, platform_guess, platform_confidence, platform_reasons) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(mac) DO UPDATE SET "
+            "ip = excluded.ip, method = excluded.method, observed_at = excluded.observed_at, "
+            "open_ports = excluded.open_ports, platform_guess = excluded.platform_guess, "
+            "platform_confidence = excluded.platform_confidence, platform_reasons = excluded.platform_reasons",
+            (
+                mac, result.ip, result.method, _iso(result.observed_at),
+                json.dumps([p.model_dump(mode="json") for p in result.open_ports], separators=(",", ":")),
+                result.platform_guess, result.platform_confidence,
+                json.dumps(result.platform_reasons, separators=(",", ":")),
+            ),
+        )
+        self._conn.commit()
+
+    def inspection_for(self, mac: str) -> InspectionResult | None:
+        """The most recent active-inspection result for ``mac``, or
+        ``None`` if it has never been inspected. A pure database read -
+        never triggers a new inspection (see :mod:`lanfence.active_inspect`
+        for that)."""
+
+        mac = normalize_mac(mac)
+        row = self._conn.execute(
+            "SELECT * FROM device_inspections WHERE mac = ?", (mac,)
+        ).fetchone()
+        if row is None:
+            return None
+        return InspectionResult(
+            mac=mac, ip=row["ip"], method=row["method"], observed_at=_parse_dt(row["observed_at"]),
+            open_ports=[InspectedPort(**p) for p in json.loads(row["open_ports"])],
+            platform_guess=row["platform_guess"], platform_confidence=row["platform_confidence"],
+            platform_reasons=json.loads(row["platform_reasons"]),
+        )
+
     def preferred_address(self, mac: str) -> str | None:
         """The single best address for ``mac`` from retained evidence:
         directly-observed (arp/ipv6_nd) outranks a DHCP-reported lease,
@@ -1331,6 +1395,7 @@ class DeviceStore:
         self._conn.execute("DELETE FROM device_addresses")
         self._conn.execute("DELETE FROM device_names")
         self._conn.execute("DELETE FROM device_metadata")
+        self._conn.execute("DELETE FROM device_inspections")
         for table in _DISCOVERY_TABLES_WITH_EXPIRY:
             self._conn.execute(f"DELETE FROM {table}")
         self._conn.commit()
