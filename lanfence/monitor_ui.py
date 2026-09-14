@@ -140,7 +140,6 @@ class MonitorSnapshot:
 
     elapsed_seconds: float
     known: Optional[int]
-    online: Optional[int]
     review: Optional[int]
     seen: int
     new: int
@@ -156,7 +155,7 @@ class MonitorSnapshot:
     @classmethod
     def empty(cls, *, passive_enabled: bool) -> "MonitorSnapshot":
         return cls(
-            elapsed_seconds=0.0, known=None, online=None, review=None, seen=0, new=0, findings=0,
+            elapsed_seconds=0.0, known=None, review=None, seen=0, new=0, findings=0,
             sweeps_ok=0, sweeps_failed=0, scanning=False, next_sweep_seconds=None,
             passive_enabled=passive_enabled, passive_ok=True, last_sweep_local=None,
         )
@@ -186,7 +185,6 @@ class MonitorStats:
         self.last_sweep_local: datetime | None = None
         self.next_sweep_monotonic: float | None = None
         self.known: int | None = None
-        self.online: int | None = None
         self.review: int | None = None
 
     def record_event(self, mac: str, event_type: str | None) -> None:
@@ -219,9 +217,8 @@ class MonitorStats:
         else:
             self.sweeps_failed += 1
 
-    def set_inventory_counts(self, *, known: int, online: int, review: int) -> None:
+    def set_inventory_counts(self, *, known: int, review: int) -> None:
         self.known = known
-        self.online = online
         self.review = review
 
     def snapshot(self, now_monotonic: float) -> MonitorSnapshot:
@@ -230,7 +227,7 @@ class MonitorStats:
             next_in = max(0.0, self.next_sweep_monotonic - now_monotonic)
         return MonitorSnapshot(
             elapsed_seconds=max(0.0, now_monotonic - self.session_start_monotonic),
-            known=self.known, online=self.online, review=self.review,
+            known=self.known, review=self.review,
             seen=len(self.seen), new=len(self.new_macs), findings=self.findings_count,
             sweeps_ok=self.sweeps_ok, sweeps_failed=self.sweeps_failed,
             scanning=self.scanning, next_sweep_seconds=next_in,
@@ -350,7 +347,7 @@ def render_footer(snap: MonitorSnapshot, *, width: int) -> Text:
         scan_field = "Scan: n/a"
 
     core = [
-        fmt("Known", snap.known), fmt("Seen", snap.seen), fmt("Online", snap.online),
+        fmt("Known", snap.known), fmt("Seen", snap.seen),
         f"New: {snap.new}", fmt("Review", snap.review), scan_field,
     ]
 
@@ -374,12 +371,11 @@ MIN_USABLE_HEIGHT = 8
 
 def render_minimal(snap: MonitorSnapshot, *, width: int) -> Text:
     """A one-line fallback for a terminal too small for the full layout -
-    still prioritizes Known/Seen/Online/New, per the same "small terminals"
+    still prioritizes Known/Seen/New, per the same "small terminals"
     priority as :func:`render_footer`."""
 
     core = [f"K:{snap.known if snap.known is not None else '?'}",
-            f"S:{snap.seen}", f"O:{snap.online if snap.online is not None else '?'}",
-            f"N:{snap.new}"]
+            f"S:{snap.seen}", f"N:{snap.new}"]
     return _one_line("LAN Fence  " + " ".join(core), width=width, style="bold")
 
 

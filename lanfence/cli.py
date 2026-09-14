@@ -669,9 +669,9 @@ def monitor(
         passive_thread.start()
 
     def _refresh_inventory_counts() -> None:
-        known, online = store.device_counts()
+        known, _online = store.device_counts()
         review = sum(1 for d in build_inventory(store, allowlist) if is_review_needed(d, now=utcnow()))
-        stats.set_inventory_counts(known=known, online=online, review=review)
+        stats.set_inventory_counts(known=known, review=review)
 
     def _loop() -> None:
         nonlocal net

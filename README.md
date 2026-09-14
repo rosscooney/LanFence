@@ -240,7 +240,7 @@ feed of recent activity, and a statistics footer that's always visible:
 │ 10:44:01  WARNING     scan.passive is on but discovery.mdns is...  │
 │                                                                    │
 ├────────────────────────────────────────────────────────────────────┤
-│ Known: 38 · Seen: 24 · Online: 21 · New: 2 · Review: 3 · Scan: 8s  │
+│ Known: 38 · Seen: 24 · New: 2 · Review: 3 · Scan: 8s               │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -269,8 +269,6 @@ in LAN Fence - see [Device inventory and review](#device-inventory-and-review)):
   address/mechanism) - retained even if a device later goes offline. A
   reported DHCP-offered address or an mDNS/SSDP service target is never
   counted here; only a direct sighting is.
-- **Online**: currently recorded online, respecting the configured offline
-  grace period - this is *recorded state*, not a live reachability check.
 - **New**: devices this session's positive observations inserted into the
   database for the first time - a previously-known device reappearing is
   never counted as new.
@@ -284,7 +282,7 @@ in LAN Fence - see [Device inventory and review](#device-inventory-and-review)):
 
 Refreshes about once a second and never triggers a scan on its own. On a
 narrow terminal, labels shorten and lower-priority statistics drop off
-(Known/Seen/Online/New are kept longest); a terminal too small for any
+(Known/Seen/New are kept longest); a terminal too small for any
 usable layout falls back to one compact line rather than a garbled one.
 `--live` on output that isn't a real interactive terminal (a pipe, a
 redirected log file, `TERM=dumb`) falls back to plain output with one clear

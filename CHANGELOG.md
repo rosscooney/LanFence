@@ -29,6 +29,13 @@ Each release is also published to
   files. A genuine root login/system service (no `SUDO_USER`) is
   unaffected.
 
+### Changed
+
+- Removed the **Online** stat from `lanfence monitor`'s live dashboard
+  footer (redundant with `Known`/`Review` at a glance, and could look
+  stale between sweeps) - a narrow terminal now shows `Review` instead in
+  its place.
+
 ## [0.4.1] - 2026-09-14
 
 ### Added

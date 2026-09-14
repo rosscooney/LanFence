@@ -99,7 +99,7 @@ def test_activity_log_coalesced_entry_keeps_original_timestamp_and_updates_last(
     assert entry.display_timestamp() == t1
 
 
-# --- MonitorStats: Known/Seen/New/Online/Review semantics ------------------
+# --- MonitorStats: Known/Seen/New/Review semantics --------------------------
 
 
 def test_record_event_deduplicates_across_multiple_sightings_same_mac():
@@ -155,11 +155,10 @@ def test_inventory_counts_are_only_set_explicitly_not_inferred():
     stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
     snap = stats.snapshot(now_monotonic=1.0)
     assert snap.known is None
-    assert snap.online is None
     assert snap.review is None
-    stats.set_inventory_counts(known=10, online=7, review=2)
+    stats.set_inventory_counts(known=10, review=2)
     snap = stats.snapshot(now_monotonic=2.0)
-    assert (snap.known, snap.online, snap.review) == (10, 7, 2)
+    assert (snap.known, snap.review) == (10, 2)
 
 
 def test_findings_counter_and_sweep_counters():
@@ -233,7 +232,7 @@ def test_format_duration():
 def _snap(stats: MonitorStats | None = None, **overrides) -> MonitorSnapshot:
     if stats is None:
         stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
-        stats.set_inventory_counts(known=10, online=5, review=1)
+        stats.set_inventory_counts(known=10, review=1)
     snap = stats.snapshot(now_monotonic=10.0)
     if overrides:
         snap = MonitorSnapshot(**{**snap.__dict__, **overrides})
@@ -292,15 +291,14 @@ def test_render_does_not_crash_on_zero_dimensions():
     console.render_lines(panel, console.options.update(height=None))  # must not raise
 
 
-def test_minimal_render_prioritizes_known_seen_online_new():
+def test_minimal_render_prioritizes_known_seen_new():
     stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
     stats.record_event("aa:bb:cc:dd:ee:ff", "new_device")
-    stats.set_inventory_counts(known=5, online=3, review=9)
+    stats.set_inventory_counts(known=5, review=9)
     snap = stats.snapshot(now_monotonic=1.0)
     text = render_minimal(snap, width=40).plain
     assert "K:5" in text
     assert "S:1" in text
-    assert "O:3" in text
     assert "N:1" in text
     assert "9" not in text  # review is lower priority, omitted at minimal size
 
@@ -460,7 +458,7 @@ def test_monitor_display_update_reflects_in_render():
     header = _header()
     log = ActivityLog()
     stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
-    stats.set_inventory_counts(known=42, online=1, review=0)
+    stats.set_inventory_counts(known=42, review=0)
     display = MonitorDisplay(header, log, passive_enabled=True, console=_console(80, 24))
     display.update(stats, log, now_monotonic=1.0)
     lines = _rendered_lines(display._render(), width=80, height=24)  # noqa: SLF001
@@ -472,10 +470,10 @@ def test_render_footer_hides_zero_findings_only_at_wide_width_never_fabricated()
     n/a (never 0) is shown for an unavailable stat."""
 
     stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
-    snap = stats.snapshot(now_monotonic=1.0)  # known/online/review never set
-    narrow = render_footer(snap, width=40).plain
+    snap = stats.snapshot(now_monotonic=1.0)  # known/review never set
+    narrow = render_footer(snap, width=50).plain
     assert "Known: n/a" in narrow
-    assert "Online: n/a" in narrow
+    assert "Review: n/a" in narrow
     assert "Seen: 0" in narrow  # a real, legitimate zero - not fabricated
 
 
