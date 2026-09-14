@@ -115,6 +115,11 @@ class EmailAlertConfig(BaseModel):
     password: str | None = None
     from_addr: str | None = None
     to_addrs: list[str] = Field(default_factory=list)
+    #: Extra CA bundle (PEM file path) to trust in addition to the system
+    #: trust store, for an SMTP relay with a private/internal CA - never a
+    #: way to disable certificate verification itself. See
+    #: :func:`lanfence.smtp_utils.build_smtp_context`.
+    ca_file: str | None = None
 
 
 class WebhookAlertConfig(BaseModel):

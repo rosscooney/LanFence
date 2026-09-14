@@ -324,3 +324,17 @@ def test_discovery_can_be_enabled():
 def test_discovery_rejects_unknown_field():
     with pytest.raises(Exception):
         Config(discovery={"unknown_field": True})
+
+
+def test_email_alert_config_ca_file_defaults_to_none():
+    cfg = Config()
+    assert cfg.alerts.email.ca_file is None
+
+
+def test_email_alert_config_ca_file_round_trips_from_yaml(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump({"alerts": {"email": {"ca_file": "/etc/ssl/private-ca.pem"}}}), encoding="utf-8"
+    )
+    cfg = Config.load(path)
+    assert cfg.alerts.email.ca_file == "/etc/ssl/private-ca.pem"

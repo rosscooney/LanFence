@@ -428,6 +428,54 @@ def test_send_digest_email_success(tmp_path: Path):
     instance.send_message.assert_called_once()
 
 
+def test_send_digest_email_starttls_uses_a_verifying_context(tmp_path: Path):
+    import ssl
+
+    digest = _digest(tmp_path)
+    cfg = Config(alerts={"email": {
+        "enabled": True, "from_addr": "lanfence@example.com", "to_addrs": ["me@example.com"],
+    }})
+
+    with patch("lanfence.digest.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        ok = send_digest_email(digest, cfg)
+    assert ok is True
+    instance.starttls.assert_called_once()
+    context = instance.starttls.call_args.kwargs.get("context")
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_send_digest_email_certificate_failure_returns_false_not_raises(tmp_path: Path):
+    import ssl
+
+    digest = _digest(tmp_path)
+    cfg = Config(alerts={"email": {
+        "enabled": True, "from_addr": "lanfence@example.com", "to_addrs": ["me@example.com"],
+    }})
+
+    with patch("lanfence.digest.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        instance.starttls.side_effect = ssl.SSLCertVerificationError("certificate verify failed")
+        ok = send_digest_email(digest, cfg)
+    assert ok is False
+    instance.send_message.assert_not_called()
+
+
+def test_send_digest_email_rejects_plaintext_credentials_when_tls_disabled(tmp_path: Path):
+    digest = _digest(tmp_path)
+    cfg = Config(alerts={"email": {
+        "enabled": True, "from_addr": "lanfence@example.com", "to_addrs": ["me@example.com"],
+        "use_tls": False, "username": "operator", "password": "hunter2",
+    }})
+
+    with patch("lanfence.digest.smtplib.SMTP") as mock_smtp:
+        ok = send_digest_email(digest, cfg)
+    assert ok is False
+    mock_smtp.assert_not_called()
+
+
 def test_send_digest_email_failure(tmp_path: Path):
     import smtplib
 

@@ -43,6 +43,7 @@ from lanfence.db import DeviceStore
 from lanfence.engine import build_inventory, is_review_needed
 from lanfence.logging_config import get_logger
 from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, DigestSection
+from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("digest")
 
@@ -244,13 +245,11 @@ def send_digest_email(digest: Digest, cfg: Config) -> bool:
     msg.set_content(format_digest_text(digest))
 
     try:
-        with smtplib.SMTP(email_cfg.smtp_host, email_cfg.smtp_port, timeout=10) as smtp:
-            if email_cfg.use_tls:
-                smtp.starttls()
-            if email_cfg.username and email_cfg.password:
-                smtp.login(email_cfg.username, email_cfg.password)
-            smtp.send_message(msg)
+        send_smtp_message(msg, email_cfg)
         return True
+    except SmtpAuthWithoutTlsError as exc:
+        log.error("failed to send digest email: %s", exc)
+        return False
     except (smtplib.SMTPException, OSError) as exc:
         log.error("failed to send digest email: %s", exc)
         return False

@@ -124,6 +124,92 @@ def test_send_email_sends_when_configured():
     assert sent_msg["To"] == "me@example.com"
 
 
+def test_send_email_starttls_uses_a_verifying_context():
+    """STARTTLS must never fall back to smtplib's own unverified default
+    context - see lanfence.smtp_utils.build_smtp_context."""
+
+    import ssl
+
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+
+    smtp_instance = MagicMock()
+    smtp_cm = MagicMock()
+    smtp_cm.__enter__.return_value = smtp_instance
+    with patch("lanfence.alerts.smtplib.SMTP", return_value=smtp_cm):
+        alerts.send_email([_finding()], cfg)
+
+    smtp_instance.starttls.assert_called_once()
+    context = smtp_instance.starttls.call_args.kwargs.get("context")
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_send_email_certificate_failure_prevents_delivery():
+    """A STARTTLS certificate verification failure must abort delivery
+    (never fall through to send_message with an unverified/plaintext
+    connection) and must not raise out of send_email."""
+
+    import ssl
+
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+
+    smtp_instance = MagicMock()
+    smtp_instance.starttls.side_effect = ssl.SSLCertVerificationError("certificate verify failed")
+    smtp_cm = MagicMock()
+    smtp_cm.__enter__.return_value = smtp_instance
+    with patch("lanfence.alerts.smtplib.SMTP", return_value=smtp_cm):
+        alerts.send_email([_finding()], cfg)  # must not raise
+
+    smtp_instance.send_message.assert_not_called()
+
+
+def test_send_email_rejects_plaintext_credentials_when_tls_disabled():
+    """Username/password must never be sent when use_tls is disabled -
+    see lanfence.smtp_utils.SmtpAuthWithoutTlsError."""
+
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+    cfg.email.use_tls = False
+    cfg.email.username = "operator"
+    cfg.email.password = "hunter2"
+
+    with patch("lanfence.alerts.smtplib.SMTP") as smtp_mock:
+        alerts.send_email([_finding()], cfg)  # must not raise
+
+    smtp_mock.assert_not_called()
+
+
+def test_send_email_allows_unauthenticated_local_relay_without_tls():
+    """An explicitly configured unauthenticated relay (no username/password)
+    with use_tls disabled must still be allowed - only the credential+
+    plaintext combination is refused."""
+
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+    cfg.email.use_tls = False
+
+    smtp_instance = MagicMock()
+    smtp_cm = MagicMock()
+    smtp_cm.__enter__.return_value = smtp_instance
+    with patch("lanfence.alerts.smtplib.SMTP", return_value=smtp_cm):
+        alerts.send_email([_finding()], cfg)
+
+    smtp_instance.starttls.assert_not_called()
+    smtp_instance.login.assert_not_called()
+    smtp_instance.send_message.assert_called_once()
+
+
 def test_send_email_skips_when_missing_addrs():
     cfg = AlertConfig()
     cfg.email.enabled = True

@@ -55,6 +55,7 @@ import yaml
 from lanfence.config import DIGEST_CHANNELS, Config
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import get_logger
+from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("channels")
 
@@ -164,6 +165,11 @@ CHANNEL_FIELDS: dict[str, list[ChannelField]] = {
         ChannelField("password", "SMTP password (optional)", "secret"),
         ChannelField("from_addr", "From address", "text", required=True),
         ChannelField("to_addrs", "Recipient address(es), comma-separated", "list_str", required=True),
+        ChannelField(
+            "ca_file", "Private CA bundle path (PEM, optional)", "text",
+            help_text="Only needed if your SMTP relay's certificate is signed by a private/internal "
+            "CA not already in the system trust store. Leave blank to use the system trust store.",
+        ),
     ],
     "twilio": [
         ChannelField(
@@ -639,13 +645,10 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
         msg["To"] = ", ".join(channel_cfg.to_addrs)
         msg.set_content(_TEST_BODY)
         try:
-            with smtplib.SMTP(channel_cfg.smtp_host, channel_cfg.smtp_port, timeout=10) as smtp:
-                if channel_cfg.use_tls:
-                    smtp.starttls()
-                if channel_cfg.username and channel_cfg.password:
-                    smtp.login(channel_cfg.username, channel_cfg.password)
-                smtp.send_message(msg)
+            send_smtp_message(msg, channel_cfg)
             return True, "accepted by the SMTP relay"
+        except SmtpAuthWithoutTlsError:
+            return False, "refusing to authenticate: use_tls is disabled but username/password are set"
         except (smtplib.SMTPException, OSError) as exc:
             return False, f"SMTP relay rejected the message: {exc.__class__.__name__}"
     if channel == "twilio":

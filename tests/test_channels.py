@@ -476,8 +476,8 @@ def test_test_message_email_uses_smtplib(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def starttls(self):
-            pass
+        def starttls(self, context=None):
+            sent["starttls_context"] = context
 
         def login(self, u, p):
             pass
@@ -489,6 +489,13 @@ def test_test_message_email_uses_smtplib(monkeypatch):
         ok, message = send_channel_test_message("email", cfg)
     assert ok is True
     assert sent["subject"] == "LAN Fence test message"
+
+    import ssl
+
+    context = sent["starttls_context"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
 
 
 def test_test_message_email_failure_reported_honestly():

@@ -23,6 +23,7 @@ from email.message import EmailMessage
 from lanfence.config import AlertConfig
 from lanfence.logging_config import get_logger
 from lanfence.models import Finding
+from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("alerts")
 
@@ -136,12 +137,9 @@ def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
     msg.set_content(_format_findings_text(findings, heading="LAN Fence"))
 
     try:
-        with smtplib.SMTP(cfg.email.smtp_host, cfg.email.smtp_port, timeout=10) as smtp:
-            if cfg.email.use_tls:
-                smtp.starttls()
-            if cfg.email.username and cfg.email.password:
-                smtp.login(cfg.email.username, cfg.email.password)
-            smtp.send_message(msg)
+        send_smtp_message(msg, cfg.email)
+    except SmtpAuthWithoutTlsError as exc:
+        log.error("failed to send email alert: %s", exc)
     except (smtplib.SMTPException, OSError) as exc:
         log.error("failed to send email alert: %s", exc)
 

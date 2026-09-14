@@ -971,6 +971,17 @@ outcome (never "success" on a swallowed exception) with a nonzero exit code
 on failure - it bypasses `alerts.min_severity` entirely and never creates a
 device, finding, lifecycle event, or alert-dispatch cooldown entry.
 
+**Email/SMTP**: every email send path (alerts, digests, and `channels test
+email`) verifies the SMTP relay's certificate and hostname before
+authenticating or sending anything - `email.use_tls: true` (the default)
+never falls back to an unverified STARTTLS upgrade. If your relay's
+certificate is signed by a private/internal CA, set `email.ca_file` to a
+PEM bundle to trust it in addition to the system trust store; there is no
+setting to disable verification itself. `email.username`/`password` are
+refused (delivery aborts rather than sending a password in the clear) if
+`use_tls` is disabled - an explicitly configured unauthenticated local
+relay (`use_tls: false` with no username/password) is unaffected.
+
 **Config file location**: LAN Fence has no other default *writable* config
 file (every other command treats a missing `--config` as "built-in
 defaults, touch no file"), so `channels` uses a conventional per-user path,
@@ -1283,6 +1294,7 @@ alerts:
     password: null
     from_addr: null
     to_addrs: []
+    ca_file: null                # extra private CA bundle (PEM path), if your relay needs one
   webhook:
     enabled: false
     url: null

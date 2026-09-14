@@ -2449,6 +2449,7 @@ def test_channels_setup_clears_secret_with_explicit_clear(config_path: Path):
                 "clear\n"  # password -> clear
                 "\n"       # from_addr (keep existing)
                 "\n"       # to_addrs (keep existing)
+                "\n"       # ca_file (blank, optional)
                 "n\n"      # enable? default False (was False)
                 "y\n"      # save
                 "n\n"      # digest

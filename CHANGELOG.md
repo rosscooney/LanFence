@@ -13,6 +13,23 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Security
+
+- **SMTP STARTTLS now verifies the relay's certificate and hostname.**
+  `smtplib.SMTP.starttls()` called with no explicit context builds an
+  *unverified* context internally, silently accepting any certificate -
+  every email send path (`lanfence` alerts, digests, and `channels test
+  email`) now passes an explicit `ssl.create_default_context()`-based
+  context (`lanfence.smtp_utils.build_smtp_context`), consolidated into
+  one shared implementation so all three verify identically. A new
+  `alerts.email.ca_file` setting lets a relay with a private/internal CA
+  be trusted (an added trust anchor, never a verification bypass).
+  `email.username`/`password` are now refused when `use_tls` is disabled,
+  preventing a password from being sent in the clear; an explicitly
+  configured unauthenticated relay (no username/password) is unaffected.
+
 ## [0.4.2] - 2026-09-14
 
 ### Fixed
