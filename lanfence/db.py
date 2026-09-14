@@ -41,6 +41,7 @@ sighting establishes real provenance, rather than guessing.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import os
@@ -428,7 +429,7 @@ def _path_covered(
 #: LAN Fence has ever seen (MACs, IPs, hostnames) - restricted to the
 #: owning operator only, never group/world-readable, regardless of the
 #: umask in effect when they're created. See :func:`_ensure_secure_directory`/
-#: :func:`_secure_file_permissions`.
+#: :func:`_open_or_create_database_file`.
 _DB_DIR_MODE = 0o700
 _DB_FILE_MODE = 0o600
 #: SQLite creates these next to the main file depending on journal mode
@@ -468,6 +469,22 @@ def _expected_owner_uid() -> int:
         return 0
 
 
+def _check_fd_owner_and_mode(fd: int, path: Path, *, expected_uid: int, mode: int) -> None:
+    """Verify an already-open fd's owner and tighten its mode *on the fd
+    itself* (``os.fchmod``, never a second path-based ``os.chmod`` lookup
+    that could itself race against a symlink swap at ``path``). Shared by
+    the directory/file/sidecar helpers below."""
+
+    st = os.fstat(fd)
+    if st.st_uid != expected_uid:
+        raise PermissionError(
+            f"{path} is owned by uid {st.st_uid}, not the expected uid {expected_uid} "
+            "- refusing to use a path this process does not own"
+        )
+    if stat.S_IMODE(st.st_mode) != mode:
+        os.fchmod(fd, mode)
+
+
 def _ensure_secure_directory(path: Path) -> None:
     """Ensure ``path`` - and only ``path``, never an ancestor - exists as
     a directory owned by :func:`_expected_owner_uid` and mode 0700.
@@ -475,70 +492,125 @@ def _ensure_secure_directory(path: Path) -> None:
     Missing ancestor directories (e.g. ``~/.local/share``, likely shared
     with other applications) are created with ordinary, umask-governed
     permissions if needed - never forced restrictive, and never
-    re-chmod'd if they already exist. Only ``path`` itself (the directory
-    LAN Fence actually owns and writes its database into) is ever
-    tightened. Raises ``RuntimeError``/``PermissionError`` with a clear
-    message - never silently proceeds - if ``path`` exists but is a
-    symlink, not a directory, owned by an unexpected uid, or its
+    re-chmod'd if they already exist; a legitimate symlinked *ancestor*
+    (e.g. a platform alias, or an intentional bind-mount-style setup) is
+    left completely alone. Only ``path`` itself (the directory LAN Fence
+    actually owns and writes its database into) is ever opened/tightened,
+    and only via ``O_NOFOLLOW`` - a single atomic syscall that refuses a
+    symlink outright, never a separate ``exists()``/``is_symlink()``
+    check followed by an ordinary open that a concurrent symlink swap
+    could race between. Raises ``RuntimeError``/``PermissionError`` with
+    a clear message - never silently proceeds - if ``path`` turns out to
+    be a symlink, not a directory, owned by an unexpected uid, or its
     permissions can't be corrected.
     """
 
-    expected_uid = _expected_owner_uid()
-    if path.exists() or path.is_symlink():
-        st = path.lstat()
-        if stat.S_ISLNK(st.st_mode):
-            raise RuntimeError(f"refusing to use {path}: it is a symlink, not a directory")
-        if not stat.S_ISDIR(st.st_mode):
-            raise RuntimeError(f"{path} exists and is not a directory")
-        if st.st_uid != expected_uid:
-            raise PermissionError(
-                f"{path} is owned by uid {st.st_uid}, not the expected uid {expected_uid} "
-                "- refusing to use a directory this process does not own"
-            )
-        if stat.S_IMODE(st.st_mode) != _DB_DIR_MODE:
-            try:
-                os.chmod(path, _DB_DIR_MODE)
-            except OSError as exc:
-                raise PermissionError(f"could not restrict permissions on {path}: {exc}") from exc
-        return
-
     if path.parent != path:
         path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
-        path.mkdir(mode=_DB_DIR_MODE)
-        # mkdir()'s mode argument is itself filtered by the process umask
-        # (e.g. umask 022 would otherwise still yield 0755) - reassert
-        # explicitly rather than trusting it.
-        os.chmod(path, _DB_DIR_MODE)
-    except OSError as exc:
-        raise PermissionError(f"could not create {path} securely: {exc}") from exc
-
-
-def _secure_file_permissions(path: Path, *, expected_uid: int) -> None:
-    """Tighten an existing, already-owned file to :data:`_DB_FILE_MODE`.
-    Never touches a file owned by an unexpected uid - raises instead, the
-    same "fail clearly" policy as :func:`_ensure_secure_directory`."""
-
-    st = path.lstat()
-    if stat.S_ISLNK(st.st_mode):
-        raise RuntimeError(f"refusing to use {path}: it is a symlink")
-    if st.st_uid != expected_uid:
-        raise PermissionError(
-            f"{path} is owned by uid {st.st_uid}, not the expected uid {expected_uid} "
-            "- refusing to use a file this process does not own"
-        )
-    if stat.S_IMODE(st.st_mode) != _DB_FILE_MODE:
+        fd = os.open(str(path), os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
         try:
-            os.chmod(path, _DB_FILE_MODE)
+            path.mkdir(mode=_DB_DIR_MODE)
+        except FileExistsError:
+            pass  # a concurrent same-user process created it first - fine, open it below
+        try:
+            fd = os.open(str(path), os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError as exc:
+            raise PermissionError(f"could not create {path} securely: {exc}") from exc
+    except OSError as exc:
+        # A symlink at this exact path reads as ELOOP on some platforms
+        # and ENOTDIR on others (macOS) when combined with O_DIRECTORY -
+        # either way, it is not a real, direct directory and is refused.
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise RuntimeError(
+                f"refusing to use {path}: it is a symlink (or not a real directory), not a plain directory"
+            ) from exc
+        raise PermissionError(f"could not open {path}: {exc}") from exc
+
+    try:
+        _check_fd_owner_and_mode(fd, path, expected_uid=_expected_owner_uid(), mode=_DB_DIR_MODE)
+    except OSError as exc:
+        if not isinstance(exc, PermissionError):
             raise PermissionError(f"could not restrict permissions on {path}: {exc}") from exc
+        raise
+    finally:
+        os.close(fd)
+
+
+def _open_nofollow_existing(path: Path, flags: int) -> int:
+    """``open(2)`` with ``O_NOFOLLOW`` and no ``O_CREAT`` - a single
+    atomic syscall that refuses (``ELOOP``) if the final path component is
+    a symlink, rather than checking (``lstat``/``is_symlink``) and then
+    opening as two separate operations with a race window between them."""
+
+    try:
+        return os.open(str(path), flags | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RuntimeError(f"refusing to use {path}: it is a symlink") from exc
+        raise
+
+
+def _open_or_create_database_file(path: Path, *, expected_uid: int) -> None:
+    """Atomically open-or-create the main database file at ``path``
+    without ever following a symlink there - two cases, each a single
+    syscall:
+
+    - Doesn't exist yet: ``O_CREAT | O_EXCL`` fails if *anything* is
+      already there, including a dangling symlink - a pre-planted
+      dangling symlink can never be "completed" by this call creating
+      its target.
+    - Already exists: :func:`_open_nofollow_existing` fails with a clear
+      error if it's a symlink, guaranteeing this only ever proceeds with
+      a real regular file.
+
+    Either way, ownership/mode are verified and corrected on the fd
+    itself before it's closed. `sqlite3.connect` is then given the plain
+    path as usual (needed for SQLite's own journal/WAL sidecar-file name
+    derivation, which requires a real path string, not an fd) - by that
+    point the containing directory is already verified owner-only
+    (:func:`_ensure_secure_directory`, mode 0700), so the residual window
+    between this close and sqlite3's own open is only reachable by that
+    same owning user (or root) - not a cross-user race.
+    """
+
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR, _DB_FILE_MODE)
+    except FileExistsError:
+        fd = _open_nofollow_existing(path, os.O_RDWR)
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError(f"refusing to use {path}: not a regular file")
+        _check_fd_owner_and_mode(fd, path, expected_uid=expected_uid, mode=_DB_FILE_MODE)
+    finally:
+        os.close(fd)
 
 
 def _secure_sqlite_sidecars(db_path: Path, *, expected_uid: int) -> None:
+    """Best-effort permission/ownership check on any *already-existing*
+    SQLite sidecar file (SQLite creates/removes these internally during a
+    transaction, outside this module's control, so there is nothing to
+    atomically "create" here the way :func:`_open_or_create_database_file`
+    does for the main file) - opened via :func:`_open_nofollow_existing`,
+    never a plain path-based check-then-chmod."""
+
     for suffix in _SQLITE_SIDECAR_SUFFIXES:
         sidecar = db_path.with_name(db_path.name + suffix)
-        if sidecar.exists():
-            _secure_file_permissions(sidecar, expected_uid=expected_uid)
+        try:
+            fd = _open_nofollow_existing(sidecar, os.O_RDWR)
+        except FileNotFoundError:
+            continue  # doesn't exist (the common case) - nothing to secure
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise RuntimeError(f"refusing to use {sidecar}: not a regular file")
+            _check_fd_owner_and_mode(fd, sidecar, expected_uid=expected_uid, mode=_DB_FILE_MODE)
+        finally:
+            os.close(fd)
 
 
 def _row_to_device(row: sqlite3.Row) -> Device:
@@ -566,14 +638,7 @@ class DeviceStore:
         _ensure_secure_directory(self.path.parent)
         expected_uid = _expected_owner_uid()
 
-        if self.path.exists():
-            _secure_file_permissions(self.path, expected_uid=expected_uid)
-        else:
-            # Created with the restrictive mode already in effect - never
-            # a window where it briefly exists with default/umask-derived
-            # (looser) permissions.
-            fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, _DB_FILE_MODE)
-            os.close(fd)
+        _open_or_create_database_file(self.path, expected_uid=expected_uid)
         _secure_sqlite_sidecars(self.path, expected_uid=expected_uid)
 
         self._max_evidence_rows_per_mac = max(1, max_evidence_rows_per_mac)

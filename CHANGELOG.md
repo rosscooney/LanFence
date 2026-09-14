@@ -66,6 +66,23 @@ Each release is also published to
   `sudo lanfence scan`/`monitor` legitimately writing into the invoking
   operator's (not root's) directory, per the `$HOME`-under-`sudo` fix in
   0.4.2.
+- **Closed a symlink-following race in database access.** `sqlite3.connect`
+  follows a symlink at the configured path; combined with privileged
+  (`sudo`) execution, an attacker who could place a symlink at that exact
+  path (or race a legitimate file into becoming one) could redirect LAN
+  Fence's writes to an unintended target. The database file, its
+  containing directory, and its SQLite `-wal`/`-shm`/`-journal` sidecar
+  files are now all opened with a single atomic, symlink-refusing syscall
+  (`O_NOFOLLOW` for anything expected to already exist, `O_CREAT|O_EXCL`
+  for first-ever creation) rather than a separate `exists()`/
+  `is_symlink()` check followed by an ordinary open - eliminating the
+  race window between the two. Verified: a dangling symlink at the
+  database path is refused without ever creating its target; a symlink
+  to an existing file is refused without ever touching that file's
+  contents; a symlinked sidecar is refused the same way; a legitimate
+  symlinked *ancestor* directory (a platform alias, an intentional
+  bind-mount-style setup) is left completely untouched, since only the
+  final path components LAN Fence actually owns are ever checked.
 
 ## [0.4.2] - 2026-09-14
 

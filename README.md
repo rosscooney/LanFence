@@ -1420,7 +1420,12 @@ never affected by whether delivery itself succeeded.
   journal/WAL sidecar files; only the directory LAN Fence itself owns is
   ever touched, never a shared ancestor like `~/.local/share`. A directory
   or file unexpectedly owned by a different user, or that is actually a
-  symlink, is refused with a clear error rather than silently used.
+  symlink, is refused with a clear error rather than silently used - the
+  database file, its containing directory, and its SQLite sidecar files
+  are all opened with an atomic, symlink-refusing syscall (`O_NOFOLLOW`/
+  `O_EXCL`), never a separate exists-then-open check that a symlink swap
+  could race between, so a database path an attacker redirected to
+  another file is refused rather than followed.
 - **Bounded against a hostile or flooding LAN.** `monitor`'s passive
   processing queues (`scan.passive_queue_maxsize`) are bounded and drop
   (counted, logged) rather than grow without limit under a packet flood;

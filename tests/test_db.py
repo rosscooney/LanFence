@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1452,3 +1453,138 @@ def test_a_second_devicestore_open_on_an_already_secured_database_is_a_noop(tmp_
     store2 = DeviceStore(db_path)
     store2.close()
     assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+# --- symlink attack resistance ----------------------------------------
+
+
+def test_refuses_dangling_symlink_at_the_database_path(tmp_path: Path):
+    """A pre-planted dangling symlink must never be "completed" (its
+    target created) by opening the database - the target must not exist
+    afterwards."""
+
+    db_dir = tmp_path / "lanfence"
+    db_dir.mkdir()
+    outside_target = tmp_path / "outside_target.sqlite"
+    link = db_dir / "db.sqlite"
+    link.symlink_to(outside_target)
+
+    try:
+        DeviceStore(link)
+        assert False, "expected a RuntimeError"
+    except RuntimeError as exc:
+        assert "symlink" in str(exc)
+    assert not outside_target.exists()
+
+
+def test_refuses_symlink_to_an_existing_file_and_leaves_it_untouched(tmp_path: Path):
+    db_dir = tmp_path / "lanfence"
+    db_dir.mkdir()
+    victim = tmp_path / "victim_file"
+    original = "original contents - must not be touched"
+    victim.write_text(original)
+    link = db_dir / "db.sqlite"
+    link.symlink_to(victim)
+
+    try:
+        DeviceStore(link)
+        assert False, "expected a RuntimeError"
+    except RuntimeError as exc:
+        assert "symlink" in str(exc)
+    assert victim.read_text() == original
+
+
+def test_refuses_symlinked_state_directory(tmp_path: Path):
+    """A symlinked leaf directory (not just the db file itself) must be
+    refused - this is 'an unsafe parent' relative to the db file."""
+
+    real = tmp_path / "real"
+    real.mkdir()
+    link_dir = tmp_path / "lanfence"
+    link_dir.symlink_to(real)
+
+    try:
+        DeviceStore(link_dir / "db.sqlite")
+        assert False, "expected a RuntimeError"
+    except RuntimeError as exc:
+        assert "symlink" in str(exc) or "directory" in str(exc)
+
+
+def test_refuses_symlinked_sqlite_sidecar_and_leaves_target_untouched(tmp_path: Path):
+    db_dir = tmp_path / "lanfence"
+    db_dir.mkdir()
+    db_path = db_dir / "db.sqlite"
+    db_path.touch()
+    victim = tmp_path / "victim_wal"
+    victim.write_text("do not touch")
+    (db_dir / "db.sqlite-wal").symlink_to(victim)
+
+    try:
+        DeviceStore(db_path)
+        assert False, "expected a RuntimeError"
+    except RuntimeError as exc:
+        assert "symlink" in str(exc)
+    assert victim.read_text() == "do not touch"
+
+
+def test_normal_creation_still_works_after_symlink_hardening(tmp_path: Path):
+    """The common, non-adversarial case (nothing exists yet) must be
+    completely unaffected by the symlink-refusing open."""
+
+    db_path = tmp_path / "lanfence" / "db.sqlite"
+    store = DeviceStore(db_path)
+    store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+    store.close()
+    assert db_path.exists()
+
+    # Reopening an already-real, already-secured file also still works.
+    store2 = DeviceStore(db_path)
+    assert store2.get_device("aa:bb:cc:dd:ee:ff") is not None
+    store2.close()
+
+
+def test_ancestor_symlink_is_not_disturbed(tmp_path: Path):
+    """Only the final leaf directory/file are ever checked for symlinks -
+    a legitimate symlinked *ancestor* (a platform alias, an intentional
+    bind-mount-style setup) is left completely alone."""
+
+    real_ancestor = tmp_path / "real_ancestor"
+    real_ancestor.mkdir()
+    aliased_ancestor = tmp_path / "aliased_ancestor"
+    aliased_ancestor.symlink_to(real_ancestor)
+
+    db_path = aliased_ancestor / "lanfence" / "db.sqlite"
+    store = DeviceStore(db_path)
+    store.close()
+
+    assert db_path.exists()
+    assert aliased_ancestor.is_symlink()  # untouched - never converted or rejected
+
+
+def test_open_or_create_database_file_atomic_create_excludes_existing_symlink(tmp_path: Path):
+    """Direct unit check that the O_CREAT|O_EXCL path never silently
+    "wins" a race against something already there, symlink included."""
+
+    from lanfence.db import _open_or_create_database_file
+
+    target = tmp_path / "target"
+    link = tmp_path / "db.sqlite"
+    link.symlink_to(target)
+
+    try:
+        _open_or_create_database_file(link, expected_uid=os.getuid())
+        assert False, "expected a RuntimeError"
+    except RuntimeError:
+        pass
+    assert not target.exists()
+
+
+def test_open_nofollow_existing_raises_filenotfounderror_for_missing_path(tmp_path: Path):
+    from lanfence.db import _open_nofollow_existing
+
+    missing = tmp_path / "does-not-exist"
+    try:
+        _open_nofollow_existing(missing, os.O_RDWR)
+        assert False, "expected FileNotFoundError"
+    except FileNotFoundError:
+        pass
