@@ -190,6 +190,20 @@ def test_check_runs_without_crashing(config_path: Path):
     assert "Host" in result.stdout
 
 
+def test_check_reports_nmap_installed(config_path: Path):
+    with patch("lanfence.cli.active_inspect.nmap_available", return_value=True):
+        result = runner.invoke(app, ["check", "--config", str(config_path)])
+    assert "nmap is installed" in result.output
+
+
+def test_check_reports_nmap_missing_as_optional_not_a_failure(config_path: Path):
+    with patch("lanfence.cli.active_inspect.nmap_available", return_value=False):
+        result = runner.invoke(app, ["check", "--config", str(config_path)])
+    assert "nmap is not installed" in result.output
+    assert "still works via its built-in scan" in result.output
+    assert result.exit_code in (0, 1)
+
+
 def test_check_creates_missing_allowlist_file(tmp_path: Path, config_path: Path):
     allowlist_file = tmp_path / "allowlist.yaml"
     assert not allowlist_file.exists()

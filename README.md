@@ -169,7 +169,7 @@ lanfence report --since 24h     # summarize events/findings from the database
 lanfence digest                 # preview a 24h summary; add --send to deliver it
 lanfence digest --since 7d --send --channel email
 lanfence dhcp-servers            # observed DHCP servers and their approval status
-lanfence check                  # verify permissions, scapy, interface, storage
+lanfence check                  # verify permissions, scapy, nmap, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
 lanfence upgrade --check        # only report whether an update is available
 lanfence link                   # make `sudo lanfence` work (pipx/--user installs)

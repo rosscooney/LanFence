@@ -2006,7 +2006,7 @@ def link(
 def check(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
-    """Check that this host can run LAN Fence (permissions, scapy, interface)."""
+    """Check that this host can run LAN Fence (permissions, scapy, nmap, interface)."""
 
     cfg = _load_config(config)
 
@@ -2024,6 +2024,14 @@ def check(
             "  MISSING  scapy is not installed - run: pipx inject lanfence scapy "
             "(or pip install 'lanfence[scan]')",
             fg="yellow",
+        )
+
+    if active_inspect.nmap_available():
+        typer.secho("  ok       nmap is installed (used automatically by `lanfence inspect`)", fg="green")
+    else:
+        typer.echo(
+            "  optional nmap is not installed - `lanfence inspect` still works via its "
+            "built-in scan; installing nmap improves service identification"
         )
 
     iface = cfg.scan.interface or scanner.default_interface()

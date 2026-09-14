@@ -55,7 +55,8 @@ Each release is also published to
   `lanfence review` makes (with a clear warning) for the device on screen.
   Results are persisted per MAC and shown again, labeled with their age
   and flagged stale past 24 hours, by `lanfence device <MAC>` and
-  `review`'s `[D] Full details` view.
+  `review`'s `[D] Full details` view. `lanfence check` now also reports
+  whether nmap is installed (never a failure if it isn't).
 
 ## [0.3.13] - 2026-09-12
 
