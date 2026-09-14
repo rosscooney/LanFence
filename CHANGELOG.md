@@ -15,6 +15,34 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- **Device dossier and conservative device classification.** Every device
+  now gets a consolidated view of everything already retained about it
+  (addresses, names, advertised services, fingerprint matches, operator
+  metadata) plus a "likely device" guess (e.g. "Sonos speaker", "Windows
+  workstation") built entirely from that existing evidence, always labeled
+  with a confidence (High/Medium/Low) and the specific reasons behind it -
+  never presented as verified identity, since MAC OUIs/hostnames/mDNS/SSDP
+  remain trivially spoofable. `lanfence device <MAC>` shows a new "Likely
+  device" section.
+- **`lanfence review`'s interactive queue** now shows this dossier
+  compactly before asking what to do, with a richer action menu
+  (`[T]rust`/`[I]nvestigate`/`[S]nooze`/`[D] Full details`/`[N]ext`/
+  `[Q]uit`), and walks the queue in **review-priority order** (Priority /
+  Needs identification / Likely familiar - a deterministic, plain-language
+  tier, never a numeric risk score) instead of MAC order.
+- **`lanfence allow <MAC>`** shows the same compact dossier before asking
+  for confirmation when trusting an already-observed device at an
+  interactive terminal; a new `--yes` flag skips the prompt, and
+  non-interactive/scripted use is unaffected.
+- **First-run/ongoing triage summary** after `lanfence scan`: a short,
+  categorized orientation ("N appear straightforward", "N need
+  identification", "N use private/randomised MAC addresses", "N have
+  higher-priority security characteristics", plus how many are already
+  reviewed) shown alongside the existing compact device table - not new
+  table columns, and not part of the stable JSON output.
+
 ## [0.3.13] - 2026-09-12
 
 ### Added

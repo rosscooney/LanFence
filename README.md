@@ -149,6 +149,7 @@ lanfence run                    # exact alias for `scan`
 lanfence scan --format json    # same, machine-readable
 lanfence monitor                # continuous: active sweeps + passive sniffing
 lanfence allow <MAC> --name X   # trust a device; its findings become info
+lanfence allow <MAC> --yes      # skip the device-context confirmation prompt (scripted use)
 lanfence allow --list           # show the allowlist
 lanfence allow --remove <MAC>   # untrust a device
 lanfence reset                  # permanently wipe scanned device history (and allowlist)
@@ -328,20 +329,45 @@ MAC has ever held - LAN Fence does not retain that. An invalid or
 never-before-seen MAC exits non-zero with a clear error.
 
 `lanfence review` is how you act on the queue. With no MAC, it walks devices
-needing review one at a time, in a stable MAC order fixed at the start of the
-session, and offers:
+needing review one at a time, ordered by **review priority** (see
+[Device classification and review priority](#device-classification-and-review-priority)
+below - stronger security signals and weaker identity evidence first, never a
+numeric score), showing a compact dossier before asking what to do:
 
-- **[t]rust** - prompts for a friendly name and optional notes, then adds the
+```text
+Device 3 of 18  ·  Needs identification
+
+52:8a:1c:99:f4:2d
+192.168.1.47
+
+Likely device: Unknown device (no supporting evidence)
+
+First seen: 14 Sep 2026 09:10
+Last seen:  14 Sep 2026 09:41
+Status:     Online
+
+Evidence:
+  - MAC is locally administered (randomized or manually set) - no vendor to identify
+
+Actions: [T]rust  [I]nvestigate  [S]nooze  [D] Full details  [N]ext  [Q]uit
+  choice:
+```
+
+- **[T]rust** - prompts for a friendly name and optional notes, then adds the
   device to the same allowlist `lanfence allow` writes to. LAN Fence never
   trusts a device on its own; a human always makes this call.
-- **[s]nooze** - suppresses *external* alert dispatch (Slack/Discord/Teams/
+- **[I]nvestigate** - records an investigation flag and optional notes
+  without trusting the device or suppressing its alerts.
+- **[S]nooze** - suppresses *external* alert dispatch (Slack/Discord/Teams/
   Twilio/webhook/etc.) for this MAC for a bounded duration (default `24h`).
   Findings keep being recorded and still show up in `scan`/`report`/`devices`
   output and JSON - snoozing hides notifications, not the device.
-- **[i]nvestigate** - records an investigation flag and optional notes
-  without trusting the device or suppressing its alerts.
-- **s[k]ip** - no changes; the device stays in the queue for next time.
-- **[q]uit** - stops the session immediately; every decision made so far is
+- **[D] Full details** - shows the same full report `lanfence device <MAC>`
+  does (all retained address/name evidence, advertised services, findings),
+  then returns to this same device's menu - it makes no decision by itself.
+- **[N]ext** (the default - just press Enter) - no changes; the device stays
+  in the queue for next time.
+- **[Q]uit** - stops the session immediately; every decision made so far is
   already persisted.
 
 It requires a real terminal and exits with a helpful error instead of
@@ -351,6 +377,78 @@ noninteractive form there instead, passing exactly one of `--trust`,
 a snooze/investigation flag and returns the device to "pending"; it does
 **not** remove allowlist membership - `lanfence allow --remove <MAC>` is
 still what untrusts a device.
+
+`lanfence allow <MAC>` shows this same compact dossier before asking you to
+confirm trusting an already-observed device, but only when run at an
+interactive terminal - a never-before-seen MAC (nothing to show yet) and any
+non-interactive invocation (scripts, cron, CI) skip the prompt entirely and
+behave exactly as before, so existing automation needs no changes. Pass
+`--yes` to skip the confirmation even at an interactive terminal.
+
+## Device classification and review priority
+
+Every device gets a conservative **"likely device"** guess, built only from
+evidence LAN Fence already retains elsewhere (vendor OUI, self-reported
+hostname, advertised mDNS/SSDP services, an existing rogue-signature match) -
+never fabricated, always labeled with a confidence (**High**/**Medium**/
+**Low**) and the specific evidence behind it, and defaulting to "Unknown
+device" with no confidence when the evidence doesn't reasonably support more:
+
+```text
+$ lanfence device b8:e9:37:aa:bb:cc
+
+Likely device: Sonos speaker
+Confidence:    High
+  - Vendor OUI: Sonos, Inc.
+  - Advertises AirPlay/remote-audio services
+```
+
+None of this evidence is authenticated - a MAC's vendor prefix, a
+self-reported hostname, and anything advertised over mDNS/SSDP are all
+trivially spoofable by a device that wants to blend in, exactly like the
+[rogue-device signatures](#built-in-rogue-device-signatures) this
+classification reuses. It is always a labeled inference, never presented as
+verified identity.
+
+`lanfence review`'s queue is ordered by **review priority**, a deterministic,
+plain-language tier built from existing signals (an existing medium/high
+rogue-signature match, a locally-administered/randomized MAC, how confident
+the classification is, whether a hostname or service corroborates it) -
+**never a numeric risk score** claiming a precision this evidence doesn't
+support:
+
+- **Priority** - an existing medium/high-severity rogue-signature match, or a
+  locally-administered/randomized MAC (no vendor identity to go on at all).
+- **Needs identification** - nothing (or only a low-confidence guess)
+  reasonably identifies the device.
+- **Likely familiar** - a known manufacturer, ideally corroborated by a
+  hostname or advertised service.
+
+After a scan, the same three tiers (plus the security-flagged case) drive a
+short orientation summary alongside the usual compact device table - the
+table stays a compact inventory view; this is a separate, human-readable
+breakdown of what deserves a closer look:
+
+```text
+$ sudo lanfence scan
+
+Devices seen (47)
+...
+
+LAN Fence has discovered 47 devices.
+
+31 appear straightforward
+ 9 need identification
+ 5 use private/randomised MAC addresses
+ 2 have higher-priority security characteristics
+
+None have been reviewed yet.
+
+Run `lanfence review` to work through them.
+```
+
+Only shown for `--format table` (the default) - `--format json`'s
+`ScanResult` payload is unchanged.
 
 Trust, snooze, and investigate are mutually exclusive persisted states
 (`pending` is the default); if a device is both trusted and, say, mid-snooze
