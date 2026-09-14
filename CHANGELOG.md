@@ -51,6 +51,21 @@ Each release is also published to
   (`retention.*`), independent of and tighter than the existing time-based
   expiry, bounding how much a burst of spoofed/rotating observations can
   grow the database before any of them individually expire.
+- **Restricted database and state-directory permissions.** Under a
+  permissive umask (e.g. `022`), the device database and its containing
+  directory could previously end up world/group-readable. LAN Fence's own
+  state directory is now created (or tightened, if already owned by the
+  expected user) to `0700` and the database file to `0600`, regardless of
+  umask - reasserted explicitly rather than trusted to `mkdir`/file
+  creation defaults - with the same applied to any pre-existing SQLite
+  `-wal`/`-shm`/`-journal` sidecar file. Only the directory LAN Fence
+  itself owns is ever touched, never a shared ancestor (e.g.
+  `~/.local/share`). A directory or file unexpectedly owned by a
+  different user, or one that is actually a symlink, is refused with a
+  clear error rather than silently used - correctly accounting for
+  `sudo lanfence scan`/`monitor` legitimately writing into the invoking
+  operator's (not root's) directory, per the `$HOME`-under-`sudo` fix in
+  0.4.2.
 
 ## [0.4.2] - 2026-09-14
 

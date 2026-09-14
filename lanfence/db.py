@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import sqlite3
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -422,6 +424,123 @@ def _path_covered(
     return ipv4_ok and ipv6_ok
 
 
+#: The device database and its containing directory hold every device
+#: LAN Fence has ever seen (MACs, IPs, hostnames) - restricted to the
+#: owning operator only, never group/world-readable, regardless of the
+#: umask in effect when they're created. See :func:`_ensure_secure_directory`/
+#: :func:`_secure_file_permissions`.
+_DB_DIR_MODE = 0o700
+_DB_FILE_MODE = 0o600
+#: SQLite creates these next to the main file depending on journal mode
+#: (a transient rollback journal, or persistent -wal/-shm files once WAL
+#: mode is used) - each must get the same restrictive permissions as the
+#: main file whenever one exists. Best-effort: SQLite creates/removes them
+#: internally during a transaction, outside this module's direct control,
+#: so this is re-applied at DeviceStore construction time, not a
+#: continuous guarantee - the containing directory's own 0700 mode (which
+#: blocks every other user from even listing or traversing into it) is
+#: the primary defense, this is defense in depth on top of it.
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _expected_owner_uid() -> int:
+    """The uid LAN Fence's own state directory/database should be owned
+    by. Normally the current process uid - but when running as root via
+    ``sudo`` with a real ``SUDO_USER``, the *invoking operator's* uid,
+    mirroring :func:`lanfence.config._operator_home`'s identical
+    reasoning for ``~`` expansion: ``scan``/``monitor`` under `sudo`
+    resolve ``db_path`` to the operator's own home directory (not
+    ``/root``), so that directory is legitimately owned by the operator,
+    not by root, even though this process's effective uid is 0. A
+    genuine root login/system service (no ``SUDO_USER``) is left as uid 0.
+    """
+
+    if os.geteuid() != 0:
+        return os.getuid()
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user or sudo_user == "root":
+        return 0
+    try:
+        import pwd
+
+        return pwd.getpwnam(sudo_user).pw_uid
+    except (KeyError, ImportError):
+        return 0
+
+
+def _ensure_secure_directory(path: Path) -> None:
+    """Ensure ``path`` - and only ``path``, never an ancestor - exists as
+    a directory owned by :func:`_expected_owner_uid` and mode 0700.
+
+    Missing ancestor directories (e.g. ``~/.local/share``, likely shared
+    with other applications) are created with ordinary, umask-governed
+    permissions if needed - never forced restrictive, and never
+    re-chmod'd if they already exist. Only ``path`` itself (the directory
+    LAN Fence actually owns and writes its database into) is ever
+    tightened. Raises ``RuntimeError``/``PermissionError`` with a clear
+    message - never silently proceeds - if ``path`` exists but is a
+    symlink, not a directory, owned by an unexpected uid, or its
+    permissions can't be corrected.
+    """
+
+    expected_uid = _expected_owner_uid()
+    if path.exists() or path.is_symlink():
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            raise RuntimeError(f"refusing to use {path}: it is a symlink, not a directory")
+        if not stat.S_ISDIR(st.st_mode):
+            raise RuntimeError(f"{path} exists and is not a directory")
+        if st.st_uid != expected_uid:
+            raise PermissionError(
+                f"{path} is owned by uid {st.st_uid}, not the expected uid {expected_uid} "
+                "- refusing to use a directory this process does not own"
+            )
+        if stat.S_IMODE(st.st_mode) != _DB_DIR_MODE:
+            try:
+                os.chmod(path, _DB_DIR_MODE)
+            except OSError as exc:
+                raise PermissionError(f"could not restrict permissions on {path}: {exc}") from exc
+        return
+
+    if path.parent != path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(mode=_DB_DIR_MODE)
+        # mkdir()'s mode argument is itself filtered by the process umask
+        # (e.g. umask 022 would otherwise still yield 0755) - reassert
+        # explicitly rather than trusting it.
+        os.chmod(path, _DB_DIR_MODE)
+    except OSError as exc:
+        raise PermissionError(f"could not create {path} securely: {exc}") from exc
+
+
+def _secure_file_permissions(path: Path, *, expected_uid: int) -> None:
+    """Tighten an existing, already-owned file to :data:`_DB_FILE_MODE`.
+    Never touches a file owned by an unexpected uid - raises instead, the
+    same "fail clearly" policy as :func:`_ensure_secure_directory`."""
+
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        raise RuntimeError(f"refusing to use {path}: it is a symlink")
+    if st.st_uid != expected_uid:
+        raise PermissionError(
+            f"{path} is owned by uid {st.st_uid}, not the expected uid {expected_uid} "
+            "- refusing to use a file this process does not own"
+        )
+    if stat.S_IMODE(st.st_mode) != _DB_FILE_MODE:
+        try:
+            os.chmod(path, _DB_FILE_MODE)
+        except OSError as exc:
+            raise PermissionError(f"could not restrict permissions on {path}: {exc}") from exc
+
+
+def _secure_sqlite_sidecars(db_path: Path, *, expected_uid: int) -> None:
+    for suffix in _SQLITE_SIDECAR_SUFFIXES:
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.exists():
+            _secure_file_permissions(sidecar, expected_uid=expected_uid)
+
+
 def _row_to_device(row: sqlite3.Row) -> Device:
     return Device(
         mac=row["mac"],
@@ -444,7 +563,19 @@ class DeviceStore:
         max_discovery_rows_per_table: int = _DEFAULT_MAX_DISCOVERY_ROWS_PER_TABLE,
     ) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_secure_directory(self.path.parent)
+        expected_uid = _expected_owner_uid()
+
+        if self.path.exists():
+            _secure_file_permissions(self.path, expected_uid=expected_uid)
+        else:
+            # Created with the restrictive mode already in effect - never
+            # a window where it briefly exists with default/umask-derived
+            # (looser) permissions.
+            fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, _DB_FILE_MODE)
+            os.close(fd)
+        _secure_sqlite_sidecars(self.path, expected_uid=expected_uid)
+
         self._max_evidence_rows_per_mac = max(1, max_evidence_rows_per_mac)
         self._max_dhcp_server_findings = max(1, max_dhcp_server_findings)
         self._max_discovery_rows_per_table = max(1, max_discovery_rows_per_table)
@@ -455,6 +586,10 @@ class DeviceStore:
             _ensure_columns(self._conn, table, columns)
         self._conn.commit()
         self._migrate_legacy_address_and_name_evidence()
+        # The schema/migration steps above may have just created SQLite's
+        # own journal/WAL sidecar files for the first time - secure those
+        # too, not just whatever existed before this connection opened.
+        _secure_sqlite_sidecars(self.path, expected_uid=expected_uid)
 
     def _enforce_row_cap(self, table: str, max_rows: int, *, order_by: str, mac: str | None = None) -> None:
         """Delete the oldest (by ``order_by``, descending) rows in ``table``

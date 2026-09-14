@@ -1277,3 +1277,178 @@ def test_device_store_rejects_non_positive_retention_caps_by_clamping(tmp_path: 
             kind="observed", seen_at=_now(),
         )
         assert len(store.address_evidence_for("aa:bb:cc:dd:ee:ff")) >= 1
+
+
+# --- file/directory permissions (defense against a shared/multi-user host) --
+
+
+def test_new_database_directory_is_owner_only(tmp_path: Path):
+    import stat
+
+    db_dir = tmp_path / "lanfence"
+    store = DeviceStore(db_dir / "db.sqlite")
+    store.close()
+    assert stat.S_IMODE(db_dir.stat().st_mode) == 0o700
+
+
+def test_new_database_file_is_owner_only(tmp_path: Path):
+    import stat
+
+    db_path = tmp_path / "lanfence" / "db.sqlite"
+    store = DeviceStore(db_path)
+    store.close()
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+def test_ancestor_directories_are_not_forced_restrictive(tmp_path: Path):
+    """Only the leaf (LAN-Fence-owned) directory is tightened - a shared
+    ancestor like ~/.local/share must never be chmod'd by this."""
+
+    import stat
+
+    ancestor = tmp_path / "shared_ancestor"
+    db_dir = ancestor / "lanfence"
+    store = DeviceStore(db_dir / "db.sqlite")
+    store.close()
+
+    assert stat.S_IMODE(db_dir.stat().st_mode) == 0o700
+    # The ancestor keeps whatever mkdir()/umask gave it - never forced to 0700.
+    assert stat.S_IMODE(ancestor.stat().st_mode) != 0o700
+
+
+def test_permissive_umask_does_not_leave_loose_permissions(tmp_path: Path):
+    import os
+    import stat
+
+    old_umask = os.umask(0o000)
+    try:
+        db_dir = tmp_path / "lanfence"
+        store = DeviceStore(db_dir / "db.sqlite")
+        store.close()
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE(db_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((db_dir / "db.sqlite").stat().st_mode) == 0o600
+
+
+def test_existing_loosely_permissioned_directory_and_file_are_tightened(tmp_path: Path):
+    import os
+    import stat
+
+    db_dir = tmp_path / "lanfence"
+    db_dir.mkdir()
+    os.chmod(db_dir, 0o755)
+    db_path = db_dir / "db.sqlite"
+    db_path.touch()
+    os.chmod(db_path, 0o644)
+
+    store = DeviceStore(db_path)
+    store.close()
+
+    assert stat.S_IMODE(db_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+def test_existing_sqlite_sidecar_files_are_tightened(tmp_path: Path):
+    """SQLite itself creates/removes -wal/-shm/-journal sidecars, outside
+    this module's direct control (a stale rollback journal is even
+    cleaned up by SQLite's own recovery on open) - so this exercises the
+    permission-securing helper directly rather than relying on one still
+    being present after a full DeviceStore open/close cycle."""
+
+    import os
+    import stat
+
+    from lanfence.db import _secure_sqlite_sidecars
+
+    db_dir = tmp_path / "lanfence"
+    db_dir.mkdir()
+    db_path = db_dir / "db.sqlite"
+    db_path.touch()
+    wal = db_dir / "db.sqlite-wal"
+    wal.touch()
+    os.chmod(wal, 0o644)
+
+    _secure_sqlite_sidecars(db_path, expected_uid=os.getuid())
+
+    assert stat.S_IMODE(wal.stat().st_mode) == 0o600
+
+
+def test_refuses_a_directory_that_is_actually_a_symlink(tmp_path: Path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "lanfence"
+    link_dir.symlink_to(real_dir)
+
+    try:
+        DeviceStore(link_dir / "db.sqlite")
+        assert False, "expected a RuntimeError"
+    except RuntimeError as exc:
+        assert "symlink" in str(exc)
+
+
+def test_refuses_a_directory_owned_by_an_unexpected_uid(tmp_path: Path, monkeypatch):
+    db_dir = tmp_path / "lanfence"
+    db_dir.mkdir()
+    monkeypatch.setattr("lanfence.db._expected_owner_uid", lambda: 999999)
+
+    try:
+        DeviceStore(db_dir / "db.sqlite")
+        assert False, "expected a PermissionError"
+    except PermissionError as exc:
+        assert "owned by uid" in str(exc)
+
+
+def test_refuses_a_database_file_owned_by_an_unexpected_uid(tmp_path: Path, monkeypatch):
+    db_dir = tmp_path / "lanfence"
+    db_dir.mkdir()
+    db_path = db_dir / "db.sqlite"
+    db_path.touch()
+    monkeypatch.setattr("lanfence.db._expected_owner_uid", lambda: 999999)
+
+    try:
+        DeviceStore(db_path)
+        assert False, "expected a PermissionError"
+    except PermissionError as exc:
+        assert "owned by uid" in str(exc)
+
+
+def test_expected_owner_uid_is_current_user_when_not_root(monkeypatch):
+    import os
+
+    from lanfence.db import _expected_owner_uid
+
+    monkeypatch.setattr("lanfence.db.os.geteuid", lambda: 1000)
+    assert _expected_owner_uid() == os.getuid()
+
+
+def test_expected_owner_uid_prefers_sudo_user_when_run_as_root(monkeypatch):
+    from lanfence.db import _expected_owner_uid
+
+    monkeypatch.setattr("lanfence.db.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    monkeypatch.setattr("pwd.getpwnam", lambda name: type("_pw", (), {"pw_uid": 1234})())
+    assert _expected_owner_uid() == 1234
+
+
+def test_expected_owner_uid_root_without_sudo_user_stays_root(monkeypatch):
+    from lanfence.db import _expected_owner_uid
+
+    monkeypatch.setattr("lanfence.db.os.geteuid", lambda: 0)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    assert _expected_owner_uid() == 0
+
+
+def test_a_second_devicestore_open_on_an_already_secured_database_is_a_noop(tmp_path: Path):
+    """Reopening an already-correctly-permissioned database (the normal
+    case for every command after the first) must not raise or need to
+    change anything."""
+
+    import stat
+
+    db_path = tmp_path / "lanfence" / "db.sqlite"
+    DeviceStore(db_path).close()
+    store2 = DeviceStore(db_path)
+    store2.close()
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600

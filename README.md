@@ -1413,8 +1413,14 @@ never affected by whether delivery itself succeeded.
 - The bundled vendor and signature tables are static snapshots taken when
   this version was built; nothing is fetched automatically to "keep them
   fresh" - that's what `vendor-refresh` is for, on request.
-- The device database and allowlist are written atomically and are
-  owner-readable only where the platform supports it.
+- The device database and allowlist are written atomically. The database's
+  containing directory is created (or, if it already exists, tightened)
+  to mode `0700` and the database file itself to `0600` - regardless of
+  the process umask - and the same applied to any pre-existing SQLite
+  journal/WAL sidecar files; only the directory LAN Fence itself owns is
+  ever touched, never a shared ancestor like `~/.local/share`. A directory
+  or file unexpectedly owned by a different user, or that is actually a
+  symlink, is refused with a clear error rather than silently used.
 - **Bounded against a hostile or flooding LAN.** `monitor`'s passive
   processing queues (`scan.passive_queue_maxsize`) are bounded and drop
   (counted, logged) rather than grow without limit under a packet flood;
