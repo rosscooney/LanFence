@@ -13,6 +13,22 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- **`sudo lanfence scan`/`monitor` and a plain `lanfence devices`/`review`/
+  `allow` could silently read and write two different databases.** The
+  default `db_path`/`allowlist_file` (`~/.local/share/lanfence/...`,
+  `~/.config/lanfence/...`) now expand `~` against the actual invoking
+  operator's home directory even when running as root via `sudo` (which
+  resets `$HOME` to root's home by default), instead of ending up in
+  `/root`. This also explains `lanfence monitor`'s live stats appearing
+  not to reset after `lanfence reset` when the two commands were run with
+  different privilege levels - they were simply looking at different
+  files. A genuine root login/system service (no `SUDO_USER`) is
+  unaffected.
+
 ## [0.4.1] - 2026-09-14
 
 ### Added

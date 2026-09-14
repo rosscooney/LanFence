@@ -47,7 +47,7 @@ from lanfence.channels import (
     supports_digest,
     validate_channel_values,
 )
-from lanfence.config import DIGEST_CHANNELS, Config
+from lanfence.config import DIGEST_CHANNELS, Config, expand_operator_path
 from lanfence.db import DeviceStore
 from lanfence.dhcp_server import (
     dhcp_server_detection_active,
@@ -2287,8 +2287,7 @@ def vendor_refresh(
     """
 
     cfg = _load_config(config)
-    dest = output or cfg.vendor_file or Path("~/.config/lanfence/oui_vendors.txt").expanduser()
-    dest = Path(dest).expanduser()
+    dest = expand_operator_path(Path(output or cfg.vendor_file or "~/.config/lanfence/oui_vendors.txt"))
 
     typer.echo(f"fetching {url} ...")
     request = urllib.request.Request(url, headers={"User-Agent": f"lanfence/{__version__}"})
@@ -2318,7 +2317,7 @@ def vendor_refresh(
         raise typer.Exit(code=1) from exc
 
     typer.secho(f"saved {len(table)} vendor entries to {dest}", fg="green")
-    if cfg.vendor_file is None or Path(cfg.vendor_file).expanduser() != dest:
+    if cfg.vendor_file is None or expand_operator_path(Path(cfg.vendor_file)) != dest:
         typer.echo(f"add this to your config to use it:\n  vendor_file: {dest}")
 
 

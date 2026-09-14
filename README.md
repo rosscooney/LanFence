@@ -185,6 +185,13 @@ default - `sudo lanfence scan` then fails with "command not found". Run
 `PATH`; after that, a bare `sudo lanfence scan` / `sudo lanfence monitor`
 works. `lanfence link --remove` undoes it.
 
+Mixing `sudo lanfence scan`/`monitor` (needs root for raw sockets) with a
+plain, unprivileged `lanfence devices`/`review`/`allow`/`report` is the
+normal way to use LAN Fence, and both read/write the same database and
+allowlist: the default `~/.local/share/lanfence/...`/`~/.config/lanfence/...`
+paths resolve against your own home directory even under `sudo` (which
+would otherwise reset `$HOME` to root's), not root's.
+
 ### Example: an unknown device joins
 
 ```text

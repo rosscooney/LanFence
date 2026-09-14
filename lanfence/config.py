@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -345,6 +346,52 @@ class DiscoveryConfig(BaseModel):
     ssdp: bool = False
 
 
+def _operator_home() -> Path | None:
+    """The invoking operator's home directory, even when running as root
+    via ``sudo`` - ``sudo`` resets ``$HOME`` to root's home by default
+    (Debian/Ubuntu's stock sudoers: ``env_reset`` + ``always_set_home``),
+    so a bare :meth:`Path.expanduser` under ``sudo lanfence scan``/
+    ``monitor`` would otherwise silently resolve every ``~``-relative
+    default below to ``/root`` while a plain, unprivileged `lanfence
+    devices`/`review`/`allow` resolves the *same* ``~`` to the real
+    operator's home - two different files, no error, and every
+    previously-seen device apparently gone (or ``reset`` in one seeming
+    to have no effect in the other).
+
+    ``None`` unless running as root *via sudo* with ``SUDO_USER`` naming a
+    real, different local account - a genuine root login or system service
+    is left alone, since there ``/root`` legitimately is the operator's
+    home."""
+
+    if os.geteuid() != 0:
+        return None
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user or sudo_user == "root":
+        return None
+    try:
+        import pwd
+
+        return Path(pwd.getpwnam(sudo_user).pw_dir)
+    except (KeyError, ImportError):  # not a real local account / non-POSIX
+        return None
+
+
+def expand_operator_path(path: Path) -> Path:
+    """Expand a leading ``~`` in ``path`` against :func:`_operator_home`
+    rather than blindly trusting ``$HOME`` - see its docstring. Anything
+    else (an absolute path, a relative path with no ``~``, or an explicit
+    ``~otheruser/...`` reference) is left to :meth:`Path.expanduser`'s
+    ordinary behavior."""
+
+    text = str(path)
+    if text != "~" and not text.startswith("~/"):
+        return path.expanduser()
+    home = _operator_home()
+    if home is None:
+        return path.expanduser()
+    return home if text == "~" else home / text[2:]
+
+
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -379,10 +426,10 @@ class Config(BaseModel):
         return cls.model_validate(raw)
 
     def resolved_db_path(self) -> Path:
-        return self.db_path.expanduser()
+        return expand_operator_path(self.db_path)
 
     def resolved_allowlist_file(self) -> Path:
-        return self.allowlist_file.expanduser()
+        return expand_operator_path(self.allowlist_file)
 
     def as_metadata(self) -> dict[str, Any]:
         """A JSON-serialisable snapshot of the effective config for the report."""

@@ -129,6 +129,93 @@ def test_resolved_paths_expand_user():
     assert "~" not in str(cfg.resolved_allowlist_file())
 
 
+# --- resolving `~` correctly under `sudo` -----------------------------------
+#
+# `sudo lanfence scan`/`monitor` runs as root, and stock sudoers resets
+# $HOME to root's home - a bare Path.expanduser() would then silently point
+# db_path/allowlist_file at /root while a plain, unprivileged `lanfence
+# devices`/`review`/`allow` resolves the same `~` to the real operator's
+# home, so the two commands would read and write two different databases
+# with no error at all (see the GitHub issue this was reported from).
+
+
+def test_resolved_db_path_uses_sudo_user_home_when_run_as_root_via_sudo(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    monkeypatch.setattr(
+        "pwd.getpwnam", lambda name: type("_pw", (), {"pw_dir": "/home/alice"})()
+    )
+    cfg = Config(db_path=Path("~/.local/share/lanfence/lanfence.db"))
+    assert str(cfg.resolved_db_path()) == "/home/alice/.local/share/lanfence/lanfence.db"
+
+
+def test_resolved_allowlist_file_uses_sudo_user_home_when_run_as_root_via_sudo(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    monkeypatch.setattr(
+        "pwd.getpwnam", lambda name: type("_pw", (), {"pw_dir": "/home/alice"})()
+    )
+    cfg = Config(allowlist_file=Path("~/.config/lanfence/allowlist.yaml"))
+    assert str(cfg.resolved_allowlist_file()) == "/home/alice/.config/lanfence/allowlist.yaml"
+
+
+def test_resolved_db_path_bare_tilde_uses_sudo_user_home(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    monkeypatch.setattr(
+        "pwd.getpwnam", lambda name: type("_pw", (), {"pw_dir": "/home/alice"})()
+    )
+    cfg = Config(db_path=Path("~"))
+    assert str(cfg.resolved_db_path()) == "/home/alice"
+
+
+def test_resolved_db_path_not_root_ignores_sudo_user(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 1000)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    cfg = Config(db_path=Path("~/x.db"))
+    # Not actually root - SUDO_USER (however it got set) must be ignored,
+    # and the normal expanduser() behavior (the real caller's own $HOME) used.
+    assert str(cfg.resolved_db_path()) == str(Path("~/x.db").expanduser())
+
+
+def test_resolved_db_path_root_without_sudo_user_uses_normal_expanduser(monkeypatch):
+    # A genuine root login or system service - no SUDO_USER at all - is left
+    # alone; /root legitimately is the operator's home there.
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    cfg = Config(db_path=Path("~/x.db"))
+    assert str(cfg.resolved_db_path()) == str(Path("~/x.db").expanduser())
+
+
+def test_resolved_db_path_sudo_user_is_root_uses_normal_expanduser(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "root")
+    cfg = Config(db_path=Path("~/x.db"))
+    assert str(cfg.resolved_db_path()) == str(Path("~/x.db").expanduser())
+
+
+def test_resolved_db_path_unknown_sudo_user_falls_back_to_normal_expanduser(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "nosuchuser")
+
+    def _raise(name):
+        raise KeyError(name)
+
+    monkeypatch.setattr("pwd.getpwnam", _raise)
+    cfg = Config(db_path=Path("~/x.db"))
+    assert str(cfg.resolved_db_path()) == str(Path("~/x.db").expanduser())
+
+
+def test_resolved_paths_absolute_path_unaffected_by_sudo_substitution(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    monkeypatch.setattr(
+        "pwd.getpwnam", lambda name: type("_pw", (), {"pw_dir": "/home/alice"})()
+    )
+    cfg = Config(db_path=Path("/var/lib/lanfence/lanfence.db"))
+    assert str(cfg.resolved_db_path()) == "/var/lib/lanfence/lanfence.db"
+
+
 def test_empty_file_returns_defaults(tmp_path: Path):
     path = tmp_path / "config.yaml"
     path.write_text("", encoding="utf-8")
