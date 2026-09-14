@@ -2325,6 +2325,66 @@ def test_monitor_queued_passive_sighting_prevents_false_disconnect_reappear(
     assert [e.event_type for e in events] == ["new_device"]
 
 
+def test_monitor_reports_dropped_observations_when_passive_queue_overflows(tmp_path: Path, monkeypatch):
+    """A burst larger than scan.passive_queue_maxsize must not block the
+    capture thread or silently vanish - it's counted and surfaced as a
+    warning, and the drop is observable via a real, bounded queue rather
+    than pretending nothing happened."""
+
+    from lanfence import scanner as scanner_module
+
+    db_path = tmp_path / "lanfence.db"
+    allowlist_path = tmp_path / "allowlist.yaml"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(db_path),
+            "allowlist_file": str(allowlist_path),
+            "scan": {"passive_queue_maxsize": 3, "resolve_hostnames": False},
+        }),
+        encoding="utf-8",
+    )
+
+    class _SyncThread:
+        def __init__(self, target=None, **_kwargs):
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    def fake_passive_sniff(*, on_sighting, interface=None, stop_event=None, dhcp=True, on_dhcp_server=None, **_kwargs):
+        # 10 distinct MACs into a maxsize=3 queue - 7 must be dropped.
+        for i in range(10):
+            on_sighting(scanner_module.ArpSighting(mac=f"aa:bb:cc:dd:ee:{i:02x}", ip=f"10.0.0.{i}", seen_at=_now()))
+
+    monkeypatch.setattr("lanfence.cli.threading.Thread", _SyncThread)
+    monkeypatch.setattr("lanfence.cli.scanner.passive_sniff", fake_passive_sniff)
+    monkeypatch.setattr(
+        "lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: [],
+    )
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    result = runner.invoke(app, ["monitor", "--no-ipv6", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "dropped 7 observation(s)" in result.output
+
+
+def test_drop_counting_queue_put_dropping_never_blocks_and_counts_overflow():
+    from lanfence.cli import _DropCountingQueue
+
+    q = _DropCountingQueue(maxsize=2)
+    q.put_dropping("a")
+    q.put_dropping("b")
+    assert q.dropped == 0
+    q.put_dropping("c")  # queue is full - dropped, not blocked or raised
+    assert q.dropped == 1
+    q.put_dropping("d")
+    assert q.dropped == 2
+    assert q.qsize() == 2
+
+
 # --- lanfence channels -------------------------------------------------
 
 
@@ -2784,4 +2844,8 @@ def test_monitor_quit_key_uses_clean_shutdown(config_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert 'Monitoring stopped after' in result.output
     scan.assert_not_called()
-    close.assert_called_once()
+    # Two DeviceStore connections are closed on clean shutdown: the main
+    # loop's own long-lived connection, and the background alert-delivery
+    # worker's separate connection (see lanfence.alert_worker) - both must
+    # be closed, never leaked.
+    assert close.call_count == 2

@@ -186,6 +186,12 @@ class MonitorStats:
         self.next_sweep_monotonic: float | None = None
         self.known: int | None = None
         self.review: int | None = None
+        #: Cumulative count of observations dropped because a bounded
+        #: processing queue was full (see `lanfence.cli`'s
+        #: `_DropCountingQueue`) - observable for tests/diagnostics, and
+        #: surfaced to the operator as a coalesced activity-log warning
+        #: rather than a permanent dashboard column.
+        self.dropped_observations = 0
 
     def record_event(self, mac: str, event_type: str | None) -> None:
         """One MAC positively observed (any source, any address family) -

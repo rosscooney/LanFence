@@ -25,6 +25,7 @@ from typing import Optional
 import typer
 
 from lanfence import __version__, active_inspect, alerts, discovery, monitor_ui, scanner
+from lanfence.alert_worker import AlertDeliveryWorker
 from lanfence.allowlist import Allowlist
 from lanfence.channels import (
     CHANNEL_FIELDS,
@@ -61,6 +62,7 @@ from lanfence.engine import (
     build_device,
     build_findings,
     build_inventory,
+    coalesce_sightings,
     filter_rate_limited,
     filter_snoozed,
     is_review_needed,
@@ -374,7 +376,7 @@ def scan(
         if alert:
             not_snoozed = filter_snoozed(result.findings, store, now=utcnow())
             to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
-            alerts.dispatch(to_send, cfg.alerts)
+            alerts.dispatch(to_send, cfg.alerts, store=store)
 
         if output_format != "json":
             # First-run/ongoing triage orientation over the *whole* known
@@ -463,6 +465,7 @@ def _finding_activity_entry(finding: Finding) -> "monitor_ui.ActivityEntry":
 def _emit_findings(
     findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore,
     activity: "monitor_ui.ActivityLog | None" = None, stats: "monitor_ui.MonitorStats | None" = None,
+    alert_worker: "AlertDeliveryWorker | None" = None,
 ) -> None:
     """Report ``findings`` to the operator, then dispatch alerts as usual.
 
@@ -475,6 +478,15 @@ def _emit_findings(
     which rendering path was used. Every other caller (`scan`/`run`) leaves
     both ``None`` and gets the exact console output this function has
     always produced.
+
+    ``alert_worker`` (given only by `monitor`) moves the actual network
+    delivery onto a bounded background thread (see
+    :mod:`lanfence.alert_worker`) so a slow/failing channel never blocks
+    this thread's ongoing sighting processing; the filtering
+    (snoozed/rate-limited) immediately below always happens here, on the
+    thread that owns ``store``, regardless of whether delivery itself is
+    backgrounded. ``None`` (the default, and always the case for `scan`)
+    dispatches synchronously exactly as before.
     """
 
     if stats is not None:
@@ -500,7 +512,32 @@ def _emit_findings(
     if alert and findings:
         not_snoozed = filter_snoozed(findings, store, now=utcnow())
         to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
-        alerts.dispatch(to_send, cfg.alerts)
+        if not to_send:
+            pass
+        elif alert_worker is not None:
+            alert_worker.submit(to_send, cfg.alerts)
+        else:
+            alerts.dispatch(to_send, cfg.alerts, store=store)
+
+
+class _DropCountingQueue(queue.Queue):
+    """A bounded queue whose producer side (the passive-sniffing thread)
+    never blocks: :meth:`put_dropping` uses a nonblocking put and silently
+    counts an overflow instead of stalling packet capture or raising.
+    ``dropped`` is read only from `monitor`'s own main-loop thread; written
+    only by the single passive-sniffing thread that owns this queue's
+    producer side - safe without a lock under CPython's GIL for this
+    single-writer/single-reader access pattern."""
+
+    def __init__(self, maxsize: int) -> None:
+        super().__init__(maxsize=maxsize)
+        self.dropped = 0
+
+    def put_dropping(self, item: object) -> None:
+        try:
+            self.put_nowait(item)
+        except queue.Full:
+            self.dropped += 1
 
 
 @app.command()
@@ -557,7 +594,13 @@ def monitor(
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    store = DeviceStore(cfg.resolved_db_path())
+    store = DeviceStore(
+        cfg.resolved_db_path(),
+        max_evidence_rows_per_mac=cfg.retention.max_evidence_rows_per_mac,
+        max_dhcp_server_findings=cfg.retention.max_dhcp_server_findings,
+        max_discovery_rows_per_table=cfg.retention.max_discovery_rows_per_table,
+    )
+    alert_worker = AlertDeliveryWorker(cfg.resolved_db_path())
 
     iface = interface or cfg.scan.interface or scanner.default_interface()
     net = subnet or cfg.scan.subnet
@@ -640,21 +683,22 @@ def monitor(
         )
 
     stop_event = threading.Event()
-    passive_queue: "queue.Queue[scanner.ArpSighting]" = queue.Queue()
-    dhcp_server_queue: "queue.Queue[scanner.DhcpServerSighting]" = queue.Queue()
-    mdns_queue: "queue.Queue[list]" = queue.Queue()
-    ssdp_queue: "queue.Queue[object]" = queue.Queue()
+    queue_maxsize = cfg.scan.passive_queue_maxsize
+    passive_queue: "_DropCountingQueue" = _DropCountingQueue(maxsize=queue_maxsize)
+    dhcp_server_queue: "_DropCountingQueue" = _DropCountingQueue(maxsize=queue_maxsize)
+    mdns_queue: "_DropCountingQueue" = _DropCountingQueue(maxsize=queue_maxsize)
+    ssdp_queue: "_DropCountingQueue" = _DropCountingQueue(maxsize=queue_maxsize)
     passive_error_queue: "queue.Queue[str]" = queue.Queue()
 
     def _run_passive() -> None:
         try:
             scanner.passive_sniff(
-                on_sighting=passive_queue.put, interface=iface, stop_event=stop_event,
+                on_sighting=passive_queue.put_dropping, interface=iface, stop_event=stop_event,
                 dhcp=cfg.scan.dhcp_snooping,
-                on_dhcp_server=dhcp_server_queue.put if cfg.dhcp_servers.enabled else None,
+                on_dhcp_server=dhcp_server_queue.put_dropping if cfg.dhcp_servers.enabled else None,
                 mdns=cfg.discovery.mdns, ssdp=cfg.discovery.ssdp,
-                on_mdns_records=mdns_queue.put if cfg.discovery.mdns else None,
-                on_ssdp=ssdp_queue.put if cfg.discovery.ssdp else None,
+                on_mdns_records=mdns_queue.put_dropping if cfg.discovery.mdns else None,
+                on_ssdp=ssdp_queue.put_dropping if cfg.discovery.ssdp else None,
             )
         except scanner.ScannerUnavailable as exc:
             # Reported via a queue (like every other cross-thread message
@@ -692,13 +736,17 @@ def monitor(
             # finally processed. The passive thread only ever calls
             # `passive_queue.put` (see `_run_passive` above) - all database
             # access, here, stays on this single owning thread.
-            drained = 0
-            while drained < 200:
+            batch: list[scanner.ArpSighting] = []
+            while len(batch) < 200:
                 try:
-                    sighting = passive_queue.get_nowait()
+                    batch.append(passive_queue.get_nowait())
                 except queue.Empty:
                     break
-                drained += 1
+            # Safe coalescing: a burst of pure duplicate observations (same
+            # mac/ip/hostname/source) collapses to the single latest one -
+            # every distinct piece of evidence in the batch is still
+            # processed, just not once per identical packet.
+            for sighting in coalesce_sightings(batch):
                 device, event_type, findings = process_sighting(
                     mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
                     store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
@@ -710,7 +758,10 @@ def monitor(
                     _report_lifecycle("DISCONNECTED", mac=device.mac, hostname=device.hostname, ip=device.ip)
                 elif event_type == "reappeared" and not findings:
                     _report_lifecycle("RETURNED", mac=device.mac, hostname=device.hostname, ip=device.ip)
-                _emit_findings(findings, alert=alert, cfg=cfg, store=store, activity=activity_log, stats=stats)
+                _emit_findings(
+                    findings, alert=alert, cfg=cfg, store=store,
+                    activity=activity_log, stats=stats, alert_worker=alert_worker,
+                )
 
             # DHCP server observations are processed the same way, from
             # their own queue - kept separate from `passive_queue` since a
@@ -727,7 +778,10 @@ def monitor(
                 drained_dhcp_servers += 1
                 finding = process_dhcp_server_sighting(server_sighting, store, cfg)
                 if finding is not None:
-                    _emit_findings([finding], alert=alert, cfg=cfg, store=store, activity=activity_log, stats=stats)
+                    _emit_findings(
+                        [finding], alert=alert, cfg=cfg, store=store,
+                        activity=activity_log, stats=stats, alert_worker=alert_worker,
+                    )
 
             # Advertised-service evidence, same bounded-drain shape as
             # above - a burst of mDNS/SSDP traffic must never starve device
@@ -753,6 +807,18 @@ def monitor(
                     break
                 drained_ssdp += 1
                 discovery.process_ssdp_sighting(ssdp_sighting, store)
+
+            total_dropped = (
+                passive_queue.dropped + dhcp_server_queue.dropped + mdns_queue.dropped + ssdp_queue.dropped
+            )
+            if total_dropped > stats.dropped_observations:
+                newly_dropped = total_dropped - stats.dropped_observations
+                stats.dropped_observations = total_dropped
+                _report_warning(
+                    f"dropped {newly_dropped} observation(s) - a processing queue filled up "
+                    "faster than it could be drained; some evidence from this burst may be "
+                    "incomplete. Consider raising scan.passive_queue_maxsize if this recurs."
+                )
 
             try:
                 passive_err = passive_error_queue.get_nowait()
@@ -794,7 +860,10 @@ def monitor(
                         _report_lifecycle("DISCONNECTED", mac=event.mac, hostname=event.hostname, ip=event.ip)
                 for err in result.errors:
                     _report_error(err, label="SCAN")
-                _emit_findings(result.findings, alert=alert, cfg=cfg, store=store, activity=activity_log, stats=stats)
+                _emit_findings(
+                    result.findings, alert=alert, cfg=cfg, store=store,
+                    activity=activity_log, stats=stats, alert_worker=alert_worker,
+                )
                 if use_live:
                     _refresh_inventory_counts()
                     last_stats_refresh = now
@@ -830,6 +899,7 @@ def monitor(
         )
     finally:
         stop_event.set()
+        alert_worker.shutdown()
         store.close()
 
 

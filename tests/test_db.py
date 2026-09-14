@@ -1077,3 +1077,203 @@ def test_discovery_writes_release_lock_and_commit_retention(tmp_path: Path):
                 command.reset_all()
             with DeviceStore(path) as restarted:
                 assert restarted.device_counts() == (0, 0)
+
+
+# --- global alert-dispatch budget -------------------------------------------
+
+
+def test_consume_global_alert_budget_allows_up_to_the_max_per_window(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        results = [
+            store.consume_global_alert_budget(now, max_per_window=3, window_seconds=60)
+            for _ in range(5)
+        ]
+        assert results == [True, True, True, False, False]
+
+
+def test_consume_global_alert_budget_defeats_mac_rotation_style_flooding(tmp_path: Path):
+    """A per-MAC cooldown alone can't bound total alert volume when every
+    finding comes from a distinct (e.g. randomized) MAC - each is
+    individually "new". The global budget must still cap total volume
+    regardless of how many distinct identities are involved."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        allowed = 0
+        for i in range(50):
+            mac = f"aa:bb:cc:dd:ee:{i:02x}"
+            # Each MAC's own per-device cooldown independently allows it
+            # (due_for_alert has never seen this key before) ...
+            assert store.due_for_alert(mac, "medium", now=now, cooldown_seconds=900) is True
+            # ... but the shared global budget still caps total volume.
+            if store.consume_global_alert_budget(now, max_per_window=10, window_seconds=60):
+                allowed += 1
+        assert allowed == 10
+
+
+def test_consume_global_alert_budget_resets_after_window_elapses(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        for _ in range(3):
+            assert store.consume_global_alert_budget(now, max_per_window=3, window_seconds=60) is True
+        assert store.consume_global_alert_budget(now, max_per_window=3, window_seconds=60) is False
+
+        later = now + timedelta(seconds=61)
+        assert store.consume_global_alert_budget(later, max_per_window=3, window_seconds=60) is True
+
+
+def test_consume_global_alert_budget_disabled_when_max_is_zero(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        assert all(
+            store.consume_global_alert_budget(now, max_per_window=0, window_seconds=60) for _ in range(20)
+        )
+
+
+def test_reset_all_clears_global_alert_budget(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        for _ in range(3):
+            store.consume_global_alert_budget(now, max_per_window=3, window_seconds=60)
+        assert store.consume_global_alert_budget(now, max_per_window=3, window_seconds=60) is False
+        store.reset_all()
+        assert store.consume_global_alert_budget(now, max_per_window=3, window_seconds=60) is True
+
+
+# --- SMS segment budget ------------------------------------------------------
+
+
+def test_consume_sms_budget_allows_up_to_the_daily_cap(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        assert store.consume_sms_budget(50, now=now, max_segments_per_day=100) is True
+        assert store.consume_sms_budget(40, now=now, max_segments_per_day=100) is True
+        assert store.consume_sms_budget(20, now=now, max_segments_per_day=100) is False  # only 10 left
+        assert store.consume_sms_budget(10, now=now, max_segments_per_day=100) is True
+
+
+def test_consume_sms_budget_disabled_when_max_is_zero(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        assert store.consume_sms_budget(10_000, now=now, max_segments_per_day=0) is True
+
+
+def test_consume_sms_budget_is_scoped_per_calendar_day(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        day1 = datetime(2026, 1, 1, 23, 0, tzinfo=timezone.utc)
+        day2 = datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
+        assert store.consume_sms_budget(80, now=day1, max_segments_per_day=100) is True
+        assert store.consume_sms_budget(80, now=day1, max_segments_per_day=100) is False
+        # A new UTC calendar day gets a fresh budget.
+        assert store.consume_sms_budget(80, now=day2, max_segments_per_day=100) is True
+
+
+def test_consume_sms_budget_survives_a_simulated_restart(tmp_path: Path):
+    """A restart (a fresh DeviceStore instance against the same file) must
+    not reopen today's already-spent SMS budget."""
+
+    db_path = tmp_path / "db.sqlite"
+    now = _now()
+    with DeviceStore(db_path) as store:
+        assert store.consume_sms_budget(90, now=now, max_segments_per_day=100) is True
+
+    with DeviceStore(db_path) as restarted:
+        assert restarted.consume_sms_budget(20, now=now, max_segments_per_day=100) is False
+        assert restarted.consume_sms_budget(10, now=now, max_segments_per_day=100) is True
+
+
+def test_reset_all_does_not_clear_sms_budget(tmp_path: Path):
+    """The SMS budget is a cost-safety guardrail, not device inventory -
+    lanfence reset must not be usable as a way to reopen it."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        assert store.consume_sms_budget(100, now=now, max_segments_per_day=100) is True
+        store.reset_all()
+        assert store.consume_sms_budget(1, now=now, max_segments_per_day=100) is False
+
+
+# --- retention caps on attacker-controlled evidence -------------------------
+
+
+def test_evidence_row_cap_prunes_oldest_address_evidence_per_mac(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite", max_evidence_rows_per_mac=5) as store:
+        now = _now()
+        for i in range(20):
+            store.record_address_evidence(
+                "aa:bb:cc:dd:ee:ff", f"10.0.0.{i}", interface="eth0", source="arp",
+                kind="observed", seen_at=now + timedelta(seconds=i),
+            )
+        rows = store.address_evidence_for("aa:bb:cc:dd:ee:ff")
+        assert len(rows) == 5
+        # The most recently seen rows are the ones kept.
+        assert {r.ip for r in rows} == {f"10.0.0.{i}" for i in range(15, 20)}
+
+
+def test_evidence_row_cap_prunes_oldest_name_evidence_per_mac(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite", max_evidence_rows_per_mac=3) as store:
+        now = _now()
+        for i in range(10):
+            store.record_name_evidence(
+                "aa:bb:cc:dd:ee:ff", f"host-{i}", source="dhcp_option_12", seen_at=now + timedelta(seconds=i),
+            )
+        rows = store.name_evidence_for("aa:bb:cc:dd:ee:ff")
+        assert len(rows) == 3
+
+
+def test_evidence_row_cap_is_independent_per_mac(tmp_path: Path):
+    """One MAC hitting its cap must never evict another MAC's evidence."""
+
+    with DeviceStore(tmp_path / "db.sqlite", max_evidence_rows_per_mac=2) as store:
+        now = _now()
+        for i in range(10):
+            store.record_address_evidence(
+                "aa:bb:cc:dd:ee:ff", f"10.0.0.{i}", interface="eth0", source="arp",
+                kind="observed", seen_at=now + timedelta(seconds=i),
+            )
+        store.record_address_evidence(
+            "11:22:33:44:55:66", "10.0.1.1", interface="eth0", source="arp",
+            kind="observed", seen_at=now,
+        )
+        assert len(store.address_evidence_for("aa:bb:cc:dd:ee:ff")) == 2
+        assert len(store.address_evidence_for("11:22:33:44:55:66")) == 1
+
+
+def test_dhcp_server_findings_cap_prunes_oldest(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite", max_dhcp_server_findings=3) as store:
+        now = _now()
+        for i in range(10):
+            store.record_dhcp_server_finding(
+                interface="eth0", server_id=f"10.0.0.{i}", observed_at=now + timedelta(seconds=i),
+                approved_at_observation=False, message_type="OFFER", source_ip=f"10.0.0.{i}",
+                source_mac=None, relay_ip=None, router=None, dns=None,
+            )
+        rows = store._conn.execute("SELECT COUNT(*) AS n FROM dhcp_server_findings").fetchone()["n"]
+        assert rows == 3
+
+
+def test_discovery_table_row_cap_prunes_oldest_unexpired_rows(tmp_path: Path):
+    """A burst of many distinct, still-unexpired (not yet due for
+    time-based pruning) fake advertisements must still be bounded."""
+
+    with DeviceStore(tmp_path / "db.sqlite", max_discovery_rows_per_table=5) as store:
+        now = _now()
+        for i in range(20):
+            store.record_ssdp_advertisement(
+                interface="eth0", usn=f"uuid:fake-{i}", nt_or_st="upnp:rootdevice",
+                server=None, location=None, max_age=3600, boot_id=None, config_id=None,
+                seen_at=now + timedelta(seconds=i), source_ip=None, source_mac=None, family="ipv4",
+            )
+        counts = store.discovery_diagnostics()
+        assert counts["ssdp_advertisements"] == 5
+
+
+def test_device_store_rejects_non_positive_retention_caps_by_clamping(tmp_path: Path):
+    # Defensive clamping, not a crash, for a caller passing a nonsensical cap.
+    with DeviceStore(tmp_path / "db.sqlite", max_evidence_rows_per_mac=0) as store:
+        store.record_address_evidence(
+            "aa:bb:cc:dd:ee:ff", "10.0.0.1", interface="eth0", source="arp",
+            kind="observed", seen_at=_now(),
+        )
+        assert len(store.address_evidence_for("aa:bb:cc:dd:ee:ff")) >= 1

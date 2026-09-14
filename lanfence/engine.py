@@ -151,6 +151,33 @@ def build_findings(device: Device, event_type: EventType | None, matches: list[S
     return result
 
 
+def coalesce_sightings(sightings: list[scanner.ArpSighting]) -> list[scanner.ArpSighting]:
+    """Collapse repeated, truly-identical sightings within one batch (same
+    mac/ip/hostname/source) down to the single most-recently-seen one,
+    while leaving every distinct sighting - a different IP (dual-stack), a
+    changed hostname, a different discovery source - completely untouched.
+
+    Used by `lanfence monitor`'s passive-queue drain loop to cut the
+    per-tick database work for a burst of duplicate broadcast/multicast
+    traffic (the common case) without ever discarding a piece of evidence
+    that wasn't a pure duplicate - "safe" coalescing, not lossy
+    downsampling. Preserves each distinct key's first-occurrence position
+    in the output, so processing order for genuinely different sightings
+    is otherwise unchanged.
+    """
+
+    latest: dict[tuple[str, str, str | None, str], scanner.ArpSighting] = {}
+    order: list[tuple[str, str, str | None, str]] = []
+    for sighting in sightings:
+        key = (sighting.mac, sighting.ip, sighting.hostname, sighting.source)
+        if key not in latest:
+            order.append(key)
+            latest[key] = sighting
+        elif sighting.seen_at >= latest[key].seen_at:
+            latest[key] = sighting
+    return [latest[key] for key in order]
+
+
 def process_sighting(
     *,
     mac: str,
@@ -438,23 +465,40 @@ def filter_rate_limited(
 ) -> list[Finding]:
     """Findings actually worth sending to external alert channels right now.
 
-    Throttles only the *push* side (``alerts.dispatch``) via a per-MAC (or,
-    for a MAC-less finding, per-subject) cooldown in the database - the CLI
+    Throttles the *push* side (``alerts.dispatch``) two ways - the CLI
     table, JSON output, and the events/findings already written to the
-    database are unaffected. Processes highest severity first so an
-    escalation within the same batch is never itself suppressed by a
-    lower-severity finding for the same subject processed earlier. See
-    :meth:`lanfence.db.DeviceStore.due_for_alert`.
+    database are unaffected by either:
+
+    - A per-MAC (or, for a MAC-less finding, per-subject) cooldown (see
+      :meth:`lanfence.db.DeviceStore.due_for_alert`).
+    - A *global* cap on total dispatch volume within a fixed window (see
+      :meth:`lanfence.db.DeviceStore.consume_global_alert_budget`),
+      independent of the per-MAC cooldown above - a flood of findings from
+      many distinct/rotating identities (e.g. randomized MACs) each
+      individually pass their own per-MAC cooldown (it's the first time
+      *that* key has ever alerted), so the per-MAC cooldown alone cannot
+      bound total volume; the global cap does.
+
+    Processes highest severity first so an escalation within the same
+    batch is never itself suppressed by a lower-severity finding for the
+    same subject processed earlier - an escalation still counts against
+    the global cap, though, so it can't be used to bypass it.
     """
 
     ordered = sorted(findings, key=lambda f: -_SEVERITY_RANK[f.severity])
-    return [
-        finding for finding in ordered
-        if store.due_for_alert(
+    result = []
+    for finding in ordered:
+        if not store.due_for_alert(
             finding.mac or "", finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds,
             key=_alert_cooldown_key(finding),
-        )
-    ]
+        ):
+            continue
+        if not store.consume_global_alert_budget(
+            now, max_per_window=cfg.global_rate_limit_max, window_seconds=cfg.global_rate_limit_window_seconds,
+        ):
+            continue
+        result.append(finding)
+    return result
 
 
 def filter_snoozed(findings: list[Finding], store: DeviceStore, *, now: datetime) -> list[Finding]:

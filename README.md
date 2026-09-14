@@ -1277,10 +1277,13 @@ scan:
   dhcp_snooping: true          # snoop DHCP for a self-reported hostname (needs passive: true)
   resolve_hostnames: true      # try reverse DNS for each device
   dns_timeout_seconds: 1
+  passive_queue_maxsize: 2000  # cap per passive processing queue; excess is dropped (counted), never blocks capture
 
 alerts:
   min_severity: medium         # info | medium | high - dispatch threshold
   rate_limit_seconds: 900      # per-MAC cooldown between alerts; 0 = alert every time
+  global_rate_limit_max: 20            # cap on total alert dispatches per window, across every MAC/subject
+  global_rate_limit_window_seconds: 60 # ...within this many seconds; 0 (either field) disables it
   syslog:
     enabled: false
     address: /dev/log
@@ -1323,6 +1326,7 @@ alerts:
     from_number: null             # E.164, e.g. "+15551234567"
     to_numbers: []
     timeout_seconds: 10
+    max_segments_per_day: 200     # durable daily SMS-segment budget across all recipients; 0 = unlimited
 
 digest:
   channels: []                  # which alerts.<channel> destinations also get a digest, e.g. [email]
@@ -1333,6 +1337,11 @@ dhcp_servers:
   enabled: false                # opt-in; needs scan.passive/scan.dhcp_snooping too - see "Unexpected DHCP servers"
   approved: []                  # e.g. [{interface: eth0, server_ip: 192.168.1.1, name: Main router}]
   alert_cooldown_seconds: 3600  # per (interface, server) - don't flood findings from one noisy server
+
+retention:
+  max_evidence_rows_per_mac: 100      # retained address/name evidence rows kept per MAC; oldest pruned first
+  max_dhcp_server_findings: 5000      # total DHCP-server-finding rows retained; oldest pruned first
+  max_discovery_rows_per_table: 5000  # total rows per mDNS/SSDP table; oldest pruned first (on top of TTL expiry)
 
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
@@ -1354,6 +1363,31 @@ and the database's event history are always complete, so a flapping device
 (a phone's Wi-Fi cycling, a laptop sleeping/waking) doesn't spam every
 channel - or run up a Twilio bill - once per scan interval. Set it to `0` to
 alert every time, matching earlier versions' behavior.
+
+**`global_rate_limit_max`/`global_rate_limit_window_seconds`** cap *total*
+alert volume across every device combined, independent of the per-MAC
+cooldown above - a per-MAC cooldown alone can't bound volume from many
+distinct or rotating identities (e.g. randomized MAC addresses), since each
+one looks "new" to it. An escalation still counts against this global cap
+even though it bypasses its own per-MAC cooldown. Set `global_rate_limit_max`
+to `0` to disable it.
+
+**`twilio.max_segments_per_day`** is a durable (survives a restart) daily
+budget on total SMS segments sent, counting every recipient and every
+~153-character segment of each message - a cost-safety guardrail against a
+flood of findings driving unbounded SMS billing, independent of the per-alert
+480-character cap above. Once exhausted, remaining recipients for that
+dispatch are skipped (not sent) until the next UTC calendar day. Set it to
+`0` for no budget. `lanfence reset` does **not** clear this budget - it's a
+billing safeguard, not device inventory.
+
+`lanfence monitor`'s alert delivery (network I/O to each channel) runs on a
+bounded background thread, so a slow or unreachable destination (e.g. a
+webhook endpoint that's down) never blocks the main loop from continuing to
+process new sightings and active sweeps. If delivery genuinely can't keep up,
+newer alert batches are dropped (logged, not silently lost) rather than
+buffering without limit - the underlying finding and its database record are
+never affected by whether delivery itself succeeded.
 
 ## Exit codes (`--fail-on-findings`)
 
@@ -1381,6 +1415,19 @@ alert every time, matching earlier versions' behavior.
   fresh" - that's what `vendor-refresh` is for, on request.
 - The device database and allowlist are written atomically and are
   owner-readable only where the platform supports it.
+- **Bounded against a hostile or flooding LAN.** `monitor`'s passive
+  processing queues (`scan.passive_queue_maxsize`) are bounded and drop
+  (counted, logged) rather than grow without limit under a packet flood;
+  repeated identical observations in one burst are coalesced without losing
+  any distinct evidence; alert delivery is bounded and backgrounded so a
+  slow/unreachable destination can't stall sighting processing; a *global*
+  alert-volume cap (`alerts.global_rate_limit_max`) bounds total external
+  alert dispatch even from many distinct or rotating (e.g. randomized MAC)
+  identities, which a per-MAC cooldown alone cannot; retained per-MAC
+  evidence and DHCP-server/discovery-advertisement rows are capped
+  (`retention.*`), independent of (and tighter than) time-based expiry, so a
+  burst of spoofed/rotating observations can't grow the database without
+  bound before any individually expire.
 
 ## Development
 

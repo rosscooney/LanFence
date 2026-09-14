@@ -14,6 +14,7 @@ from lanfence.engine import (
     apply_self_trust,
     build_findings,
     build_inventory,
+    coalesce_sightings,
     evaluate_availability,
     filter_rate_limited,
     filter_snoozed,
@@ -766,6 +767,148 @@ def test_filter_rate_limited_network_service_finding_cooldown_by_subject(tmp_pat
     assert kept_first == [first]
     assert kept_second == []  # same subject, within cooldown
     assert kept_different == [different_subject]  # different subject - independent
+
+
+# --- filter_rate_limited: global budget (defeats MAC-rotation flooding) -----
+
+
+def _cfg_with_global_limit(max_per_window: int, window_seconds: float = 60.0) -> Config:
+    cfg = Config()
+    cfg.alerts.rate_limit_seconds = 900.0
+    cfg.alerts.global_rate_limit_max = max_per_window
+    cfg.alerts.global_rate_limit_window_seconds = window_seconds
+    return cfg
+
+
+def test_filter_rate_limited_global_budget_caps_total_volume_across_distinct_macs(tmp_path: Path):
+    """The per-MAC cooldown alone would let every one of these findings
+    through (each MAC is new to alert_log) - the global budget must still
+    cap total dispatch volume regardless of how many distinct MACs are
+    involved (e.g. a MAC-rotation flood)."""
+
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_global_limit(5)
+    findings = [
+        Finding(mac=f"aa:bb:cc:dd:ee:{i:02x}", title="Unknown device connected", severity="medium")
+        for i in range(50)
+    ]
+    kept = filter_rate_limited(findings, store, cfg.alerts, now=_now())
+    store.close()
+
+    assert len(kept) == 5
+
+
+def test_filter_rate_limited_global_budget_zero_disables_it(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_global_limit(0)
+    findings = [
+        Finding(mac=f"aa:bb:cc:dd:ee:{i:02x}", title="Unknown device connected", severity="medium")
+        for i in range(30)
+    ]
+    kept = filter_rate_limited(findings, store, cfg.alerts, now=_now())
+    store.close()
+
+    assert len(kept) == 30
+
+
+def test_filter_rate_limited_global_budget_still_applies_to_escalations(tmp_path: Path):
+    """An escalation bypasses its own per-MAC cooldown, but must not be a
+    way to bypass the global cap once it's exhausted."""
+
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_global_limit(1)
+    t0 = _now()
+    low = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="info")
+    other_low = Finding(mac="11:22:33:44:55:66", title="t", severity="info")
+    escalated = Finding(mac="aa:bb:cc:dd:ee:ff", title="t escalated", severity="high")
+
+    kept_first = filter_rate_limited([low], store, cfg.alerts, now=t0)
+    # Global budget (max 1) is now exhausted for this window.
+    kept_other = filter_rate_limited([other_low], store, cfg.alerts, now=t0)
+    kept_escalation = filter_rate_limited([escalated], store, cfg.alerts, now=t0)
+    store.close()
+
+    assert kept_first == [low]
+    assert kept_other == []
+    assert kept_escalation == []  # per-MAC cooldown says yes, global budget says no
+
+
+def test_filter_rate_limited_global_budget_resets_after_its_window(tmp_path: Path):
+    store = DeviceStore(tmp_path / "db.sqlite")
+    cfg = _cfg_with_global_limit(1, window_seconds=30.0)
+    t0 = _now()
+    a = Finding(mac="aa:bb:cc:dd:ee:ff", title="t", severity="medium")
+    b = Finding(mac="11:22:33:44:55:66", title="t", severity="medium")
+    c = Finding(mac="77:88:99:aa:bb:cc", title="t", severity="medium")
+
+    kept_a = filter_rate_limited([a], store, cfg.alerts, now=t0)
+    kept_b = filter_rate_limited([b], store, cfg.alerts, now=t0 + timedelta(seconds=5))
+    kept_c = filter_rate_limited([c], store, cfg.alerts, now=t0 + timedelta(seconds=31))
+    store.close()
+
+    assert kept_a == [a]
+    assert kept_b == []
+    assert kept_c == [c]
+
+
+# --- coalesce_sightings ------------------------------------------------
+
+
+def _sighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=None, hostname=None, source="arp"):
+    return scanner.ArpSighting(mac=mac, ip=ip, seen_at=seen_at or _now(), hostname=hostname, source=source)
+
+
+def test_coalesce_sightings_collapses_pure_duplicates_to_the_latest():
+    t0 = _now()
+    sightings = [_sighting(seen_at=t0 + timedelta(seconds=i)) for i in range(10)]
+    result = coalesce_sightings(sightings)
+    assert len(result) == 1
+    assert result[0].seen_at == sightings[-1].seen_at
+
+
+def test_coalesce_sightings_preserves_distinct_ip_for_same_mac():
+    """A dual-stack device's two distinct addresses must both survive."""
+
+    t0 = _now()
+    sightings = [
+        _sighting(ip="10.0.0.5", seen_at=t0),
+        _sighting(ip="fe80::1", seen_at=t0),
+    ]
+    result = coalesce_sightings(sightings)
+    assert {s.ip for s in result} == {"10.0.0.5", "fe80::1"}
+
+
+def test_coalesce_sightings_preserves_distinct_hostname():
+    t0 = _now()
+    sightings = [
+        _sighting(hostname="old-name", seen_at=t0),
+        _sighting(hostname="new-name", seen_at=t0 + timedelta(seconds=1)),
+    ]
+    result = coalesce_sightings(sightings)
+    assert {s.hostname for s in result} == {"old-name", "new-name"}
+
+
+def test_coalesce_sightings_preserves_distinct_macs():
+    t0 = _now()
+    sightings = [_sighting(mac=f"aa:bb:cc:dd:ee:{i:02x}", seen_at=t0) for i in range(20)]
+    result = coalesce_sightings(sightings)
+    assert len(result) == 20
+
+
+def test_coalesce_sightings_preserves_first_occurrence_order_for_distinct_keys():
+    t0 = _now()
+    sightings = [
+        _sighting(mac="aa:bb:cc:dd:ee:01", seen_at=t0),
+        _sighting(mac="aa:bb:cc:dd:ee:02", seen_at=t0),
+        _sighting(mac="aa:bb:cc:dd:ee:01", seen_at=t0 + timedelta(seconds=5)),  # duplicate of #1
+    ]
+    result = coalesce_sightings(sightings)
+    assert [s.mac for s in result] == ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]
+    assert result[0].seen_at == t0 + timedelta(seconds=5)  # the later duplicate wins
+
+
+def test_coalesce_sightings_empty_input():
+    assert coalesce_sightings([]) == []
 
 
 # --- filter_snoozed ------------------------------------------------------

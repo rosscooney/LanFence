@@ -338,3 +338,86 @@ def test_email_alert_config_ca_file_round_trips_from_yaml(tmp_path: Path):
     )
     cfg = Config.load(path)
     assert cfg.alerts.email.ca_file == "/etc/ssl/private-ca.pem"
+
+
+# --- global alert rate limit -------------------------------------------
+
+
+def test_alert_config_global_rate_limit_defaults():
+    cfg = Config()
+    assert cfg.alerts.global_rate_limit_max == 20
+    assert cfg.alerts.global_rate_limit_window_seconds == 60.0
+
+
+def test_alert_config_global_rate_limit_rejects_negative_max():
+    with pytest.raises(Exception):
+        Config(alerts={"global_rate_limit_max": -1})
+
+
+def test_alert_config_global_rate_limit_rejects_negative_window():
+    with pytest.raises(Exception):
+        Config(alerts={"global_rate_limit_window_seconds": -1})
+
+
+def test_alert_config_global_rate_limit_zero_is_allowed():
+    cfg = Config(alerts={"global_rate_limit_max": 0})
+    assert cfg.alerts.global_rate_limit_max == 0
+
+
+# --- Twilio SMS segment budget -------------------------------------------
+
+
+def test_twilio_config_max_segments_per_day_default():
+    cfg = Config()
+    assert cfg.alerts.twilio.max_segments_per_day == 200
+
+
+def test_twilio_config_max_segments_per_day_rejects_negative():
+    with pytest.raises(Exception):
+        Config(alerts={"twilio": {"max_segments_per_day": -1}})
+
+
+def test_twilio_config_max_segments_per_day_zero_is_allowed():
+    cfg = Config(alerts={"twilio": {"max_segments_per_day": 0}})
+    assert cfg.alerts.twilio.max_segments_per_day == 0
+
+
+# --- retention caps ------------------------------------------------------
+
+
+def test_retention_config_defaults():
+    cfg = Config()
+    assert cfg.retention.max_evidence_rows_per_mac == 100
+    assert cfg.retention.max_dhcp_server_findings == 5000
+    assert cfg.retention.max_discovery_rows_per_table == 5000
+
+
+def test_retention_config_rejects_zero_or_negative():
+    with pytest.raises(Exception):
+        Config(retention={"max_evidence_rows_per_mac": 0})
+    with pytest.raises(Exception):
+        Config(retention={"max_dhcp_server_findings": -5})
+    with pytest.raises(Exception):
+        Config(retention={"max_discovery_rows_per_table": 0})
+
+
+def test_retention_config_round_trips_from_yaml(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump({"retention": {"max_evidence_rows_per_mac": 25}}), encoding="utf-8"
+    )
+    cfg = Config.load(path)
+    assert cfg.retention.max_evidence_rows_per_mac == 25
+
+
+# --- passive queue maxsize -------------------------------------------------
+
+
+def test_scan_config_passive_queue_maxsize_default():
+    cfg = Config()
+    assert cfg.scan.passive_queue_maxsize == 2000
+
+
+def test_scan_config_passive_queue_maxsize_rejects_non_positive():
+    with pytest.raises(Exception):
+        Config(scan={"passive_queue_maxsize": 0})

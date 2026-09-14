@@ -275,6 +275,25 @@ CREATE TABLE IF NOT EXISTS ssdp_advertisements (
 
 CREATE INDEX IF NOT EXISTS idx_ssdp_source_ip ON ssdp_advertisements (source_ip);
 
+-- A single-row fixed-window counter for the *global* alert-dispatch budget
+-- (see DeviceStore.consume_global_alert_budget) - independent of the
+-- per-MAC/per-subject cooldown in alert_log, so a flood of findings from
+-- many rotating/spoofed identities (each individually "new" to alert_log)
+-- still can't drive unbounded external alert volume.
+CREATE TABLE IF NOT EXISTS alert_global_window (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    window_start TEXT NOT NULL,
+    count INTEGER NOT NULL
+);
+
+-- Durable SMS-segment budget (see DeviceStore.consume_sms_budget), keyed by
+-- a caller-chosen period (e.g. a UTC calendar day) so a restart never
+-- resets how much of today's budget is already spent.
+CREATE TABLE IF NOT EXISTS sms_budget (
+    period_key TEXT PRIMARY KEY,
+    segments_used INTEGER NOT NULL
+);
+
 -- One row per MAC (the *latest* run only - see DeviceStore.record_inspection)
 -- from an explicit, operator-initiated `lanfence inspect <mac>`. Never
 -- written by scan/monitor/passive discovery/review on their own.
@@ -299,6 +318,18 @@ _DISCOVERY_RETENTION = timedelta(days=30)
 _DISCOVERY_TABLES_WITH_EXPIRY = (
     "mdns_ptr", "mdns_srv", "mdns_txt", "mdns_addr", "ssdp_advertisements",
 )
+
+#: Default caps bounding how much a single attacker-controlled identity (a
+#: spoofed/flapping MAC) or a burst of spoofed/rotating observations can
+#: grow the database by - independent of (and tighter than) the time-based
+#: retention above, which only prunes *expired* discovery rows. A caller
+#: that has a :class:`lanfence.config.RetentionConfig` (``scan``/``monitor``)
+#: passes its values into :class:`DeviceStore` explicitly; every other
+#: caller (read-only commands, and any DeviceStore constructed without an
+#: explicit override) gets these defaults - never unbounded.
+_DEFAULT_MAX_EVIDENCE_ROWS_PER_MAC = 100
+_DEFAULT_MAX_DHCP_SERVER_FINDINGS = 5000
+_DEFAULT_MAX_DISCOVERY_ROWS_PER_TABLE = 5000
 
 
 def _iso(dt: datetime) -> str:
@@ -404,9 +435,19 @@ def _row_to_device(row: sqlite3.Row) -> Device:
 
 
 class DeviceStore:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        max_evidence_rows_per_mac: int = _DEFAULT_MAX_EVIDENCE_ROWS_PER_MAC,
+        max_dhcp_server_findings: int = _DEFAULT_MAX_DHCP_SERVER_FINDINGS,
+        max_discovery_rows_per_table: int = _DEFAULT_MAX_DISCOVERY_ROWS_PER_TABLE,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._max_evidence_rows_per_mac = max(1, max_evidence_rows_per_mac)
+        self._max_dhcp_server_findings = max(1, max_dhcp_server_findings)
+        self._max_discovery_rows_per_table = max(1, max_discovery_rows_per_table)
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
@@ -414,6 +455,29 @@ class DeviceStore:
             _ensure_columns(self._conn, table, columns)
         self._conn.commit()
         self._migrate_legacy_address_and_name_evidence()
+
+    def _enforce_row_cap(self, table: str, max_rows: int, *, order_by: str, mac: str | None = None) -> None:
+        """Delete the oldest (by ``order_by``, descending) rows in ``table``
+        beyond ``max_rows`` - bounded retention independent of the
+        time-based expiry pruning elsewhere, so a burst of many distinct
+        attacker-controlled rows (rotating identities, spoofed
+        advertisements) can't grow this table without limit before any of
+        them individually expire. ``table``/``order_by`` are always one of
+        this module's own hardcoded literals, never caller/user input.
+        """
+
+        if mac is not None:
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE mac = ? AND rowid NOT IN "
+                f"(SELECT rowid FROM {table} WHERE mac = ? ORDER BY {order_by} DESC LIMIT ?)",
+                (mac, mac, max_rows),
+            )
+        else:
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE rowid NOT IN "
+                f"(SELECT rowid FROM {table} ORDER BY {order_by} DESC LIMIT ?)",
+                (max_rows,),
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -808,6 +872,9 @@ class DeviceStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (mac, ip, family, interface, source, kind, _iso(seen_at), _iso(seen_at)),
             )
+            self._enforce_row_cap(
+                "device_addresses", self._max_evidence_rows_per_mac, order_by="last_seen", mac=mac,
+            )
         else:
             new_first = min(_parse_dt(existing["first_seen"]), seen_at)
             new_last = max(_parse_dt(existing["last_seen"]), seen_at)
@@ -846,6 +913,9 @@ class DeviceStore:
                 "INSERT INTO device_names (mac, name, name_key, source, ip, interface, first_seen, last_seen) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (mac, name, name_key, source, ip, interface, _iso(seen_at), _iso(seen_at)),
+            )
+            self._enforce_row_cap(
+                "device_names", self._max_evidence_rows_per_mac, order_by="last_seen", mac=mac,
             )
         else:
             new_first = min(_parse_dt(existing["first_seen"]), seen_at)
@@ -1230,6 +1300,81 @@ class DeviceStore:
         self._conn.commit()
         return True
 
+    def consume_global_alert_budget(
+        self, now: datetime, *, max_per_window: int, window_seconds: float,
+    ) -> bool:
+        """Whether one more external alert dispatch is allowed *right now*,
+        under a global (not per-MAC/per-subject) fixed-window cap -
+        independent of :meth:`due_for_alert`'s per-key cooldown, so a flood
+        of findings from many rotating/spoofed identities (each
+        individually "new" and therefore individually due) still can't
+        drive unbounded total alert volume. Checks and records in one call.
+
+        The window resets (to a fresh count of 1) once ``window_seconds``
+        has elapsed since it started - this is a simple fixed window, not a
+        sliding one, so it is not billed as a precise rate limiter, only a
+        coarse volume cap. ``max_per_window <= 0`` or ``window_seconds <=
+        0`` always returns ``True`` (disabled).
+        """
+
+        if max_per_window <= 0 or window_seconds <= 0:
+            return True
+
+        row = self._conn.execute(
+            "SELECT window_start, count FROM alert_global_window WHERE id = 1"
+        ).fetchone()
+        if row is None or (now - _parse_dt(row["window_start"])).total_seconds() >= window_seconds:
+            self._conn.execute(
+                "INSERT INTO alert_global_window (id, window_start, count) VALUES (1, ?, 1) "
+                "ON CONFLICT(id) DO UPDATE SET window_start = excluded.window_start, count = excluded.count",
+                (_iso(now),),
+            )
+            self._conn.commit()
+            return True
+
+        if row["count"] >= max_per_window:
+            return False
+
+        self._conn.execute("UPDATE alert_global_window SET count = count + 1 WHERE id = 1")
+        self._conn.commit()
+        return True
+
+    def consume_sms_budget(self, segments: int, *, now: datetime, max_segments_per_day: int) -> bool:
+        """Atomically check-and-consume ``segments`` from the current UTC
+        calendar day's durable SMS-segment budget. Returns ``True`` (and
+        records the consumption) if enough budget remains; ``False``
+        (no change made) otherwise - the caller is expected to skip sending
+        that SMS rather than sending it anyway. Durable across restarts:
+        this is a cost-safety guardrail, not a per-process counter, so
+        restarting `lanfence monitor` (or any other command) never reopens
+        today's budget - only the calendar day rolling over does.
+
+        ``max_segments_per_day <= 0`` always returns ``True`` (unlimited).
+        """
+
+        if max_segments_per_day <= 0:
+            return True
+        period_key = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+        row = self._conn.execute(
+            "SELECT segments_used FROM sms_budget WHERE period_key = ?", (period_key,)
+        ).fetchone()
+        used = row["segments_used"] if row is not None else 0
+        if used + segments > max_segments_per_day:
+            return False
+
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO sms_budget (period_key, segments_used) VALUES (?, ?)", (period_key, segments),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE sms_budget SET segments_used = segments_used + ? WHERE period_key = ?",
+                (segments, period_key),
+            )
+        self._conn.commit()
+        return True
+
     def mark_offline(
         self,
         still_online_macs: set[str],
@@ -1375,19 +1520,25 @@ class DeviceStore:
 
     def reset_all(self) -> None:
         """Permanently delete every device, its lifecycle events, alert-
-        dispatch cooldowns, review/snooze state, presence policy, observed
-        DHCP servers/findings, retained address/name evidence,
-        operator-provided metadata, and discovered advertised-service
-        evidence - a full wipe back to an empty database. Used by
-        ``lanfence reset``. Cannot be undone; trust (the allowlist) and
-        DHCP server *approval* (config) are separate and untouched by this
-        call. Metadata is always cleared here regardless of
-        ``--keep-allowlist`` - that flag's documented scope is the
-        allowlist file only, not device inventory data."""
+        dispatch cooldowns (per-device and global), review/snooze state,
+        presence policy, observed DHCP servers/findings, retained
+        address/name evidence, operator-provided metadata, and discovered
+        advertised-service evidence - a full wipe back to an empty
+        database. Used by ``lanfence reset``. Cannot be undone; trust (the
+        allowlist) and DHCP server *approval* (config) are separate and
+        untouched by this call. Metadata is always cleared here regardless
+        of ``--keep-allowlist`` - that flag's documented scope is the
+        allowlist file only, not device inventory data.
+
+        Deliberately does **not** clear the durable SMS-segment budget
+        (``sms_budget``) - that is a cost-safety guardrail, not device
+        inventory, and resetting scanned history is not a way to reopen
+        today's SMS spend cap."""
 
         self._conn.execute("DELETE FROM devices")
         self._conn.execute("DELETE FROM events")
         self._conn.execute("DELETE FROM alert_log")
+        self._conn.execute("DELETE FROM alert_global_window")
         self._conn.execute("DELETE FROM device_review")
         self._conn.execute("DELETE FROM device_presence")
         self._conn.execute("DELETE FROM dhcp_servers")
@@ -1497,6 +1648,7 @@ class DeviceStore:
             (interface, server_id, _iso(observed_at), int(approved_at_observation),
              message_type, source_ip, source_mac, relay_ip, router, dns),
         )
+        self._enforce_row_cap("dhcp_server_findings", self._max_dhcp_server_findings, order_by="id")
         self._conn.commit()
 
     # --- passive advertised-service discovery (mDNS/DNS-SD, SSDP/UPnP) -
@@ -1518,6 +1670,11 @@ class DeviceStore:
                 "(withdrawn = 1 OR (expires_at IS NOT NULL AND expires_at < ?))",
                 (cutoff, now_iso),
             )
+            # A count-based cap independent of the time-based expiry above:
+            # a burst of many distinct, still-unexpired fake advertisements
+            # (rotating identifiers) would otherwise grow this table without
+            # limit until each one's own TTL naturally elapses.
+            self._enforce_row_cap(table, self._max_discovery_rows_per_table, order_by="last_seen")
 
     def discovery_diagnostics(self) -> dict[str, int]:
         """Row counts per discovery table - bounded capacity visibility for

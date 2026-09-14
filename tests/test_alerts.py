@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from lanfence import alerts
@@ -396,6 +397,64 @@ def test_send_twilio_one_recipient_failure_does_not_stop_others():
     assert urlopen_mock.call_count == 2
 
 
+def test_sms_segment_count():
+    assert alerts._sms_segment_count("x" * 10) == 1
+    assert alerts._sms_segment_count("x" * 153) == 1
+    assert alerts._sms_segment_count("x" * 154) == 2
+    assert alerts._sms_segment_count("x" * 480) == 4
+
+
+def test_send_twilio_without_store_is_unbudgeted():
+    """Backward compatible: a caller with no DeviceStore handy (store=None,
+    the default) gets the pre-existing unbudgeted behavior."""
+
+    cfg = _configured_twilio_config()
+    with patch("lanfence.alerts.urllib.request.urlopen", return_value=_FakeResponse()) as urlopen_mock:
+        alerts.send_twilio([_finding()], cfg)
+    assert urlopen_mock.call_count == 2
+
+
+def test_send_twilio_enforces_daily_segment_budget(tmp_path: Path):
+    from lanfence.db import DeviceStore
+
+    cfg = _configured_twilio_config()
+    cfg.twilio.max_segments_per_day = 1  # exactly one recipient's worth (a short message is 1 segment)
+    store = DeviceStore(tmp_path / "db.sqlite")
+    with patch("lanfence.alerts.urllib.request.urlopen", return_value=_FakeResponse()) as urlopen_mock:
+        alerts.send_twilio([_finding()], cfg, store=store)
+    store.close()
+    # Two recipients configured, but only enough budget for one.
+    assert urlopen_mock.call_count == 1
+
+
+def test_send_twilio_budget_persists_across_calls(tmp_path: Path):
+    from lanfence.db import DeviceStore
+
+    cfg = _configured_twilio_config()
+    cfg.twilio.to_numbers = ["+15550002222"]
+    cfg.twilio.max_segments_per_day = 1
+    db_path = tmp_path / "db.sqlite"
+
+    store = DeviceStore(db_path)
+    with patch("lanfence.alerts.urllib.request.urlopen", return_value=_FakeResponse()) as urlopen_mock:
+        alerts.send_twilio([_finding()], cfg, store=store)  # consumes the whole budget
+        alerts.send_twilio([_finding()], cfg, store=store)  # budget already exhausted
+    store.close()
+    assert urlopen_mock.call_count == 1
+
+
+def test_send_twilio_budget_zero_is_unlimited(tmp_path: Path):
+    from lanfence.db import DeviceStore
+
+    cfg = _configured_twilio_config()
+    cfg.twilio.max_segments_per_day = 0
+    store = DeviceStore(tmp_path / "db.sqlite")
+    with patch("lanfence.alerts.urllib.request.urlopen", return_value=_FakeResponse()) as urlopen_mock:
+        alerts.send_twilio([_finding()], cfg, store=store)
+    store.close()
+    assert urlopen_mock.call_count == 2
+
+
 # --- dispatch ------------------------------------------------------------
 
 
@@ -419,3 +478,15 @@ def test_dispatch_returns_empty_and_calls_nothing_when_below_threshold():
         sent = alerts.dispatch([_finding("info")], cfg)
     assert sent == []
     syslog_mock.assert_not_called()
+
+
+def test_dispatch_threads_store_through_to_send_twilio_only():
+    """`store` is only meaningful to send_twilio (Twilio's SMS budget) -
+    every other channel here is pure network I/O with no database access,
+    which is what lets a background delivery worker call this safely."""
+
+    cfg = AlertConfig(min_severity="high")
+    sentinel_store = object()
+    with patch("lanfence.alerts.send_twilio") as twilio_mock:
+        alerts.dispatch([_finding("high")], cfg, store=sentinel_store)
+    assert twilio_mock.call_args.kwargs.get("store") is sentinel_store

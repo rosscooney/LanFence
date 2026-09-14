@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import smtplib
 import syslog
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from email.message import EmailMessage
 
 from lanfence.config import AlertConfig
+from lanfence.db import DeviceStore
 from lanfence.logging_config import get_logger
 from lanfence.models import Finding
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
@@ -226,10 +229,31 @@ def send_ntfy(findings: list[Finding], cfg: AlertConfig) -> None:
 #: Twilio bills SMS per ~153-character segment; cap the body so one alert
 #: can't silently balloon into a dozen billed segments.
 _TWILIO_MAX_BODY_LEN = 480
+#: The concatenated-SMS (multi-segment) body length per segment - the
+#: GSM-7 single-segment limit (160) drops to 153 once a message needs more
+#: than one segment, to make room for each segment's concatenation header.
+_SMS_SEGMENT_LEN = 153
 _TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
 
 
-def send_twilio(findings: list[Finding], cfg: AlertConfig) -> None:
+def _sms_segment_count(body: str) -> int:
+    return max(1, math.ceil(len(body) / _SMS_SEGMENT_LEN))
+
+
+def send_twilio(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore | None = None) -> None:
+    """Send ``findings`` via Twilio SMS to every configured recipient.
+
+    ``store`` (when given) enforces ``cfg.twilio.max_segments_per_day`` - a
+    durable, per-calendar-day budget on total SMS segments across every
+    recipient (see :meth:`lanfence.db.DeviceStore.consume_sms_budget`).
+    Budget is consumed per-recipient: once exhausted, remaining recipients
+    in this call are skipped (not sent), rather than refusing the whole
+    batch outright, so recipients already within budget still get their
+    message. ``store=None`` (a caller with no durable store handy) means
+    the budget is not enforced for this call - callers that can provide a
+    store should.
+    """
+
     if not cfg.twilio.enabled or not findings:
         return
     if not (
@@ -243,6 +267,7 @@ def send_twilio(findings: list[Finding], cfg: AlertConfig) -> None:
         return
 
     body = _format_findings_compact(findings, max_len=_TWILIO_MAX_BODY_LEN)
+    segments = _sms_segment_count(body)
     url = _TWILIO_API_URL.format(sid=cfg.twilio.account_sid)
     auth = base64.b64encode(f"{cfg.twilio.account_sid}:{cfg.twilio.auth_token}".encode()).decode()
     headers = {
@@ -252,6 +277,11 @@ def send_twilio(findings: list[Finding], cfg: AlertConfig) -> None:
     }
 
     for to_number in cfg.twilio.to_numbers:
+        if store is not None and not store.consume_sms_budget(
+            segments, now=datetime.now(timezone.utc), max_segments_per_day=cfg.twilio.max_segments_per_day,
+        ):
+            log.warning("twilio SMS budget exhausted for today; skipping remaining recipient(s)")
+            break
         payload = urllib.parse.urlencode(
             {"From": cfg.twilio.from_number, "To": to_number, "Body": body}
         ).encode("utf-8")
@@ -263,9 +293,19 @@ def send_twilio(findings: list[Finding], cfg: AlertConfig) -> None:
             log.error("failed to send Twilio SMS to %s: %s", to_number, exc)
 
 
-def dispatch(findings: list[Finding], cfg: AlertConfig) -> list[Finding]:
+def dispatch(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore | None = None) -> list[Finding]:
     """Send every finding at or above ``cfg.min_severity`` to every enabled
-    channel. Returns the findings that were dispatched."""
+    channel. Returns the findings that were dispatched.
+
+    ``store`` (optional) is used only to enforce Twilio's durable SMS
+    budget (see :func:`send_twilio`) - every other channel here is pure
+    network I/O with no database access, which is what lets a caller
+    (e.g. `lanfence monitor`'s background alert-delivery worker) safely
+    call this from a thread other than the one that owns its main
+    ``DeviceStore`` connection: pass either ``None`` or a ``DeviceStore``
+    opened on *that same* (delivery) thread, never the owning thread's
+    connection shared across threads.
+    """
 
     to_send = findings_to_alert(findings, cfg)
     if not to_send:
@@ -277,5 +317,5 @@ def dispatch(findings: list[Finding], cfg: AlertConfig) -> list[Finding]:
     send_discord(to_send, cfg)
     send_teams(to_send, cfg)
     send_ntfy(to_send, cfg)
-    send_twilio(to_send, cfg)
+    send_twilio(to_send, cfg, store=store)
     return to_send

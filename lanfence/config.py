@@ -73,6 +73,19 @@ class ScanConfig(BaseModel):
     #: sighting (active or passive) resets the count to zero. ``1`` restores
     #: the old immediate-disconnect-on-first-miss behavior.
     offline_after_missed_scans: int = 3
+    #: Max items buffered per passive processing queue (sightings, DHCP
+    #: server observations, mDNS records, SSDP advertisements) between
+    #: `monitor` drain ticks - bounds memory against a packet flood that
+    #: outpaces processing. Once full, a new item is dropped (counted, not
+    #: blocking the capture thread) rather than growing without limit.
+    passive_queue_maxsize: int = 2000
+
+    @field_validator("passive_queue_maxsize")
+    @classmethod
+    def _positive_queue_maxsize(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("passive_queue_maxsize must be at least 1")
+        return value
 
     @field_validator("scan_interval_seconds", "active_scan_timeout_seconds", "dns_timeout_seconds")
     @classmethod
@@ -181,6 +194,19 @@ class TwilioAlertConfig(BaseModel):
     from_number: str | None = None
     to_numbers: list[str] = Field(default_factory=list)
     timeout_seconds: float = 10.0
+    #: Durable (survives a restart) daily cap on total SMS segments sent,
+    #: counting every recipient and every ~153-character segment of each
+    #: message - a cost-safety guardrail against a flood of findings
+    #: driving unbounded SMS billing. 0 disables the budget (unlimited).
+    #: See :meth:`lanfence.db.DeviceStore.consume_sms_budget`.
+    max_segments_per_day: int = 200
+
+    @field_validator("max_segments_per_day")
+    @classmethod
+    def _non_negative_segment_budget(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("max_segments_per_day must be zero or greater")
+        return value
 
 
 class AlertConfig(BaseModel):
@@ -195,6 +221,13 @@ class AlertConfig(BaseModel):
     #: external channels below; the CLI/JSON output and the database are
     #: always complete.
     rate_limit_seconds: float = 900.0
+    #: A *global* cap (independent of the per-MAC cooldown above) on how
+    #: many external alert dispatches may fire within
+    #: ``global_rate_limit_window_seconds`` - bounds total alert volume
+    #: even when many distinct/rotating identities (e.g. randomized MACs)
+    #: each individually pass their own per-MAC cooldown. 0 disables it.
+    global_rate_limit_max: int = 20
+    global_rate_limit_window_seconds: float = 60.0
     syslog: SyslogAlertConfig = Field(default_factory=SyslogAlertConfig)
     email: EmailAlertConfig = Field(default_factory=EmailAlertConfig)
     webhook: WebhookAlertConfig = Field(default_factory=WebhookAlertConfig)
@@ -209,6 +242,20 @@ class AlertConfig(BaseModel):
     def _non_negative_rate_limit(cls, value: float) -> float:
         if value < 0:
             raise ValueError("rate_limit_seconds must be zero or greater")
+        return value
+
+    @field_validator("global_rate_limit_max")
+    @classmethod
+    def _non_negative_global_max(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("global_rate_limit_max must be zero or greater")
+        return value
+
+    @field_validator("global_rate_limit_window_seconds")
+    @classmethod
+    def _non_negative_global_window(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("global_rate_limit_window_seconds must be zero or greater")
         return value
 
 
@@ -397,6 +444,35 @@ def expand_operator_path(path: Path) -> Path:
     return home if text == "~" else home / text[2:]
 
 
+class RetentionConfig(BaseModel):
+    """Bounds on how much attacker-controlled data (spoofed/rotating
+    identities, flooded advertisements) the database can accumulate,
+    independent of the time-based expiry already applied to passive
+    discovery evidence - see :class:`lanfence.db.DeviceStore`'s
+    ``max_evidence_rows_per_mac``/``max_dhcp_server_findings``/
+    ``max_discovery_rows_per_table`` constructor parameters, which these
+    values are passed into by `scan`/`monitor`."""
+
+    model_config = {"extra": "forbid"}
+
+    #: Max retained address/name evidence rows kept per MAC - oldest (by
+    #: last_seen) pruned first once exceeded.
+    max_evidence_rows_per_mac: int = 100
+    #: Max total DHCP-server-finding rows retained - oldest pruned first.
+    max_dhcp_server_findings: int = 5000
+    #: Max total rows retained per passive-discovery table (mDNS/SSDP) -
+    #: oldest (by last_seen) pruned first, on top of (not instead of) the
+    #: existing time-based expiry.
+    max_discovery_rows_per_table: int = 5000
+
+    @field_validator("max_evidence_rows_per_mac", "max_dhcp_server_findings", "max_discovery_rows_per_table")
+    @classmethod
+    def _at_least_one(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be at least 1")
+        return value
+
+
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -405,6 +481,7 @@ class Config(BaseModel):
     digest: DigestConfig = Field(default_factory=DigestConfig)
     dhcp_servers: DhcpServerConfig = Field(default_factory=DhcpServerConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     #: Where the persistent device database lives.
     db_path: Path = Path("~/.local/share/lanfence/lanfence.db")
     #: YAML allowlist of trusted devices; findings about them are downgraded to info.

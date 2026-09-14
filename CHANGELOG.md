@@ -29,6 +29,28 @@ Each release is also published to
   `email.username`/`password` are now refused when `use_tls` is disabled,
   preventing a password from being sent in the clear; an explicitly
   configured unauthenticated relay (no username/password) is unaffected.
+- **Bounded `lanfence monitor` resource usage and alert volume.** Passive
+  processing queues (`scan.passive_queue_maxsize`, default 2000) are now
+  bounded - a packet flood drops excess items (counted, and reported as a
+  coalesced warning) instead of growing memory without limit or blocking
+  the capture thread. Repeated identical sightings within one drain batch
+  are safely coalesced (`lanfence.engine.coalesce_sightings`) without
+  losing any distinct evidence. External alert delivery now runs on a
+  bounded background thread (`lanfence.alert_worker`) so a slow or
+  unreachable destination can no longer stall the main loop's sighting
+  processing; SQLite access stays on its owning thread throughout. A new
+  *global* alert-dispatch cap (`alerts.global_rate_limit_max`/
+  `global_rate_limit_window_seconds`) bounds total external alert volume
+  even from many distinct or rotating identities (e.g. randomized MACs),
+  which the existing per-MAC cooldown alone cannot. Twilio SMS gets a
+  durable daily segment budget (`alerts.twilio.max_segments_per_day`,
+  default 200) accounting for every recipient and message segment,
+  surviving process restarts (not `lanfence reset`, deliberately - it's a
+  billing safeguard, not device inventory). Retained per-MAC address/name
+  evidence and DHCP-server/discovery-advertisement rows are now capped
+  (`retention.*`), independent of and tighter than the existing time-based
+  expiry, bounding how much a burst of spoofed/rotating observations can
+  grow the database before any of them individually expire.
 
 ## [0.4.2] - 2026-09-14
 
