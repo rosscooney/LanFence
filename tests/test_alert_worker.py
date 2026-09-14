@@ -38,24 +38,30 @@ def test_submit_delivers_in_the_background_not_on_the_caller_thread(tmp_path: Pa
 
 def test_submit_never_blocks_when_queue_is_full(tmp_path: Path):
     block = threading.Event()
+    started = threading.Event()
 
     def blocking_dispatch(findings, cfg, *, store=None):
+        started.set()
         block.wait(timeout=5.0)
         return findings
 
     worker = AlertDeliveryWorker(tmp_path / "db.sqlite", maxsize=1)
     try:
         with patch("lanfence.alert_worker.alerts.dispatch", side_effect=blocking_dispatch):
-            # First submit is picked up immediately by the worker and blocks
-            # there (on `block`); the second fills the maxsize=1 queue; the
-            # third must be dropped rather than block this thread.
+            # First submit is picked up by the worker and blocks there (on
+            # `block`); the second fills the maxsize=1 queue; the third
+            # must be dropped rather than block this thread. Waiting on
+            # `started` (rather than a fixed sleep) proves the worker has
+            # actually begun processing #1 before #2 is submitted - a
+            # fixed sleep is not a reliable guarantee of thread scheduling
+            # on a slow/loaded CI runner.
             worker.submit([_finding()], AlertConfig())
-            time.sleep(0.1)  # let the worker actually start processing #1
+            assert started.wait(timeout=5.0), "worker never started processing the first item"
             worker.submit([_finding()], AlertConfig())
 
-            started = time.monotonic()
+            start_time = time.monotonic()
             ok = worker.submit([_finding()], AlertConfig())
-            elapsed = time.monotonic() - started
+            elapsed = time.monotonic() - start_time
 
             assert ok is False
             assert elapsed < 1.0  # never blocked waiting for room
