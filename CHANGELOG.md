@@ -13,6 +13,18 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [0.4.5] - 2026-09-14
+
+### Fixed
+
+- Fixed a flaky timing race in `test_alert_worker.py` on CI (a fixed sleep
+  assumed the background delivery worker had already started processing
+  an item before the test submitted a second - replaced with a
+  `threading.Event` the mocked delivery call sets on entry, so the test
+  waits deterministically instead of guessing a duration). No functional
+  code changed; 0.4.4's Tests workflow failed on this alone, intermittently,
+  after the package itself had already published successfully.
+
 ## [0.4.4] - 2026-09-14
 
 ### Fixed
