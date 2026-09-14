@@ -1,9 +1,77 @@
 # Copyright (c) 2026-present Stable State Consulting Ltd
 # SPDX-License-Identifier: MIT
 #
-# Example systemd unit for continuous monitoring.
-# Install: sudo cp packaging/lanfence.service /etc/systemd/system/
-#          sudo systemctl enable --now lanfence
+# Example systemd unit for continuous monitoring, hardened to run as a
+# dedicated, unprivileged service account with only the one Linux
+# capability ARP/IPv6-ND scanning actually needs (CAP_NET_RAW - see
+# README.md's Install section and lanfence/scanner.py) - never root, and
+# never `setcap` on the shared Python interpreter or the `lanfence`
+# entry-point script itself (either of those would hand CAP_NET_RAW to
+# *anything* run with that interpreter/script, not just this service;
+# systemd's AmbientCapabilities= below grants it only to this one unit's
+# process).
+#
+# --- One-time setup (run as root on the target host) -----------------------
+#
+#   1. Create the dedicated, unprivileged, login-disabled service account:
+#
+#        useradd --system --no-create-home --shell /usr/sbin/nologin lanfence
+#
+#   2. Create /etc/lanfence/config.yaml (see README.md's Configuration
+#      section, or this repository's config.example.yaml, for its
+#      contents), readable by the service account but not writable by it
+#      (owned by root, group-readable by lanfence):
+#
+#        mkdir -p /etc/lanfence
+#        $EDITOR /etc/lanfence/config.yaml
+#        chown -R root:lanfence /etc/lanfence
+#        chmod 750 /etc/lanfence
+#        chmod 640 /etc/lanfence/config.yaml
+#
+#   3. In that config.yaml, point db_path/allowlist_file at the state
+#      directory StateDirectory= below creates and owns for this service
+#      (a dedicated system account typically has no real $HOME for `~` to
+#      expand against, so set these explicitly rather than relying on the
+#      `~/.local/share/lanfence/...` default):
+#
+#        db_path: /var/lib/lanfence/lanfence.db
+#        allowlist_file: /var/lib/lanfence/allowlist.yaml
+#
+#   4. Install and enable the unit itself:
+#
+#        cp packaging/lanfence.service /etc/systemd/system/
+#        systemctl daemon-reload
+#        systemctl enable --now lanfence
+#
+# --- Migrating from an existing root-based deployment -----------------------
+#
+#   systemctl stop lanfence
+#   # Move the database/allowlist from wherever root's own $HOME put them
+#   # (commonly /root/.local/share/lanfence/lanfence.db and
+#   # /root/.config/lanfence/allowlist.yaml) to the new state directory:
+#   mkdir -p /var/lib/lanfence
+#   mv /root/.local/share/lanfence/lanfence.db /var/lib/lanfence/
+#   mv /root/.config/lanfence/allowlist.yaml /var/lib/lanfence/
+#   chown -R lanfence:lanfence /var/lib/lanfence
+#   chmod 700 /var/lib/lanfence
+#   # Update config.yaml's db_path/allowlist_file to match (step 3 above),
+#   # then install/enable this hardened unit (step 4 above) in place of
+#   # the old one.
+#
+# --- Validation --------------------------------------------------------
+#
+#   systemd-analyze verify /etc/systemd/system/lanfence.service
+#
+# This is STATIC validation only: it checks the unit file parses, and that
+# referenced paths/users/capabilities are well-formed - it does not run
+# the service and cannot prove that ARP/ND scanning, passive capture, DNS
+# resolution, or your configured alert channels actually still work under
+# this sandboxing. That needs an actual run on the target Linux host after
+# deploying: `systemctl status lanfence`, `journalctl -u lanfence`, and
+# `lanfence check`/a real `lanfence scan` against the running service's
+# database. Nothing here has been verified against a live systemd/Linux
+# runtime in this repository - only reviewed for correct directive syntax
+# and semantics.
 
 [Unit]
 Description=LAN Fence continuous network device monitoring
@@ -14,10 +82,56 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/lanfence monitor --config /etc/lanfence/config.yaml
 Restart=on-failure
 RestartSec=5
-# Active/passive ARP scanning needs CAP_NET_RAW; running as root is simplest
-# on a dedicated Pi. To run as a non-root user instead, drop User=root and
-# grant the capability: sudo setcap cap_net_raw+eip /usr/local/bin/lanfence
-User=root
+
+# --- Identity: a dedicated, unprivileged, login-disabled account -----------
+# See step 1 above.
+User=lanfence
+Group=lanfence
+
+# --- Capabilities: only what scanning needs, granted directly by systemd --
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+
+# --- Filesystem: writable state, read-only everything else -----------------
+# StateDirectory= creates and owns /var/lib/lanfence (mode 0700) for this
+# service - see step 3 above for pointing db_path/allowlist_file at it.
+# ProtectSystem=strict makes the rest of the filesystem read-only for this
+# process, including the installed lanfence code itself (wherever pip/
+# pipx put it) and /etc/lanfence's config.yaml (readable via its group
+# permissions from step 2, never writable by this service account either
+# way) - "read-only" here is enforced independently of, and in addition
+# to, the plain Unix file permissions set up above.
+StateDirectory=lanfence
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+
+# --- General sandboxing ------------------------------------------------
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+# AF_PACKET: raw ARP/ND send+capture (scapy). AF_NETLINK: interface/route
+# enumeration (also used internally by scapy and by glibc's resolver).
+# AF_INET/AF_INET6: DNS resolution and every configured alert channel
+# (HTTP(S) webhooks, SMTP, ntfy, Twilio). AF_UNIX: local resolver/syslog
+# sockets. Removing any of these will break the corresponding feature.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

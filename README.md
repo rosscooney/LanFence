@@ -1182,26 +1182,51 @@ discovery evidence along with the rest of a device's history.
 LAN Fence does not ship its own scheduler; use `systemd` (recommended on a
 Pi) or `cron`.
 
-**Continuous monitoring** - `/etc/systemd/system/lanfence.service`:
+**Continuous monitoring** - see [`packaging/lanfence.service`](packaging/lanfence.service)
+for the full, hardened example unit (a dedicated unprivileged service
+account with only `CAP_NET_RAW`, filesystem/capability sandboxing, and
+step-by-step setup/migration instructions in its own comments) - a
+condensed version:
 
 ```ini
 [Unit]
-Description=LAN Fence continuous monitoring
+Description=LAN Fence continuous network device monitoring
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/lanfence monitor --config /etc/lanfence/config.yaml
 Restart=on-failure
-User=root
+User=lanfence
+Group=lanfence
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+StateDirectory=lanfence
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+# ... see packaging/lanfence.service for the complete sandboxing set and
+# the one-time `useradd`/config-ownership setup this depends on.
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```bash
+sudo cp packaging/lanfence.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now lanfence
 ```
+
+Running as root (an earlier version's only documented option) still works
+if you genuinely need it, but is no longer the recommended or example
+configuration - the capability LAN Fence's scanning actually needs
+(`CAP_NET_RAW`) is granted directly to this one service by systemd above,
+never via `setcap` on the shared Python interpreter or the `lanfence`
+script itself, which would hand that capability to anything else run with
+that interpreter/script too.
 
 **Daily report** - a cron entry (`sudo crontab -e`):
 
@@ -1230,7 +1255,12 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/lanfence digest --send --config /etc/lanfence/config.yaml
-User=root
+# digest only reads the database and sends alerts - no raw-socket access,
+# so no capability is needed at all; the same dedicated, unprivileged
+# account `lanfence.service` runs as (see packaging/lanfence.service) is
+# enough, as long as it can read config.yaml and the database/allowlist.
+User=lanfence
+Group=lanfence
 ```
 
 `/etc/systemd/system/lanfence-digest.timer`:
@@ -1447,6 +1477,13 @@ never affected by whether delivery itself succeeded.
   where the transport provides one (an HTTP status, an SMTP reply code) -
   e.g. `HTTPError (code 502)` - never a full webhook URL, credentials, a
   response body, or (for Twilio) a recipient's phone number.
+- **The example systemd service runs as a dedicated, unprivileged
+  account**, not root - see [`packaging/lanfence.service`](packaging/lanfence.service),
+  which grants only `CAP_NET_RAW` (the one capability scanning needs,
+  documented above) directly via systemd, never via `setcap` on the
+  shared Python interpreter or the `lanfence` script itself, plus
+  filesystem/capability/syscall sandboxing (`ProtectSystem=strict`,
+  `NoNewPrivileges`, `UMask=0077`, and more).
 
 ## Development
 

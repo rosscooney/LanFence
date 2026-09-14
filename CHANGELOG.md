@@ -97,6 +97,25 @@ Each release is also published to
   SMTP reply code, an OS errno) - e.g. `HTTPError (code 502)` - and
   nothing else. Twilio SMS failures no longer log the recipient's phone
   number at all (only its position among the configured recipients).
+- **Hardened the example systemd service.** `packaging/lanfence.service`
+  no longer runs as root: it now documents creating a dedicated,
+  unprivileged, login-disabled service account and grants it only
+  `CAP_NET_RAW` (the one capability scanning needs) directly via
+  systemd's `AmbientCapabilities=`/`CapabilityBoundingSet=` - never via
+  `setcap` on the shared Python interpreter or the `lanfence` script
+  itself, which would have granted it to anything else run with that
+  interpreter/script. Adds `NoNewPrivileges`, `UMask=0077`,
+  `ProtectSystem=strict` plus a `StateDirectory=`-managed, mode-0700
+  writable state directory (with the installed code and configuration
+  themselves never writable by the service account), and the rest of
+  `systemd-analyze security`'s recommended sandboxing
+  (`RestrictAddressFamilies` explicitly allowing only what scanning/DNS/
+  alert delivery need, `ProtectKernelTunables`, `MemoryDenyWriteExecute`,
+  and more). The unit file documents one-time account/config setup and
+  migration from an existing root-based deployment. Static syntax only
+  (`systemd-analyze verify` was not run in this environment - no Linux
+  runtime with systemd was available to test against; see the unit
+  file's own comments).
 
 ## [0.4.2] - 2026-09-14
 
