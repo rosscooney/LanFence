@@ -556,3 +556,55 @@ def test_unknown_channel_test_message_fails_gracefully():
     cfg = Config()
     ok, message = send_channel_test_message("carrier-pigeon", cfg)
     assert ok is False
+
+
+def test_test_message_webhook_failure_reports_http_status_never_reason():
+    import urllib.error
+
+    sentinel = "SENTINEL_SECRET_DO_NOT_LEAK_hunter2"
+    cfg = Config(alerts={"webhook": {"url": "https://example.com/hook", "enabled": True}})
+    exc = urllib.error.HTTPError(url=cfg.alerts.webhook.url, code=502, msg=sentinel, hdrs=None, fp=None)
+    with patch("lanfence.channels.urllib.request.urlopen", side_effect=exc):
+        ok, message = send_channel_test_message("webhook", cfg)
+    assert ok is False
+    assert "502" in message
+    assert sentinel not in message
+
+
+def test_test_message_email_failure_reports_smtp_code_never_server_text(caplog):
+    import logging
+    import smtplib
+
+    sentinel = "SENTINEL_SECRET_DO_NOT_LEAK_hunter2"
+    cfg = Config(alerts={"email": {
+        "from_addr": "lanfence@example.com", "to_addrs": ["ops@example.com"], "enabled": True,
+    }})
+    exc = smtplib.SMTPResponseException(535, f"{sentinel} auth failed".encode())
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.channels.smtplib.SMTP", side_effect=exc):
+            ok, message = send_channel_test_message("email", cfg)
+    assert ok is False
+    assert "535" in message
+    assert sentinel not in message
+    assert sentinel not in caplog.text
+
+
+def test_test_message_twilio_failure_logs_never_contain_recipient_number(caplog):
+    import logging
+    import urllib.error
+
+    sentinel = "SENTINEL_SECRET_DO_NOT_LEAK_hunter2"
+    secret_number = "+15559998888"
+    cfg = Config(alerts={"twilio": {
+        "account_sid": "AC1", "auth_token": "tok", "from_number": "+15551234567",
+        "to_numbers": [secret_number], "enabled": True,
+    }})
+    exc = urllib.error.HTTPError(url="https://api.twilio.com/x", code=400, msg=sentinel, hdrs=None, fp=None)
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.channels.urllib.request.urlopen", side_effect=exc):
+            ok, message = send_channel_test_message("twilio", cfg)
+    assert ok is False
+    assert secret_number not in caplog.text
+    assert sentinel not in caplog.text
+    assert secret_number not in message
+    assert sentinel not in message

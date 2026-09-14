@@ -83,6 +83,20 @@ Each release is also published to
   symlinked *ancestor* directory (a platform alias, an intentional
   bind-mount-style setup) is left completely untouched, since only the
   final path components LAN Fence actually owns are ever checked.
+- **Removed sensitive transport details from logs and CLI output.** A raw
+  transport exception's text can carry server-controlled content (an HTTP
+  "reason phrase," an SMTP server's response line) or values baked in by
+  the exception itself (a full webhook URL, a recipient phone number/
+  address, an `SMTPRecipientsRefused` dict) - none of it safe to log or
+  display verbatim. Every alert channel (`lanfence.alerts`), digest
+  delivery (`lanfence.digest`), the `channels test`/setup flows
+  (`lanfence.channels`), and `lanfence vendor-refresh`'s download error
+  now report failures via a new shared `lanfence.safe_errors.
+  summarize_error()`: the exception's class name plus a validated
+  *numeric* code where the transport provides one (an HTTP status, an
+  SMTP reply code, an OS errno) - e.g. `HTTPError (code 502)` - and
+  nothing else. Twilio SMS failures no longer log the recipient's phone
+  number at all (only its position among the configured recipients).
 
 ## [0.4.2] - 2026-09-14
 

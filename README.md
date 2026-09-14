@@ -1439,6 +1439,14 @@ never affected by whether delivery itself succeeded.
   (`retention.*`), independent of (and tighter than) time-based expiry, so a
   burst of spoofed/rotating observations can't grow the database without
   bound before any individually expire.
+- **Delivery failures never log or display raw transport details.** A
+  channel's server can influence what a raised exception's text contains
+  (an HTTP "reason phrase", an SMTP response line) - LAN Fence never logs
+  or shows that raw text. Every alert/digest/test-message failure is
+  reported as the exception's class name plus a validated *numeric* code
+  where the transport provides one (an HTTP status, an SMTP reply code) -
+  e.g. `HTTPError (code 502)` - never a full webhook URL, credentials, a
+  response body, or (for Twilio) a recipient's phone number.
 
 ## Development
 

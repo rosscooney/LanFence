@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import smtplib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -490,3 +491,67 @@ def test_dispatch_threads_store_through_to_send_twilio_only():
     with patch("lanfence.alerts.send_twilio") as twilio_mock:
         alerts.dispatch([_finding("high")], cfg, store=sentinel_store)
     assert twilio_mock.call_args.kwargs.get("store") is sentinel_store
+
+
+# --- safe error reporting (no server-controlled/sensitive text in logs) ----
+
+
+_SENTINEL = "SENTINEL_SECRET_DO_NOT_LEAK_hunter2"
+
+
+def test_send_webhook_logs_never_contain_a_crafted_http_reason(caplog):
+    import logging
+    import urllib.error
+
+    cfg = AlertConfig()
+    cfg.webhook.enabled = True
+    cfg.webhook.url = f"https://user:{_SENTINEL}@evil.example.com/hook"
+    exc = urllib.error.HTTPError(url=cfg.webhook.url, code=500, msg=_SENTINEL, hdrs=None, fp=None)
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.alerts.urllib.request.urlopen", side_effect=exc):
+            alerts.send_webhook([_finding()], cfg)
+    assert _SENTINEL not in caplog.text
+    assert "evil.example.com" not in caplog.text
+
+
+def test_send_email_logs_never_contain_a_crafted_smtp_response(caplog):
+    import logging
+
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "a@example.com"
+    cfg.email.to_addrs = ["b@example.com"]
+    exc = smtplib.SMTPResponseException(535, f"{_SENTINEL} auth failed".encode())
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.alerts.smtplib.SMTP", side_effect=exc):
+            alerts.send_email([_finding()], cfg)
+    assert _SENTINEL not in caplog.text
+
+
+def test_send_twilio_logs_never_contain_the_recipient_number(caplog):
+    import logging
+    import urllib.error
+
+    cfg = _configured_twilio_config()
+    secret_number = "+15559998888"
+    cfg.twilio.to_numbers = [secret_number]
+    exc = urllib.error.HTTPError(url="https://api.twilio.com/x", code=400, msg=_SENTINEL, hdrs=None, fp=None)
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.alerts.urllib.request.urlopen", side_effect=exc):
+            alerts.send_twilio([_finding()], cfg)
+    assert secret_number not in caplog.text
+    assert _SENTINEL not in caplog.text
+
+
+def test_send_ntfy_logs_never_contain_a_crafted_http_reason(caplog):
+    import logging
+    import urllib.error
+
+    cfg = AlertConfig()
+    cfg.ntfy.enabled = True
+    cfg.ntfy.url = f"https://ntfy.sh/{_SENTINEL}-topic"
+    exc = urllib.error.HTTPError(url=cfg.ntfy.url, code=403, msg=_SENTINEL, hdrs=None, fp=None)
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.alerts.urllib.request.urlopen", side_effect=exc):
+            alerts.send_ntfy([_finding()], cfg)
+    assert _SENTINEL not in caplog.text

@@ -55,6 +55,7 @@ import yaml
 from lanfence.config import DIGEST_CHANNELS, Config
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import get_logger
+from lanfence.safe_errors import summarize_error
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("channels")
@@ -587,7 +588,7 @@ def _post_json_ok(url: str, payload: dict, *, timeout: float, label: str) -> tup
             resp.read()
         return True, f"accepted by the {label} endpoint"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return False, f"{label} endpoint rejected the request: {exc.__class__.__name__}"
+        return False, f"{label} endpoint rejected the request: {summarize_error(exc)}"
 
 
 def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
@@ -637,7 +638,7 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
                 resp.read()
             return True, "accepted by the ntfy server"
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            return False, f"ntfy server rejected the request: {exc.__class__.__name__}"
+            return False, f"ntfy server rejected the request: {summarize_error(exc)}"
     if channel == "email":
         msg = EmailMessage()
         msg["Subject"] = _TEST_TITLE
@@ -650,7 +651,7 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
         except SmtpAuthWithoutTlsError:
             return False, "refusing to authenticate: use_tls is disabled but username/password are set"
         except (smtplib.SMTPException, OSError) as exc:
-            return False, f"SMTP relay rejected the message: {exc.__class__.__name__}"
+            return False, f"SMTP relay rejected the message: {summarize_error(exc)}"
     if channel == "twilio":
         url = f"https://api.twilio.com/2010-04-01/Accounts/{channel_cfg.account_sid}/Messages.json"
         auth = base64.b64encode(f"{channel_cfg.account_sid}:{channel_cfg.auth_token}".encode()).decode()
@@ -669,7 +670,7 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
                 with urllib.request.urlopen(request, timeout=channel_cfg.timeout_seconds) as resp:  # noqa: S310
                     resp.read()
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                log.error("failed to send Twilio test SMS: %s", exc.__class__.__name__)
+                log.error("failed to send Twilio test SMS: %s", summarize_error(exc))
                 ok_all = False
         if ok_all:
             return True, f"accepted by Twilio for {len(channel_cfg.to_numbers)} recipient(s)"
@@ -687,6 +688,6 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
             syslog.closelog()
             return True, f"written to {channel_cfg.address}"
         except OSError as exc:
-            return False, f"could not write to syslog: {exc.__class__.__name__}"
+            return False, f"could not write to syslog: {summarize_error(exc)}"
 
     return False, f"unknown channel: {channel}"

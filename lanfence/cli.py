@@ -75,6 +75,7 @@ from lanfence.fsutil import atomic_write
 from lanfence.logging_config import setup_logging
 from lanfence.models import Finding
 from lanfence.netutil import normalize_mac
+from lanfence.safe_errors import summarize_error
 from lanfence.sanitize import clean_text
 from lanfence.report import (
     exit_code_for,
@@ -2365,7 +2366,7 @@ def vendor_refresh(
         with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 - https literal
             raw = resp.read()
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        typer.secho(f"error: could not download vendor registry: {exc}", fg="red", err=True)
+        typer.secho(f"error: could not download vendor registry: {summarize_error(exc)}", fg="red", err=True)
         raise typer.Exit(code=1) from exc
 
     table = parse_ieee_oui_csv(raw.decode("utf-8", errors="replace"))

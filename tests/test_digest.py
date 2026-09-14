@@ -545,3 +545,57 @@ def test_dispatch_digest_channel_raising_is_reported_as_failure_not_crash(tmp_pa
         results = dispatch_digest(digest, cfg, channels=["webhook"])
 
     assert results == {"webhook": False}
+
+
+# --- safe error reporting (no server-controlled/sensitive text in logs) ----
+
+
+_SENTINEL = "SENTINEL_SECRET_DO_NOT_LEAK_hunter2"
+
+
+def test_send_digest_email_logs_never_contain_a_crafted_smtp_response(tmp_path: Path, caplog):
+    import logging
+    import smtplib
+
+    digest = _digest(tmp_path)
+    cfg = Config(alerts={"email": {
+        "enabled": True, "from_addr": "lanfence@example.com", "to_addrs": ["me@example.com"],
+    }})
+    exc = smtplib.SMTPResponseException(535, f"{_SENTINEL} auth failed".encode())
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.digest.smtplib.SMTP", side_effect=exc):
+            ok = send_digest_email(digest, cfg)
+    assert ok is False
+    assert _SENTINEL not in caplog.text
+
+
+def test_send_digest_ntfy_logs_never_contain_a_crafted_http_reason(tmp_path: Path, caplog):
+    import logging
+    import urllib.error
+
+    from lanfence.digest import send_digest_ntfy
+
+    digest = _digest(tmp_path)
+    cfg = Config(alerts={"ntfy": {"enabled": True, "url": f"https://ntfy.sh/{_SENTINEL}-topic"}})
+    exc = urllib.error.HTTPError(url=cfg.alerts.ntfy.url, code=403, msg=_SENTINEL, hdrs=None, fp=None)
+    with caplog.at_level(logging.ERROR):
+        with patch("lanfence.digest.urllib.request.urlopen", side_effect=exc):
+            ok = send_digest_ntfy(digest, cfg)
+    assert ok is False
+    assert _SENTINEL not in caplog.text
+
+
+def test_dispatch_digest_unexpected_exception_logs_never_contain_sentinel(tmp_path: Path, caplog):
+    import logging
+
+    digest = _digest(tmp_path)
+    cfg = Config()
+
+    def boom(d, c):
+        raise RuntimeError(f"{_SENTINEL} unexpected failure")
+
+    with caplog.at_level(logging.ERROR):
+        with patch.dict("lanfence.digest._SENDERS", {"webhook": boom}):
+            results = dispatch_digest(digest, cfg, channels=["webhook"])
+    assert results == {"webhook": False}
+    assert _SENTINEL not in caplog.text

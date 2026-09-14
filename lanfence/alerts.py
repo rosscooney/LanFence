@@ -26,6 +26,7 @@ from lanfence.config import AlertConfig
 from lanfence.db import DeviceStore
 from lanfence.logging_config import get_logger
 from lanfence.models import Finding
+from lanfence.safe_errors import summarize_error
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("alerts")
@@ -123,7 +124,7 @@ def _post_json(url: str, payload: dict, *, timeout: float, label: str) -> None:
         with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 - https literal
             resp.read()
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        log.error("failed to send %s alert: %s", label, exc)
+        log.error("failed to send %s alert: %s", label, summarize_error(exc))
 
 
 def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
@@ -142,9 +143,12 @@ def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
     try:
         send_smtp_message(msg, cfg.email)
     except SmtpAuthWithoutTlsError as exc:
+        # Our own static, non-server-controlled message - safe to log as-is.
         log.error("failed to send email alert: %s", exc)
     except (smtplib.SMTPException, OSError) as exc:
-        log.error("failed to send email alert: %s", exc)
+        # An SMTP server's response line (or a resolver/connection error)
+        # can carry server-controlled text - never logged raw.
+        log.error("failed to send email alert: %s", summarize_error(exc))
 
 
 def send_webhook(findings: list[Finding], cfg: AlertConfig) -> None:
@@ -223,7 +227,7 @@ def send_ntfy(findings: list[Finding], cfg: AlertConfig) -> None:
         with urllib.request.urlopen(request, timeout=cfg.ntfy.timeout_seconds) as resp:  # noqa: S310
             resp.read()
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        log.error("failed to send ntfy alert: %s", exc)
+        log.error("failed to send ntfy alert: %s", summarize_error(exc))
 
 
 #: Twilio bills SMS per ~153-character segment; cap the body so one alert
@@ -276,7 +280,8 @@ def send_twilio(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore
         "User-Agent": "lanfence",
     }
 
-    for to_number in cfg.twilio.to_numbers:
+    total_recipients = len(cfg.twilio.to_numbers)
+    for index, to_number in enumerate(cfg.twilio.to_numbers, start=1):
         if store is not None and not store.consume_sms_budget(
             segments, now=datetime.now(timezone.utc), max_segments_per_day=cfg.twilio.max_segments_per_day,
         ):
@@ -290,7 +295,14 @@ def send_twilio(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore
             with urllib.request.urlopen(request, timeout=cfg.twilio.timeout_seconds) as resp:  # noqa: S310
                 resp.read()
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            log.error("failed to send Twilio SMS to %s: %s", to_number, exc)
+            # Recipient number deliberately omitted - not logged even
+            # masked, per "no unnecessary recipient details"; the
+            # recipient index is enough to distinguish which of several
+            # configured numbers failed without identifying who they are.
+            log.error(
+                "failed to send Twilio SMS to recipient %d of %d: %s",
+                index, total_recipients, summarize_error(exc),
+            )
 
 
 def dispatch(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore | None = None) -> list[Finding]:

@@ -2385,6 +2385,21 @@ def test_drop_counting_queue_put_dropping_never_blocks_and_counts_overflow():
     assert q.qsize() == 2
 
 
+# --- lanfence vendor-refresh: safe error reporting --------------------------
+
+
+def test_vendor_refresh_download_failure_never_leaks_a_crafted_http_reason(config_path: Path):
+    import urllib.error
+
+    sentinel = "SENTINEL_SECRET_DO_NOT_LEAK_hunter2"
+    exc = urllib.error.HTTPError(url="https://standards-oui.ieee.org/oui/oui.csv", code=502, msg=sentinel, hdrs=None, fp=None)
+    with patch("lanfence.cli.urllib.request.urlopen", side_effect=exc):
+        result = runner.invoke(app, ["vendor-refresh", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "502" in result.output
+    assert sentinel not in result.output
+
+
 # --- lanfence channels -------------------------------------------------
 
 

@@ -43,6 +43,7 @@ from lanfence.db import DeviceStore
 from lanfence.engine import build_inventory, is_review_needed
 from lanfence.logging_config import get_logger
 from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, DigestSection
+from lanfence.safe_errors import summarize_error
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("digest")
@@ -248,10 +249,13 @@ def send_digest_email(digest: Digest, cfg: Config) -> bool:
         send_smtp_message(msg, email_cfg)
         return True
     except SmtpAuthWithoutTlsError as exc:
+        # Our own static, non-server-controlled message - safe to log as-is.
         log.error("failed to send digest email: %s", exc)
         return False
     except (smtplib.SMTPException, OSError) as exc:
-        log.error("failed to send digest email: %s", exc)
+        # An SMTP server's response line (or a resolver/connection error)
+        # can carry server-controlled text - never logged raw.
+        log.error("failed to send digest email: %s", summarize_error(exc))
         return False
 
 
@@ -338,7 +342,7 @@ def send_digest_ntfy(digest: Digest, cfg: Config) -> bool:
             resp.read()
         return True
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        log.error("failed to send digest ntfy notification: %s", exc)
+        log.error("failed to send digest ntfy notification: %s", summarize_error(exc))
         return False
 
 
@@ -362,7 +366,7 @@ def _post_json_ok(url: str, payload: dict, *, timeout: float, label: str) -> boo
             resp.read()
         return True
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        log.error("failed to send %s: %s", label, exc)
+        log.error("failed to send %s: %s", label, summarize_error(exc))
         return False
 
 
@@ -387,6 +391,6 @@ def dispatch_digest(digest: Digest, cfg: Config, *, channels: list[str]) -> dict
         try:
             results[name] = bool(sender(digest, cfg))
         except Exception as exc:  # noqa: BLE001 - one destination's bug must not block the rest
-            log.error("digest channel %s raised unexpectedly: %s", name, exc)
+            log.error("digest channel %s raised unexpectedly: %s", name, summarize_error(exc))
             results[name] = False
     return results
