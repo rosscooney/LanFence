@@ -499,6 +499,29 @@ def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
         allowlist.add(norm, "This host (running LAN Fence)", "auto-detected - LAN Fence trusts itself")
 
 
+def _join_device_context(
+    device: Device, *, review, presence, metadata: DeviceMetadata, allow_entry,
+) -> Device:
+    """The allowlist/review/presence/metadata join shared by
+    :func:`build_inventory` (bulk) and :func:`build_device` (one MAC) - the
+    single place this join is implemented, so `lanfence device`/`review`/
+    `allow` and anything else needing "this device's current joined state"
+    never reimplement their own slightly-different copy of it."""
+
+    return device.model_copy(
+        update={
+            "allowlisted": allow_entry is not None,
+            "allowlist_name": allow_entry.name if allow_entry else None,
+            "review_state": review.state,
+            "review_notes": review.notes,
+            "snoozed_until": review.snoozed_until,
+            "presence_policy": presence.policy,
+            "offline_after_seconds": presence.offline_after_seconds,
+            "metadata": metadata,
+        }
+    )
+
+
 def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
     """Every previously observed device, with current allowlist/review/
     presence/metadata state joined in. Does not perform a scan - purely a
@@ -512,27 +535,37 @@ def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
 
     devices = store.all_devices()
     metadata_by_mac = store.device_metadata_for_macs([d.mac for d in devices])
-    inventory: list[Device] = []
-    for device in devices:
-        review = store.get_review(device.mac)
-        presence = store.get_presence(device.mac)
-        allow_entry = allowlist.match(device.mac)
-        metadata = metadata_by_mac.get(device.mac) or DeviceMetadata(mac=device.mac)
-        inventory.append(
-            device.model_copy(
-                update={
-                    "allowlisted": allow_entry is not None,
-                    "allowlist_name": allow_entry.name if allow_entry else None,
-                    "review_state": review.state,
-                    "review_notes": review.notes,
-                    "snoozed_until": review.snoozed_until,
-                    "presence_policy": presence.policy,
-                    "offline_after_seconds": presence.offline_after_seconds,
-                    "metadata": metadata,
-                }
-            )
+    return [
+        _join_device_context(
+            device,
+            review=store.get_review(device.mac),
+            presence=store.get_presence(device.mac),
+            metadata=metadata_by_mac.get(device.mac) or DeviceMetadata(mac=device.mac),
+            allow_entry=allowlist.match(device.mac),
         )
-    return inventory
+        for device in devices
+    ]
+
+
+def build_device(store: DeviceStore, allowlist: Allowlist, mac: str) -> Device | None:
+    """The single-device equivalent of :func:`build_inventory` - the same
+    allowlist/review/presence/metadata join, for exactly one MAC. ``None``
+    if this MAC has never been observed. Used by `lanfence device`/
+    `review`/`allow` (and :mod:`lanfence.dossier`) so each doesn't
+    reimplement this join separately - see :func:`_join_device_context`.
+    """
+
+    mac = normalize_mac(mac)
+    raw_device = store.get_device(mac)
+    if raw_device is None:
+        return None
+    return _join_device_context(
+        raw_device,
+        review=store.get_review(mac),
+        presence=store.get_presence(mac),
+        metadata=store.get_device_metadata(mac),
+        allow_entry=allowlist.match(mac),
+    )
 
 
 def is_review_needed(device: Device, *, now: datetime) -> bool:

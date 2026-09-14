@@ -69,6 +69,69 @@ def test_allow_remove_existing(config_path: Path):
     assert "removed" in result.stdout
 
 
+# --- allow: interactive device-context confirmation -------------------------
+
+
+def test_allow_interactive_shows_dossier_before_confirming_known_device(config_path: Path):
+    _seed_devices(config_path)  # 11:22:33:44:55:66 is already observed, not yet trusted
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["allow", "11:22:33:44:55:66", "--config", str(config_path)], input="y\n",
+        )
+    assert result.exit_code == 0, result.output
+    assert "Espressif Inc." in result.output  # dossier context shown before the prompt
+    assert "Trust 11:22:33:44:55:66?" in result.output
+    assert "added:" in result.output.lower()
+
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "11:22:33:44:55:66" in listing.output
+
+
+def test_allow_interactive_decline_makes_no_changes(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["allow", "11:22:33:44:55:66", "--config", str(config_path)], input="n\n",
+        )
+    assert result.exit_code == 0, result.output
+    assert "cancelled" in result.output.lower()
+
+    listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
+    assert "11:22:33:44:55:66" not in listing.output
+
+
+def test_allow_interactive_unknown_device_skips_confirmation(config_path: Path):
+    # A MAC never observed has no dossier to show - adding it directly (the
+    # existing behavior) must still work unprompted even when interactive.
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["allow", "aa:11:22:33:44:55", "--name", "New Thing", "--config", str(config_path)],
+        )
+    assert result.exit_code == 0, result.output
+    assert "added" in result.output.lower()
+
+
+def test_allow_yes_flag_skips_confirmation_even_when_interactive(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["allow", "11:22:33:44:55:66", "--yes", "--config", str(config_path)],
+        )
+    assert result.exit_code == 0, result.output
+    assert "Trust 11:22:33:44:55:66?" not in result.output
+    assert "added" in result.output.lower()
+
+
+def test_allow_noninteractive_never_prompts_for_known_device(config_path: Path):
+    # CliRunner's stdin is never a tty - scripted/cron use must be completely
+    # unaffected by the new confirmation, with no _stdin_is_interactive patch.
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["allow", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert "Trust 11:22:33:44:55:66?" not in result.output
+    assert "added" in result.output.lower()
+
+
 def test_reset_noninteractive_without_yes_fails_helpfully(config_path: Path):
     _seed_devices(config_path)
     # No mock of _stdin_is_interactive - CliRunner's stdin is never a tty,
@@ -463,6 +526,61 @@ def test_scan_no_ipv6_flag_disables_ipv6_scanning(config_path: Path):
         runner.invoke(app, ["scan", "--no-ipv6", "--config", str(config_path)])
     passed_cfg = sweep_mock.call_args.args[0]
     assert passed_cfg.scan.ipv6 is False
+
+
+# --- scan: first-run triage summary -----------------------------------------
+
+
+def _scan_with_sightings(config_path: Path, monkeypatch, sightings, *, extra_args=()):
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: sightings)
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.scanner.local_mac", lambda iface=None: None)
+    return runner.invoke(app, ["scan", "--no-ipv6", *extra_args, "--config", str(config_path)])
+
+
+def test_scan_table_output_shows_triage_summary(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    sightings = [
+        scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now()),  # Sonos, straightforward
+        scanner_module.ArpSighting(mac="00:11:22:33:44:55", ip="10.0.0.11", seen_at=_now()),  # unknown vendor
+        scanner_module.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.12", seen_at=_now()),  # locally administered
+        scanner_module.ArpSighting(mac="b8:27:eb:11:22:33", ip="10.0.0.13", seen_at=_now()),  # raspberry pi
+    ]
+    result = _scan_with_sightings(config_path, monkeypatch, sightings)
+    assert result.exit_code == 0, result.output
+    assert "LAN Fence has discovered 4 devices." in result.output
+    assert "None have been reviewed yet." in result.output
+    assert "Run `lanfence review` to work through them." in result.output
+
+
+def test_scan_json_output_omits_triage_summary_and_stays_stable(config_path: Path, monkeypatch):
+    import json
+
+    from lanfence import scanner as scanner_module
+
+    sightings = [scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())]
+    result = _scan_with_sightings(config_path, monkeypatch, sightings, extra_args=["--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert "LAN Fence has discovered" not in result.output
+
+    lines = result.output.strip().splitlines()
+    json_start = next(i for i, ln in enumerate(lines) if ln.strip().startswith("{"))
+    data = json.loads("\n".join(lines[json_start:]))
+    assert set(data.keys()) == {
+        "started_at", "ended_at", "interface", "subnet", "mode", "devices", "events", "findings", "errors",
+    }
+
+
+def test_scan_triage_summary_reflects_already_trusted_devices(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    sightings = [scanner_module.ArpSighting(mac="aa:11:22:33:44:55", ip="10.0.0.20", seen_at=_now())]
+    runner.invoke(app, ["allow", "aa:11:22:33:44:55", "--name", "Trusted Thing", "--config", str(config_path)])
+    result = _scan_with_sightings(config_path, monkeypatch, sightings)
+    assert result.exit_code == 0, result.output
+    assert "1 of 1 have been reviewed." in result.output or "All devices have been reviewed." in result.output
 
 
 def test_monitor_no_ipv6_flag_is_reflected_in_banner(config_path: Path, monkeypatch):
@@ -1810,6 +1928,35 @@ def test_review_interactive_investigate_flow(config_path: Path):
     assert review.notes == "looks odd"
 
 
+def test_review_interactive_shows_compact_dossier_before_the_action_menu(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["review", "--config", str(config_path)], input="k\n")
+    assert result.exit_code == 0
+    assert "Device 1 of 1" in result.output
+    assert "Likely device:" in result.output
+    assert "Actions: [T]rust  [I]nvestigate  [S]nooze  [D] Full details  [N]ext  [Q]uit" in result.output
+
+
+def test_review_interactive_full_details_shows_full_dossier_then_returns_to_menu(config_path: Path):
+    _seed_devices(config_path)
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["review", "--config", str(config_path)],
+            input="d\nk\n",
+        )
+    assert result.exit_code == 0
+    # render_device_detail's full-report content, not just the compact glance
+    assert "Inventory details" in result.output
+    assert "  skipped." in result.output
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    store = DeviceStore(cfg_dict["db_path"])
+    review = store.get_review("11:22:33:44:55:66")
+    store.close()
+    assert review.state == "pending"  # viewing details makes no decision by itself
+
+
 def test_review_interactive_skip_makes_no_changes(config_path: Path):
     _seed_devices(config_path)
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
@@ -1831,7 +1978,12 @@ def test_review_interactive_quit_preserves_earlier_decisions(config_path: Path):
     store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=now)
     store.close()
 
-    # queue order is by MAC ascending: 11:22:... comes before aa:bb:...
+    # Queue order is by review priority (see lanfence.dossier.review_priority),
+    # not MAC order: aa:bb:cc:dd:ee:ff's first octet has the U/L bit set (a
+    # locally administered/randomized MAC, the weakest identity evidence -
+    # "Priority", rank 1) so it sorts before 11:22:33:44:55:66 (no vendor/
+    # hostname at all but a vendor-assigned-looking MAC - "Needs
+    # identification", rank 2).
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
             app, ["review", "--config", str(config_path)],
@@ -1841,8 +1993,8 @@ def test_review_interactive_quit_preserves_earlier_decisions(config_path: Path):
     assert "stopping review" in result.output.lower()
 
     store = DeviceStore(cfg_dict["db_path"])
-    first_review = store.get_review("11:22:33:44:55:66")
-    second_review = store.get_review("aa:bb:cc:dd:ee:ff")
+    first_review = store.get_review("aa:bb:cc:dd:ee:ff")
+    second_review = store.get_review("11:22:33:44:55:66")
     store.close()
     assert first_review.state == "investigating"  # decision before quit preserved
     assert second_review.state == "pending"  # never reached

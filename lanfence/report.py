@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from lanfence.classify import DeviceClassification
+from lanfence.dossier import DeviceDossier, TriageSummary
 from lanfence.models import (
     AddressEvidence,
     AdvertisedService,
@@ -181,6 +183,58 @@ def _plain_summary(result: ScanResult) -> list[str]:
     return lines
 
 
+def render_triage_summary(summary: TriageSummary) -> str:
+    """Orientation counts shown once after `lanfence scan`, separate from
+    the compact device table (see :mod:`lanfence.dossier`'s module
+    docstring) - a plain-language "what deserves a look" breakdown, never
+    a numeric risk score, e.g.::
+
+        LAN Fence has discovered 47 devices.
+
+         31 appear straightforward
+          9 need identification
+          5 use private/randomised MAC addresses
+          2 have higher-priority security characteristics
+
+        None have been reviewed yet.
+
+        Run `lanfence review` to work through them.
+
+    Categories with a zero count are omitted rather than padded out with
+    "0 ..." lines nobody needs to read. Returns "" (nothing to show) when
+    ``summary.total`` is 0 - a brand-new, empty inventory.
+    """
+
+    if summary.total <= 0:
+        return ""
+
+    buckets = [
+        (summary.straightforward, "appear straightforward"),
+        (summary.needs_identification, "need identification"),
+        (summary.private_mac, "use private/randomised MAC addresses"),
+        (summary.security_flagged, "have higher-priority security characteristics"),
+    ]
+    buckets = [(count, label) for count, label in buckets if count > 0]
+    width = max((len(str(count)) for count, _ in buckets), default=1)
+
+    lines = [f"LAN Fence has discovered {summary.total} device{'s' if summary.total != 1 else ''}.", ""]
+    lines.extend(f"{str(count).rjust(width)} {label}" for count, label in buckets)
+    lines.append("")
+
+    if summary.reviewed <= 0:
+        lines.append("None have been reviewed yet.")
+    elif summary.pending <= 0:
+        lines.append("All devices have been reviewed.")
+    else:
+        lines.append(f"{summary.reviewed} of {summary.total} have been reviewed.")
+
+    if summary.pending > 0:
+        lines.append("")
+        lines.append("Run `lanfence review` to work through them.")
+
+    return "\n".join(lines)
+
+
 def render_events(events: list[DeviceEvent], *, plain: bool = False) -> str:
     lines = [f"Events: {len(events)}"]
     for event in events:
@@ -337,6 +391,103 @@ def render_device_inventory(
         table.add_row(*row)
     console.print(table)
     return text
+
+
+def _classification_lines(classification: DeviceClassification, *, escape: bool = False) -> list[str]:
+    """Plain-text "Likely device" block shared by `render_device_detail`
+    and the compact review-queue dossier - a conservative, confidence-
+    labeled guess, never presented as fact. ``escape`` applies Rich markup
+    escaping for the rich-console render path."""
+
+    esc = _rich_escape if escape else (lambda s: s)
+    if not classification.is_known:
+        return [f"Likely device: {esc(classification.device_type)} (no supporting evidence)"]
+    lines = [
+        f"Likely device: {esc(classification.device_type)}",
+        f"Confidence:    {classification.confidence.capitalize()}",
+    ]
+    for reason in classification.reasons:
+        lines.append(f"  - {esc(reason)}")
+    return lines
+
+
+def _dossier_evidence_lines(dossier: DeviceDossier) -> list[str]:
+    """Short, source-labeled evidence bullets for the compact review
+    dossier - each traces to a specific retained observation (never a
+    fabricated claim); see :meth:`DeviceDossier.observed_services_summary`
+    for the separate "what does it advertise" list."""
+
+    lines: list[str] = []
+    for name in dossier.names:
+        if name.source == "dhcp_option_12":
+            lines.append(f"DHCP hostname: {name.name}")
+        elif name.source == "reverse_dns":
+            lines.append(f"Reverse DNS: {name.name}")
+    for service in dossier.services:
+        if service.status != "current":
+            continue
+        if service.protocol == "mdns" and service.instance_name:
+            lines.append(f"mDNS: {service.instance_name}")
+        elif service.protocol == "ssdp" and service.server:
+            lines.append(f"SSDP server (advertised claim): {service.server}")
+    if dossier.device.vendor:
+        lines.append(f"OUI: {dossier.device.vendor}")
+    if dossier.is_locally_administered_mac:
+        lines.append("MAC is locally administered (randomized or manually set) - no vendor to identify")
+    return lines
+
+
+def render_dossier_compact(
+    dossier: DeviceDossier, *, index: int | None = None, total: int | None = None,
+    priority_label: str | None = None,
+) -> str:
+    """The compact per-device view shown by the interactive `lanfence
+    review` queue before asking what to do - progressive disclosure over
+    :func:`render_device_detail`'s full report: just enough to answer "what
+    is this, and does it deserve a closer look" (see
+    :meth:`DeviceDossier.label` for the name preference, and
+    :mod:`lanfence.classify` for the classification's own caveats).
+    ``index``/``total`` (1-based) add a "Device N of M" header when given;
+    ``priority_label`` (see :func:`lanfence.dossier.review_priority`) is
+    shown alongside it, not as a numeric score.
+    """
+
+    lines: list[str] = []
+    if index is not None and total is not None:
+        header = f"Device {index} of {total}"
+        if priority_label:
+            header += f"  ·  {priority_label}"
+        lines.append(header)
+        lines.append("─" * max(len(header), 24))
+        lines.append("")
+
+    lines.append(dossier.label)
+    if dossier.device.ip:
+        lines.append(dossier.device.ip)
+    if dossier.device.vendor:
+        lines.append(dossier.device.vendor)
+
+    lines.append("")
+    lines.extend(_classification_lines(dossier.classification))
+
+    lines.append("")
+    lines.append(f"First seen: {dossier.device.first_seen.strftime('%d %b %Y %H:%M')}")
+    lines.append(f"Last seen:  {dossier.device.last_seen.strftime('%d %b %Y %H:%M')}")
+    lines.append(f"Status:     {dossier.device.status.capitalize()}")
+
+    services = dossier.observed_services_summary
+    if services:
+        lines.append("")
+        lines.append("Observed / advertised services:")
+        lines.extend(f"  - {s}" for s in services)
+
+    evidence = _dossier_evidence_lines(dossier)
+    if evidence:
+        lines.append("")
+        lines.append("Evidence:")
+        lines.extend(f"  - {e}" for e in evidence)
+
+    return "\n".join(lines)
 
 
 _ADDRESS_SOURCE_LABELS = {
@@ -542,6 +693,7 @@ def render_device_detail(
     default_offline_after_seconds: float | None = None,
     addresses: list[AddressEvidence] | None = None, names: list[NameEvidence] | None = None,
     services: list[AdvertisedService] | None = None,
+    classification: DeviceClassification | None = None,
 ) -> str:
     """Render ``lanfence device <mac>`` - current (preferred) details, all
     retained address/name evidence, advertised-service evidence, then the
@@ -555,7 +707,10 @@ def render_device_detail(
     skip that section entirely (e.g. a caller that hasn't fetched it).
     ``services`` (see :meth:`lanfence.db.DeviceStore.advertised_services`)
     are device-advertised claims, never verified capabilities or proof of
-    reachability - omit (``None``) the same way.
+    reachability - omit (``None``) the same way. ``classification`` (see
+    :mod:`lanfence.classify`) is a conservative, confidence-labeled "likely
+    device" guess - omit to skip that line entirely rather than show a
+    misleading "Unknown device" for a caller that never computed one.
     """
 
     trust = f"trusted ({device.allowlist_name})" if device.allowlisted else "untrusted"
@@ -577,6 +732,10 @@ def render_device_detail(
         lines.append(f"  Notes:      {device.review_notes}")
     if device.fingerprints:
         lines.append(f"  Fingerprint signals: {', '.join(device.fingerprints)}")
+
+    if classification is not None:
+        lines.append("")
+        lines.extend(_classification_lines(classification))
 
     metadata = device.metadata or DeviceMetadata(mac=device.mac)
     lines.append("")
@@ -636,6 +795,9 @@ def render_device_detail(
     if device.fingerprints:
         detail_lines.append(f"Fingerprint signals: {_rich_escape(', '.join(device.fingerprints))}")
     console.print(Panel("\n".join(detail_lines), title=f"Device {device.mac}"))
+
+    if classification is not None:
+        console.print(Panel("\n".join(_classification_lines(classification, escape=True)), title="Likely device"))
 
     console.print(
         Panel(

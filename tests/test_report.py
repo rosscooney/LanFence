@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from lanfence.classify import DeviceClassification
+from lanfence.dossier import DeviceDossier, TriageSummary
 from lanfence.models import (
     AdvertisedService,
     Device,
@@ -12,6 +14,7 @@ from lanfence.models import (
     DigestDeviceEntry,
     DigestSection,
     Finding,
+    NameEvidence,
     ScanResult,
 )
 from lanfence.report import (
@@ -23,8 +26,10 @@ from lanfence.report import (
     render_device_detail,
     render_device_inventory,
     render_digest,
+    render_dossier_compact,
     render_findings,
     render_scan_result,
+    render_triage_summary,
     review_status_label,
 )
 
@@ -394,6 +399,166 @@ def test_render_device_detail_txt_attributes_labeled_as_claims():
     text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True, services=[svc])
     assert "model=Widget9000" in text
     assert "unverified" in text.lower()
+
+
+# --- classification rendering (render_device_detail / render_dossier_compact) --
+
+
+def test_render_device_detail_shows_classification_when_given():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    classification = DeviceClassification(device_type="Sonos speaker", confidence="high", reasons=["Vendor OUI: Sonos, Inc."])
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True, classification=classification)
+    assert "Likely device: Sonos speaker" in text
+    assert "Confidence:    High" in text
+    assert "Vendor OUI: Sonos, Inc." in text
+
+
+def test_render_device_detail_unknown_classification_says_no_supporting_evidence():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, classification=DeviceClassification(),
+    )
+    assert "Likely device: Unknown device (no supporting evidence)" in text
+
+
+def test_render_device_detail_omits_classification_when_not_given():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Likely device:" not in text
+
+
+# --- render_dossier_compact (the `lanfence review` queue's per-device glance) --
+
+
+def _dossier_for_report(**overrides) -> DeviceDossier:
+    now = _now()
+    device = overrides.pop("device", None) or Device(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", vendor="Sonos, Inc.", hostname="living-room-sonos",
+        first_seen=now, last_seen=now,
+    )
+    base = dict(
+        device=device,
+        classification=DeviceClassification(device_type="Sonos speaker", confidence="high", reasons=["Vendor OUI: Sonos, Inc."]),
+        fingerprint_matches=[],
+        is_locally_administered_mac=False,
+    )
+    base.update(overrides)
+    return DeviceDossier(**base)
+
+
+def test_render_dossier_compact_shows_header_with_index_and_priority():
+    text = render_dossier_compact(_dossier_for_report(), index=3, total=18, priority_label="Priority")
+    assert "Device 3 of 18" in text
+    assert "Priority" in text
+
+
+def test_render_dossier_compact_omits_header_without_index_and_total():
+    text = render_dossier_compact(_dossier_for_report())
+    assert "Device" not in text.splitlines()[0]
+
+
+def test_render_dossier_compact_shows_label_ip_and_vendor():
+    text = render_dossier_compact(_dossier_for_report())
+    assert "living-room-sonos" in text
+    assert "10.0.0.5" in text
+    assert "Sonos, Inc." in text
+
+
+def test_render_dossier_compact_shows_classification_and_first_last_seen_and_status():
+    text = render_dossier_compact(_dossier_for_report())
+    assert "Likely device: Sonos speaker" in text
+    assert "Confidence:    High" in text
+    assert "First seen:" in text
+    assert "Last seen:" in text
+    assert "Status:     Online" in text
+
+
+def test_render_dossier_compact_shows_observed_services():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    dossier = _dossier_for_report(device=device, services=[_service(service_label="AirPlay")])
+    text = render_dossier_compact(dossier)
+    assert "Observed / advertised services:" in text
+    assert "AirPlay" in text
+
+
+def test_render_dossier_compact_omits_services_section_when_none():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_dossier_compact(_dossier_for_report(device=device))
+    assert "Observed / advertised services:" not in text
+
+
+def test_render_dossier_compact_shows_evidence_bullets():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", vendor="Sonos, Inc.", first_seen=now, last_seen=now)
+    names = [NameEvidence(mac=device.mac, name="office-hub", name_key="office-hub",
+                          source="dhcp_option_12", first_seen=now, last_seen=now)]
+    dossier = _dossier_for_report(device=device, names=names)
+    text = render_dossier_compact(dossier)
+    assert "Evidence:" in text
+    assert "DHCP hostname: office-hub" in text
+    assert "OUI: Sonos, Inc." in text
+
+
+def test_render_dossier_compact_shows_locally_administered_mac_evidence():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    dossier = _dossier_for_report(device=device, classification=DeviceClassification(), is_locally_administered_mac=True)
+    text = render_dossier_compact(dossier)
+    assert "MAC is locally administered" in text
+
+
+# --- render_triage_summary (the post-scan orientation summary) -------------
+
+
+def test_render_triage_summary_matches_expected_shape():
+    summary = TriageSummary(
+        total=47, straightforward=31, needs_identification=9, private_mac=5, security_flagged=2, reviewed=0,
+    )
+    text = render_triage_summary(summary)
+    assert "LAN Fence has discovered 47 devices." in text
+    assert "31 appear straightforward" in text
+    assert "9 need identification" in text
+    assert "5 use private/randomised MAC addresses" in text
+    assert "2 have higher-priority security characteristics" in text
+    assert "None have been reviewed yet." in text
+    assert "Run `lanfence review` to work through them." in text
+
+
+def test_render_triage_summary_singular_device_wording():
+    summary = TriageSummary(total=1, straightforward=1, reviewed=0)
+    text = render_triage_summary(summary)
+    assert "LAN Fence has discovered 1 device." in text
+
+
+def test_render_triage_summary_omits_zero_count_categories():
+    summary = TriageSummary(total=2, straightforward=2, reviewed=0)
+    text = render_triage_summary(summary)
+    assert "need identification" not in text
+    assert "private/randomised" not in text
+    assert "security characteristics" not in text
+
+
+def test_render_triage_summary_all_reviewed_message_and_no_hint():
+    summary = TriageSummary(total=3, straightforward=3, reviewed=3)
+    text = render_triage_summary(summary)
+    assert "All devices have been reviewed." in text
+    assert "lanfence review" not in text
+
+
+def test_render_triage_summary_partial_review_progress_message():
+    summary = TriageSummary(total=4, straightforward=2, needs_identification=2, reviewed=1)
+    text = render_triage_summary(summary)
+    assert "1 of 4 have been reviewed." in text
+    assert "Run `lanfence review` to work through them." in text
+
+
+def test_render_triage_summary_empty_inventory_returns_empty_string():
+    assert render_triage_summary(TriageSummary()) == ""
 
 
 # --- render_advertised_services (the `lanfence services` command) ---------

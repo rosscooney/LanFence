@@ -55,8 +55,10 @@ from lanfence.dhcp_server import (
     process_dhcp_server_sighting,
 )
 from lanfence.digest import build_digest, dispatch_digest
+from lanfence.dossier import TriageSummary, build_device_dossier, build_triage_summary, review_priority
 from lanfence.engine import (
     apply_self_trust,
+    build_device,
     build_findings,
     build_inventory,
     filter_rate_limited,
@@ -79,10 +81,12 @@ from lanfence.report import (
     render_channels_table,
     render_device_detail,
     render_device_inventory,
+    render_dossier_compact,
     render_digest,
     render_events,
     render_findings,
     render_scan_result,
+    render_triage_summary,
 )
 from lanfence.vendor import format_vendor_table, parse_ieee_oui_csv
 
@@ -363,6 +367,7 @@ def scan(
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=interface or cfg.scan.interface)
 
+    triage: Optional[TriageSummary] = None
     with DeviceStore(cfg.resolved_db_path()) as store:
         result = run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
         if alert:
@@ -370,10 +375,31 @@ def scan(
             to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
             alerts.dispatch(to_send, cfg.alerts)
 
+        if output_format != "json":
+            # First-run/ongoing triage orientation over the *whole* known
+            # inventory (not just devices seen in this sweep) - see
+            # lanfence.dossier.build_triage_summary. Deliberately not part
+            # of the JSON payload: it's a derived, human-facing summary,
+            # not new scan data, and JSON output stays exactly ScanResult.
+            now = utcnow()
+            inventory = build_inventory(store, allowlist)
+            dossiers = [
+                build_device_dossier(
+                    store, allowlist, d.mac, signatures=signatures, vendor_file=cfg.vendor_file,
+                    now=now, device=d,
+                )
+                for d in inventory
+            ]
+            triage = build_triage_summary(dossiers, now=now)
+
     if output_format == "json":
         typer.echo(result.to_json())
     else:
         render_scan_result(result)
+        summary_text = render_triage_summary(triage) if triage is not None else ""
+        if summary_text:
+            typer.echo("")
+            typer.echo(summary_text)
 
     if fail_on_findings:
         raise typer.Exit(code=exit_code_for(result))
@@ -1083,6 +1109,9 @@ def allow(
     notes: Optional[str] = typer.Option(None, "--notes", help="Freeform notes."),
     list_entries: bool = typer.Option(False, "--list", help="Show current allowlist entries."),
     remove: Optional[str] = typer.Option(None, "--remove", help="MAC address to remove from the allowlist."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the device-context confirmation prompt (for scripted use)."
+    ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
     """Manage the allowlist of devices you trust.
@@ -1090,6 +1119,14 @@ def allow(
     Findings about an allowlisted device are downgraded to *info*, so your own
     hardware stops shouting every time it reconnects. With no MAC and no
     options, lists the current entries.
+
+    When run at an interactive terminal for a MAC LAN Fence has already
+    observed, shows a compact device dossier (what it likely is, and why)
+    before asking you to confirm - the same context `lanfence review`
+    shows, so you're not trusting a device on the strength of its MAC
+    address alone. Pass `--yes` to skip this (or simply run
+    noninteractively, e.g. from a script or cron job - no prompt ever
+    appears there, exactly as before).
     """
 
     cfg = _load_config(config)
@@ -1115,6 +1152,27 @@ def allow(
             tail = f"  {e.notes}" if e.notes else ""
             typer.echo(f"  {i:>3}. {e.name:<28}  {e.mac}{tail}")
         return
+
+    if not yes and _stdin_is_interactive():
+        try:
+            norm_mac = normalize_mac(mac)
+        except ValueError:
+            norm_mac = None
+        if norm_mac is not None:
+            with DeviceStore(cfg.resolved_db_path()) as store:
+                already_known = store.get_device(norm_mac) is not None
+                dossier = None
+                if already_known:
+                    dossier = build_device_dossier(
+                        store, al, norm_mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+                        vendor_file=cfg.vendor_file,
+                    )
+            if dossier is not None:
+                typer.echo(render_dossier_compact(dossier))
+                typer.echo("")
+                if not typer.confirm(f"Trust {norm_mac}?", default=True):
+                    typer.echo("cancelled - nothing changed.")
+                    return
 
     entry = al.add(mac, name or mac, notes or "")
     al.save()
@@ -1425,31 +1483,18 @@ def device(
     now = utcnow()
 
     with DeviceStore(cfg.resolved_db_path()) as store:
-        raw_device = store.get_device(norm_mac)
-        if raw_device is None:
+        dev = build_device(store, allowlist, norm_mac)
+        if dev is None:
             typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
             raise typer.Exit(code=2)
-        review = store.get_review(norm_mac)
-        presence_state = store.get_presence(norm_mac)
-        metadata = store.get_device_metadata(norm_mac)
         events = store.events_for(norm_mac, since=since_dt)
         addresses = store.address_evidence_for(norm_mac)
         names = store.name_evidence_for(norm_mac)
         services = store.advertised_services(mac=norm_mac, now=now)
-
-    allow_entry = allowlist.match(norm_mac)
-    dev = raw_device.model_copy(
-        update={
-            "allowlisted": allow_entry is not None,
-            "allowlist_name": allow_entry.name if allow_entry else None,
-            "review_state": review.state,
-            "review_notes": review.notes,
-            "snoozed_until": review.snoozed_until,
-            "presence_policy": presence_state.policy,
-            "offline_after_seconds": presence_state.offline_after_seconds,
-            "metadata": metadata,
-        }
-    )
+        dossier = build_device_dossier(
+            store, allowlist, norm_mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+            vendor_file=cfg.vendor_file, now=now, device=dev, addresses=addresses, names=names, services=services,
+        )
 
     if output_format == "json":
         payload = {
@@ -1459,12 +1504,18 @@ def device(
             "addresses": [a.model_dump(mode="json") for a in addresses],
             "names": [n.model_dump(mode="json") for n in names],
             "services": [s.model_dump(mode="json") for s in services],
+            # Additive - existing keys/shapes above are unchanged. A
+            # conservative, confidence-labeled guess (see
+            # lanfence.classify) and the fingerprint signatures currently
+            # matching this device, never presented as verified fact.
+            "classification": dossier.classification.model_dump(mode="json"),
+            "fingerprint_matches": [m.model_dump(mode="json") for m in dossier.fingerprint_matches],
         }
         typer.echo(json.dumps(payload, indent=2))
     else:
         render_device_detail(
             dev, events, since_dt, now=now, default_offline_after_seconds=cfg.scan.offline_grace_seconds,
-            addresses=addresses, names=names, services=services,
+            addresses=addresses, names=names, services=services, classification=dossier.classification,
         )
 
 
@@ -1492,6 +1543,8 @@ def _run_interactive_review(cfg: Config) -> None:
     allowlist = Allowlist.load(allowlist_path)
     allowlist.path = allowlist_path
 
+    signatures = SignatureSet.load(cfg.rogue_signatures_file)
+
     with DeviceStore(cfg.resolved_db_path()) as store:
         now = utcnow()
         # A separate copy (never saved) just for building the queue, so
@@ -1504,33 +1557,49 @@ def _run_interactive_review(cfg: Config) -> None:
 
         # A stable snapshot taken once at the start - a decision made on one
         # device (trust/snooze/investigate) never reshuffles or reintroduces
-        # others later in the same session.
-        queue = sorted(
-            (d for d in build_inventory(store, display_allowlist) if is_review_needed(d, now=now)),
-            key=lambda d: d.mac,
-        )
+        # others later in the same session. Ordered by review priority (see
+        # `lanfence.dossier.review_priority`) - stronger security signals
+        # and weaker identity evidence first, MAC as the deterministic
+        # tie-break, never a numeric risk score.
+        candidates = [d for d in build_inventory(store, display_allowlist) if is_review_needed(d, now=now)]
+        dossiers = [
+            build_device_dossier(store, display_allowlist, d.mac, signatures=signatures,
+                                  vendor_file=cfg.vendor_file, now=now, device=d)
+            for d in candidates
+        ]
+        queue = sorted(dossiers, key=lambda dos: (review_priority(dos)[0], dos.device.mac))
 
         if not queue:
             typer.secho("Nothing needs review.", fg="green")
             return
 
         typer.secho(f"{len(queue)} device(s) need review.\n", fg="cyan", bold=True)
-        for dev in queue:
-            typer.secho(f"Device: {dev.mac}", fg="cyan", bold=True)
-            typer.echo(
-                f"  IP: {dev.ip or '[unknown]'}   Hostname: {dev.hostname or '[unknown]'}   "
-                f"Vendor: {dev.vendor or '[unknown]'}"
-            )
-            typer.echo(
-                f"  First seen: {dev.first_seen.isoformat(timespec='seconds')}   "
-                f"Last seen: {dev.last_seen.isoformat(timespec='seconds')}   Status: {dev.status}"
-            )
-            if dev.fingerprints:
-                typer.echo(f"  Fingerprint signals: {', '.join(dev.fingerprints)}")
+        total = len(queue)
+        for index, dossier in enumerate(queue, start=1):
+            dev = dossier.device
+            _rank, priority_label = review_priority(dossier)
 
-            action = typer.prompt(
-                "  [t]rust  [s]nooze  [i]nvestigate  s[k]ip  [q]uit", default="k"
-            ).strip().lower()
+            while True:
+                typer.echo(render_dossier_compact(dossier, index=index, total=total, priority_label=priority_label))
+                typer.echo("")
+                typer.secho(
+                    "Actions: [T]rust  [I]nvestigate  [S]nooze  [D] Full details  [N]ext  [Q]uit",
+                    fg="cyan",
+                )
+                action = typer.prompt("  choice", default="n").strip().lower()
+
+                if action in ("d", "details"):
+                    events = store.events_for(dev.mac, since=now - timedelta(days=30))
+                    typer.echo("")
+                    render_device_detail(
+                        dev, events, now - timedelta(days=30), now=now,
+                        default_offline_after_seconds=cfg.scan.offline_grace_seconds,
+                        addresses=dossier.addresses, names=dossier.names, services=dossier.services,
+                        classification=dossier.classification,
+                    )
+                    typer.echo("")
+                    continue
+                break
 
             if action in ("q", "quit"):
                 typer.echo("stopping review.")
