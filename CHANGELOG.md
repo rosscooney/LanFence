@@ -13,6 +13,17 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [0.4.4] - 2026-09-14
+
+### Fixed
+
+- Fixed a platform-dependent test failure on Linux CI (`OSError(errno,
+  ...)` auto-selects a specific subclass, e.g. `ConnectionRefusedError`,
+  when the errno maps to one on the current platform - a test asserted a
+  hardcoded base-class name). No functional code changed; 0.4.3's Tests
+  workflow failed on this alone after the package itself had already
+  published successfully.
+
 ## [0.4.3] - 2026-09-14
 
 ### Security
