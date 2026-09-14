@@ -37,9 +37,14 @@ def test_summarize_error_smtp_recipients_refused_never_leaks_recipient_dict():
 
 
 def test_summarize_error_oserror_with_errno_includes_errno_never_strerror():
+    # OSError(errno, ...) auto-selects a specific subclass (e.g.
+    # ConnectionRefusedError) when the errno maps to one on the current
+    # platform - errno *values* themselves differ across platforms too
+    # (111 is ECONNREFUSED on Linux, not on macOS), so assert against the
+    # exception actually constructed rather than a hardcoded class name.
     exc = OSError(111, f"{_SENTINEL} connection refused")
     result = summarize_error(exc)
-    assert result == "OSError (code 111)"
+    assert result == f"{type(exc).__name__} (code 111)"
     assert _SENTINEL not in result
 
 
