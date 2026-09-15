@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lanfence.config import Config
+from lanfence.config import DEFAULT_CONFIG_PATH, Config
 
 
 def test_defaults():
@@ -19,6 +19,27 @@ def test_defaults():
     assert cfg.alerts.min_severity == "medium"
     assert cfg.digest.channels == []
     assert cfg.digest.send_when_empty is False
+
+
+def test_load_none_falls_back_to_default_config_path_when_present(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 1000)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    default_path = Path(str(DEFAULT_CONFIG_PATH).replace("~", str(tmp_path), 1))
+    default_path.parent.mkdir(parents=True)
+    default_path.write_text(yaml.safe_dump({"digest": {"channels": ["email"]}}), encoding="utf-8")
+
+    cfg = Config.load(None)
+
+    assert cfg.digest.channels == ["email"]
+
+
+def test_load_none_uses_defaults_when_no_default_config_path_exists(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 1000)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    cfg = Config.load(None)
+
+    assert cfg == Config()
 
 
 def test_digest_channels_rejects_unsupported_name(tmp_path: Path):

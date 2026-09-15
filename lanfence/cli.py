@@ -2423,8 +2423,9 @@ def _channels_new_file_notice(path: Path, existed: bool, explicit_config: Option
     if explicit_config is None:
         typer.echo(
             "No --config was given, so this uses LAN Fence's default per-user configuration "
-            f"location ({DEFAULT_CONFIG_PATH}). Pass --config {path} (or move the file there) "
-            "for `lanfence monitor` and other commands to use it."
+            f"location ({DEFAULT_CONFIG_PATH}), which every command reads automatically when "
+            "present. If you plan to always pass --config elsewhere instead, pass it here too "
+            f"so this file is created at {path} to begin with."
         )
 
 

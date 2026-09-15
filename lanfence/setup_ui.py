@@ -183,8 +183,6 @@ def edit_field(raw, path):
         typer.echo("Seconds; also accepts durations such as 30s, 5m, 2h. Zero only where supported.")
     if field.annotation is int:
         typer.echo("Enter a whole number >= 1.")
-    if field.annotation is bool:
-        typer.echo("Allowed: yes / no")
     elif get_origin(field.annotation) is Literal:
         typer.echo("Allowed: " + ", ".join(get_args(field.annotation)))
     elif path == "digest.channels":
@@ -194,8 +192,15 @@ def edit_field(raw, path):
     typer.echo(f"Default: {safe_value(field.get_default(call_default_factory=True))}")
     if path in SECTIONS["Storage"]:
         typer.echo("Changing a path does not move or copy data. No files are created until normal use.")
+    if field.annotation is bool:
+        hint = "Y/n" if value_at(cfg, path) else "y/N"
+        prompt_label = f"{path.split('.')[-1]} [{hint}]"
+    else:
+        prompt_label = "Value"
     while True:
-        answer = typer.prompt("Value (blank keeps it; reset = default; back = return)", default="", show_default=False).strip()
+        answer = typer.prompt(
+            f"{prompt_label} (blank keeps it; reset = default; back = return)", default="", show_default=False
+        ).strip()
         if not answer or answer == "back":
             return raw
         try:

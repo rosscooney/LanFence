@@ -52,7 +52,7 @@ from typing import Any
 
 import yaml
 
-from lanfence.config import DIGEST_CHANNELS, Config, expand_operator_path
+from lanfence.config import DEFAULT_CONFIG_PATH, DIGEST_CHANNELS, Config, expand_operator_path
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import get_logger
 from lanfence.safe_errors import summarize_error
@@ -60,12 +60,10 @@ from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("channels")
 
-#: A conventional per-user path, chosen for this feature since LAN Fence has
-#: no other default *writable* configuration file location - every other
-#: command treats a missing ``--config`` as "use built-in defaults, touch no
-#: file" (see ``lanfence/cli.py``'s ``_load_config``). Mirrors
-#: ``allowlist_file``'s own default directory (``~/.config/lanfence/``).
-DEFAULT_CONFIG_PATH = Path("~/.config/lanfence/config.yaml")
+#: Imported above (not redefined here) so callers that reach it via
+#: ``lanfence.channels.DEFAULT_CONFIG_PATH`` (e.g. ``lanfence/cli.py``) and
+#: ``lanfence.config.Config.load`` (every command's own default lookup, not
+#: just `lanfence setup`) always agree on the exact same path.
 
 #: Every channel this wizard knows how to configure, in a stable display
 #: order. Matches ``AlertConfig``'s own sub-models one-to-one.

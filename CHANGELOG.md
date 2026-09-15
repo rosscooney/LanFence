@@ -39,8 +39,21 @@ Each release is also published to
   - `lanfence run` (alias for `scan`) and the new `lanfence update` (alias
     for `upgrade`) still work exactly as before/as their target command,
     but no longer clutter `--help`.
+  - Every command now reads `~/.config/lanfence/config.yaml` by default
+    when `--config` isn't given and that file exists (previously only
+    `lanfence setup`/`channels` did this; every other command silently
+    used only built-in defaults) - so a setting saved via `lanfence setup`
+    (e.g. digest email delivery) now actually takes effect for
+    `scan`/`monitor`/`digest`/etc. without needing `--config` on every
+    invocation.
 
 ### Fixed
+
+- `lanfence setup`'s yes/no settings (e.g. `dhcp_servers.enabled`) now
+  prompt as `<setting> [y/N]`/`[Y/n]` (showing the current value's
+  casing), instead of a generic "Value (blank keeps it...)" prompt that
+  gave no hint that blank input leaves the setting unchanged rather than
+  toggling it.
 
 - **`sudo lanfence channels`/`setup` and a plain invocation read/wrote
   different config files.** `lanfence channels`' default config path

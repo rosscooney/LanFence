@@ -41,6 +41,12 @@ def test_open_and_noop_save_never_create_file(tmp_path):
     transport.assert_not_called()
 
 
+def test_boolean_field_prompt_shows_yn_hint_for_current_value(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, '4\n1\nback\nback\nexit\n')
+    assert 'enabled [y/N]' in result.output
+
+
 def test_shared_draft_channel_and_scanning(tmp_path):
     path = tmp_path / 'config.yaml'
     result, transport = run_setup(path,

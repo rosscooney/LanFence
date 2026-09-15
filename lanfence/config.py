@@ -463,6 +463,15 @@ class RetentionConfig(BaseModel):
         return value
 
 
+#: LAN Fence's one conventional per-user config file location. Every
+#: command consults this when ``--config`` isn't given and it exists - so a
+#: setting saved via ``lanfence setup`` (which writes here by default) takes
+#: effect everywhere, not only for commands that were given ``--config``
+#: explicitly. With no ``--config`` and no file here, built-in defaults are
+#: used and no file is touched.
+DEFAULT_CONFIG_PATH = Path("~/.config/lanfence/config.yaml")
+
+
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -483,10 +492,20 @@ class Config(BaseModel):
 
     @classmethod
     def load(cls, path: Path | str | None) -> "Config":
-        """Load configuration from a YAML file, or return defaults if ``path`` is None."""
+        """Load configuration from a YAML file.
+
+        With no ``path``, falls back to :data:`DEFAULT_CONFIG_PATH` when it
+        exists - the same file `lanfence setup` writes to by default - so a
+        setting saved there is picked up everywhere without needing
+        ``--config`` on every command. Otherwise (no ``path``, and no file at
+        that default location) returns built-in defaults, touching no file.
+        """
 
         if path is None:
-            return cls()
+            default = expand_operator_path(DEFAULT_CONFIG_PATH)
+            if not default.is_file():
+                return cls()
+            path = default
         path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(f"config file not found: {path}")
