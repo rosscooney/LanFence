@@ -52,7 +52,7 @@ from typing import Any
 
 import yaml
 
-from lanfence.config import DIGEST_CHANNELS, Config
+from lanfence.config import DIGEST_CHANNELS, Config, expand_operator_path
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import get_logger
 from lanfence.safe_errors import summarize_error
@@ -436,7 +436,16 @@ class LoadedConfigFile:
 
 
 def resolve_channels_config_path(config: Path | None) -> Path:
-    return (config if config is not None else DEFAULT_CONFIG_PATH).expanduser()
+    """The config file this command will read/write - explicit ``--config``
+    if given, else :data:`DEFAULT_CONFIG_PATH`. Uses
+    :func:`lanfence.config.expand_operator_path`, not a bare
+    ``Path.expanduser()``, so ``sudo lanfence setup``/``channels`` resolves
+    ``~`` against the invoking operator's home directory (not root's) -
+    exactly like `Config.resolved_db_path`/`resolved_allowlist_file` -
+    otherwise a plain, unprivileged invocation and a `sudo`-run one would
+    silently read and write two different config files."""
+
+    return expand_operator_path(config if config is not None else DEFAULT_CONFIG_PATH)
 
 
 def load_channels_config_file(path: Path) -> LoadedConfigFile:

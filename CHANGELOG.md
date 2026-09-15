@@ -13,6 +13,19 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- **`sudo lanfence channels`/`setup` and a plain invocation read/wrote
+  different config files.** `lanfence channels`' default config path
+  (`~/.config/lanfence/config.yaml`) was still resolved with a bare
+  `Path.expanduser()`, missed by 0.4.2's `$HOME`-under-`sudo` fix (which
+  only covered `db_path`/`allowlist_file`) - so `sudo lanfence channels`
+  silently showed a completely different (usually empty/unconfigured) set
+  of channels than a plain `lanfence channels` run as yourself. Now uses
+  the same sudo-aware `Config.expand_operator_path`.
+
 ## [0.4.5] - 2026-09-14
 
 ### Fixed

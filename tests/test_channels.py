@@ -307,6 +307,26 @@ def test_resolve_channels_config_path_uses_given_path():
     assert resolve_channels_config_path(Path("/tmp/custom.yaml")) == Path("/tmp/custom.yaml")
 
 
+def test_resolve_channels_config_path_uses_sudo_user_home_when_run_as_root_via_sudo(monkeypatch):
+    """Regression test: sudo lanfence channels/setup and a plain,
+    unprivileged invocation must resolve the *same* default config file -
+    otherwise one silently reads/writes a completely different file (this
+    was previously only fixed for db_path/allowlist_file, not this path)."""
+
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    monkeypatch.setattr("pwd.getpwnam", lambda name: type("_pw", (), {"pw_dir": "/home/alice"})())
+    assert resolve_channels_config_path(None) == Path("/home/alice/.config/lanfence/config.yaml")
+
+
+def test_resolve_channels_config_path_not_root_ignores_sudo_user(monkeypatch):
+    monkeypatch.setattr("lanfence.config.os.geteuid", lambda: 1000)
+    monkeypatch.setenv("SUDO_USER", "alice")
+    from lanfence.channels import DEFAULT_CONFIG_PATH
+
+    assert resolve_channels_config_path(None) == DEFAULT_CONFIG_PATH.expanduser()
+
+
 def test_load_missing_file_reports_not_existed(tmp_path: Path):
     loaded = load_channels_config_file(tmp_path / "nonexistent.yaml")
     assert loaded.existed is False
