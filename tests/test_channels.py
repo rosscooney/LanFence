@@ -449,7 +449,7 @@ def test_test_message_refuses_when_disabled():
     ok, message = send_channel_test_message("slack", cfg)
     assert ok is False
     assert "disabled" in message
-    assert "enable slack" in message
+    assert "lanfence setup slack" in message
 
 
 def test_test_message_slack_success(monkeypatch):

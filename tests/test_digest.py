@@ -270,17 +270,16 @@ def test_digest_a_device_can_appear_in_multiple_sections(tmp_path: Path):
     assert digest.new_devices.items[0].mac == digest.needs_review.items[0].mac
 
 
-def test_digest_section_truncated_with_omitted_count(tmp_path: Path):
+def test_digest_section_lists_every_device_never_truncated(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         now = _now()
-        for i in range(5):
+        for i in range(25):
             store.observe(mac=f"aa:bb:cc:dd:ee:{i:02x}", ip=f"10.0.0.{i}", hostname=None, vendor=None, seen_at=now)
-        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now,
-                               max_devices_per_section=2)
+        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
 
-    assert digest.needs_review.total_count == 5
-    assert len(digest.needs_review.items) == 2
-    assert digest.needs_review.omitted_count == 3
+    assert digest.needs_review.total_count == 25
+    assert len(digest.needs_review.items) == 25
+    assert digest.needs_review.omitted_count == 0
 
 
 def test_digest_section_ordering_is_stable_by_mac(tmp_path: Path):

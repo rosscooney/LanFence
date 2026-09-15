@@ -223,15 +223,17 @@ def test_check_reports_existing_allowlist_file_unchanged(tmp_path: Path, config_
     assert "Router" in allowlist_file.read_text()
 
 
-def test_report_empty_db_json(config_path: Path):
-    result = runner.invoke(app, ["report", "--since", "24h", "--format", "json", "--config", str(config_path)])
+def test_digest_verbose_empty_db_json(config_path: Path):
+    result = runner.invoke(
+        app, ["digest", "--verbose", "--since", "24h", "--format", "json", "--config", str(config_path)]
+    )
     assert result.exit_code == 0
     assert '"events": []' in result.stdout
     assert '"findings": []' in result.stdout
 
 
-def test_report_bad_since_value(config_path: Path):
-    result = runner.invoke(app, ["report", "--since", "nonsense", "--config", str(config_path)])
+def test_digest_verbose_bad_since_value(config_path: Path):
+    result = runner.invoke(app, ["digest", "--verbose", "--since", "nonsense", "--config", str(config_path)])
     assert result.exit_code == 2
 
 
@@ -1310,7 +1312,7 @@ def _seed_devices(config_path: Path) -> None:
 
 
 def test_devices_empty_database(config_path: Path):
-    result = runner.invoke(app, ["devices", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--config", str(config_path)])
     assert result.exit_code == 0
     assert "database yet" in result.output.lower()
 
@@ -1318,7 +1320,7 @@ def test_devices_empty_database(config_path: Path):
 def _devices_json(config_path: Path, *extra_args: str) -> dict:
     import json
 
-    result = runner.invoke(app, ["devices", "--format", "json", *extra_args, "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--format", "json", *extra_args, "--config", str(config_path)])
     assert result.exit_code == 0, result.output
     return {d["mac"]: d for d in json.loads(result.output)}
 
@@ -1329,7 +1331,7 @@ def test_devices_lists_all_by_default(config_path: Path):
     assert set(by_mac) == {"aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66", "77:88:99:aa:bb:cc"}
 
     # the table format renders without crashing and reports the right count
-    result = runner.invoke(app, ["devices", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--config", str(config_path)])
     assert result.exit_code == 0
     assert "Devices (3)" in result.output
 
@@ -1370,14 +1372,14 @@ def test_devices_presence_filter(config_path: Path):
 
 
 def test_devices_rejects_invalid_presence(config_path: Path):
-    result = runner.invoke(app, ["devices", "--presence", "sometimes", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--presence", "sometimes", "--config", str(config_path)])
     assert result.exit_code == 2
     assert "presence" in result.output.lower()
 
 
 def test_devices_json_output(config_path: Path):
     _seed_devices(config_path)
-    result = runner.invoke(app, ["devices", "--format", "json", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--format", "json", "--config", str(config_path)])
     assert result.exit_code == 0
     import json
 
@@ -1389,13 +1391,13 @@ def test_devices_json_output(config_path: Path):
 
 
 def test_devices_rejects_invalid_status(config_path: Path):
-    result = runner.invoke(app, ["devices", "--status", "sideways", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--status", "sideways", "--config", str(config_path)])
     assert result.exit_code == 2
     assert "status" in result.output.lower()
 
 
 def test_devices_rejects_invalid_format(config_path: Path):
-    result = runner.invoke(app, ["devices", "--format", "xml", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--format", "xml", "--config", str(config_path)])
     assert result.exit_code == 2
 
 
@@ -1755,7 +1757,7 @@ def test_devices_details_flag_shows_metadata_columns(config_path: Path, monkeypa
     monkeypatch.setenv("COLUMNS", "200")
     _seed_devices(config_path)
     runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
-    result = runner.invoke(app, ["devices", "--details", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--details", "--config", str(config_path)])
     assert result.exit_code == 0
     assert "Alice" in result.output
     assert "Owner" in result.output
@@ -1764,7 +1766,7 @@ def test_devices_details_flag_shows_metadata_columns(config_path: Path, monkeypa
 def test_devices_default_table_omits_metadata_columns(config_path: Path):
     _seed_devices(config_path)
     runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
-    result = runner.invoke(app, ["devices", "--config", str(config_path)])
+    result = runner.invoke(app, ["device", "--config", str(config_path)])
     assert result.exit_code == 0
     assert "Alice" not in result.output
 
@@ -1784,7 +1786,7 @@ def test_review_trust_adds_to_allowlist_and_clears_review_flag(config_path: Path
     listing = runner.invoke(app, ["allow", "--list", "--config", str(config_path)])
     assert "Kitchen speaker" in listing.output
 
-    devices_result = runner.invoke(app, ["devices", "--format", "json", "--config", str(config_path)])
+    devices_result = runner.invoke(app, ["device", "--format", "json", "--config", str(config_path)])
     import json
 
     payload = {d["mac"]: d for d in json.loads(devices_result.output)}
@@ -2400,71 +2402,26 @@ def test_vendor_refresh_download_failure_never_leaks_a_crafted_http_reason(confi
     assert sentinel not in result.output
 
 
-# --- lanfence channels -------------------------------------------------
+# --- lanfence setup (formerly `lanfence channels setup`) --------------------
 
 
-def test_channels_bare_listing_empty(tmp_path: Path):
-    missing_config = tmp_path / "does-not-exist.yaml"
-    result = runner.invoke(app, ["channels", "--config", str(missing_config)])
-    assert result.exit_code == 0
-    assert "No configuration file at" in result.output
-    assert "slack" in result.output
-    assert "syslog" in result.output
-
-
-def test_channels_bare_listing_with_existing_file_shows_no_missing_file_notice(config_path: Path):
-    result = runner.invoke(app, ["channels", "--config", str(config_path)])
-    assert result.exit_code == 0
-    assert "No configuration file at" not in result.output
-
-
-def test_channels_bare_listing_no_network_calls(config_path: Path):
-    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
-        result = runner.invoke(app, ["channels", "--config", str(config_path)])
-    assert result.exit_code == 0
-    mock_urlopen.assert_not_called()
-
-
-def test_channels_bare_listing_shows_safe_summary_not_secret(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/services/T000/SECRETSECRET\n"
-        "    enabled: true\n"
-    )
-    result = runner.invoke(app, ["channels", "--config", str(config_path)])
-    assert result.exit_code == 0
-    # Equality against each whitespace-split token, not any substring/
-    # membership check on the rendered output - CodeQL's
-    # py/incomplete-url-substring-sanitization rule flags a bare-looking
-    # hostname literal used with `in`/`endswith`/`startswith` regardless of
-    # what it's checked against, since it can't tell this apart from
-    # checking a URL's host for security purposes. `==` isn't a substring
-    # operation at all, and is also strictly more precise here: it can't
-    # spuriously pass just because "hooks.slack.com" is part of a longer
-    # token.
-    expected_summary = "hooks.slack.com"
-    all_tokens = [word for line in result.output.splitlines() for word in line.split()]
-    assert any(word == expected_summary for word in all_tokens)
-    assert "SECRETSECRET" not in result.output
-
-
-def test_channels_setup_requires_interactive_terminal(config_path: Path):
-    result = runner.invoke(app, ["channels", "setup", "slack", "--config", str(config_path)])
+def test_setup_requires_interactive_terminal(config_path: Path):
+    result = runner.invoke(app, ["setup", "slack", "--config", str(config_path)])
     assert result.exit_code == 2
     assert "interactive terminal" in result.output.lower()
 
 
-def test_channels_setup_rejects_unknown_channel(config_path: Path):
+def test_setup_rejects_unknown_channel(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
-        result = runner.invoke(app, ["channels", "setup", "carrier-pigeon", "--config", str(config_path)])
+        result = runner.invoke(app, ["setup", "carrier-pigeon", "--config", str(config_path)])
     assert result.exit_code == 2
     assert "unknown channel" in result.output.lower()
 
 
-def test_channels_setup_slack_creates_and_saves(config_path: Path):
+def test_setup_slack_creates_and_saves(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            app, ["setup", "slack", "--config", str(config_path)],
             # webhook_url, timeout(default), enable=y, save=y, digest=n, test=n, another=n
             input="https://hooks.slack.com/services/T000/B000/xxxx\n\ny\ny\nn\nn\nn\n",
         )
@@ -2476,13 +2433,13 @@ def test_channels_setup_slack_creates_and_saves(config_path: Path):
     assert "hooks.slack.com/services/T000/B000/xxxx" in body
 
 
-def test_channels_setup_no_config_flag_uses_default_path_and_says_so(tmp_path: Path, monkeypatch):
+def test_setup_no_config_flag_uses_default_path_and_says_so(tmp_path: Path, monkeypatch):
     default_path = tmp_path / "default-config.yaml"
     monkeypatch.setattr("lanfence.channels.DEFAULT_CONFIG_PATH", default_path)
     monkeypatch.setattr("lanfence.cli.DEFAULT_CONFIG_PATH", default_path)
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "slack"],
+            app, ["setup", "slack"],
             input="https://hooks.slack.com/services/x\n\ny\ny\nn\nn\nn\n",
         )
     assert result.exit_code == 0
@@ -2490,7 +2447,7 @@ def test_channels_setup_no_config_flag_uses_default_path_and_says_so(tmp_path: P
     assert default_path.is_file()
 
 
-def test_channels_setup_keeps_existing_secret_on_blank(config_path: Path):
+def test_setup_keeps_existing_secret_on_blank(config_path: Path):
     config_path.write_text(
         config_path.read_text()
         + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/services/ORIGINAL\n"
@@ -2498,7 +2455,7 @@ def test_channels_setup_keeps_existing_secret_on_blank(config_path: Path):
     )
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            app, ["setup", "slack", "--config", str(config_path)],
             # blank webhook (keep), blank timeout, enable=y(default), save=y, digest=n, test=n, another=n
             input="\n\ny\ny\nn\nn\nn\n",
         )
@@ -2507,7 +2464,7 @@ def test_channels_setup_keeps_existing_secret_on_blank(config_path: Path):
     assert "ORIGINAL" in config_path.read_text()
 
 
-def test_channels_setup_clears_secret_with_explicit_clear(config_path: Path):
+def test_setup_clears_secret_with_explicit_clear(config_path: Path):
     config_path.write_text(
         config_path.read_text()
         + "alerts:\n  email:\n    from_addr: lanfence@example.com\n    to_addrs: [ops@example.com]\n"
@@ -2515,7 +2472,7 @@ def test_channels_setup_clears_secret_with_explicit_clear(config_path: Path):
     )
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "email", "--config", str(config_path)],
+            app, ["setup", "email", "--config", str(config_path)],
             input=(
                 "\n"       # smtp_host (keep default localhost)
                 "\n"       # smtp_port (keep default)
@@ -2537,21 +2494,21 @@ def test_channels_setup_clears_secret_with_explicit_clear(config_path: Path):
     assert "password: null" in body
 
 
-def test_channels_setup_cancel_before_save_leaves_config_unchanged(config_path: Path):
+def test_setup_cancel_before_save_leaves_config_unchanged(config_path: Path):
     original = config_path.read_text()
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            app, ["setup", "slack", "--config", str(config_path)],
             input="https://hooks.slack.com/services/x\n\ny\nn\n",  # save? -> n
         )
     assert result.exit_code == 0
     assert config_path.read_text() == original
 
 
-def test_channels_setup_invalid_value_reprompts(config_path: Path):
+def test_setup_invalid_value_reprompts(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            app, ["setup", "slack", "--config", str(config_path)],
             input=(
                 "ftp://not-http\n"   # invalid scheme
                 "5\n"                # timeout
@@ -2571,10 +2528,10 @@ def test_channels_setup_invalid_value_reprompts(config_path: Path):
     assert "hooks.slack.com/services/ok" in config_path.read_text()
 
 
-def test_channels_setup_enabling_incomplete_channel_shows_error_and_can_cancel(config_path: Path):
+def test_setup_enabling_incomplete_channel_shows_error_and_can_cancel(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            app, ["setup", "slack", "--config", str(config_path)],
             input=(
                 "\n"    # blank webhook_url - no existing value, so left unset
                 "5\n"   # timeout
@@ -2587,10 +2544,10 @@ def test_channels_setup_enabling_incomplete_channel_shows_error_and_can_cancel(c
     assert not config_path.read_text().count("alerts")
 
 
-def test_channels_setup_digest_supported_channel_prompts(config_path: Path):
+def test_setup_digest_supported_channel_prompts(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "slack", "--config", str(config_path)],
+            app, ["setup", "slack", "--config", str(config_path)],
             input="https://hooks.slack.com/services/x\n\ny\ny\ny\nn\nn\n",  # digest=y
         )
     assert result.exit_code == 0
@@ -2600,10 +2557,10 @@ def test_channels_setup_digest_supported_channel_prompts(config_path: Path):
     assert body["digest"]["channels"] == ["slack"]
 
 
-def test_channels_setup_twilio_not_offered_digest(config_path: Path):
+def test_setup_twilio_not_offered_digest(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "twilio", "--config", str(config_path)],
+            app, ["setup", "twilio", "--config", str(config_path)],
             input=(
                 "AC123\n"             # account_sid
                 "tok123\n"            # auth_token
@@ -2620,10 +2577,10 @@ def test_channels_setup_twilio_not_offered_digest(config_path: Path):
     assert "daily digest" not in result.output.lower()
 
 
-def test_channels_setup_configure_another_channel_loop(config_path: Path):
+def test_setup_configure_another_channel_loop(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
-            app, ["channels", "setup", "--config", str(config_path)],
+            app, ["setup", "--config", str(config_path)],
             input=(
                 "1\nslack\n"
                 "https://hooks.slack.com/services/x\n\ny\nn\n"
@@ -2645,11 +2602,11 @@ def test_channels_setup_configure_another_channel_loop(config_path: Path):
     assert saved["alerts"]["discord"]["webhook_url"] == "https://discord.com/api/webhooks/x"
 
 
-def test_channels_setup_test_message_default_is_no(config_path: Path):
+def test_setup_test_message_default_is_no(config_path: Path):
     with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
         with patch("lanfence.cli._stdin_is_interactive", return_value=True):
             result = runner.invoke(
-                app, ["channels", "setup", "slack", "--config", str(config_path)],
+                app, ["setup", "slack", "--config", str(config_path)],
                 # accept every default: webhook set explicitly, then blank for
                 # everything else including the test-message prompt
                 input="https://hooks.slack.com/services/x\n\ny\ny\nn\n\nn\n",
@@ -2658,12 +2615,12 @@ def test_channels_setup_test_message_default_is_no(config_path: Path):
     mock_urlopen.assert_not_called()
 
 
-def test_channels_setup_twilio_test_message_warns_about_charges(config_path: Path):
+def test_setup_twilio_test_message_warns_about_charges(config_path: Path):
     with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
         mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
         with patch("lanfence.cli._stdin_is_interactive", return_value=True):
             result = runner.invoke(
-                app, ["channels", "setup", "twilio", "--config", str(config_path)],
+                app, ["setup", "twilio", "--config", str(config_path)],
                 input=(
                     "AC123\ntok123\n+15551234567\n+15559876543\n10\n"
                     "y\n"    # enable
@@ -2676,134 +2633,16 @@ def test_channels_setup_twilio_test_message_warns_about_charges(config_path: Pat
     assert "charges" in result.output.lower()
 
 
-def test_channels_enable_requires_complete_config(config_path: Path):
-    result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
-    assert result.exit_code == 2
-    assert "incomplete" in result.output.lower()
-
-
-def test_channels_enable_unknown_channel(config_path: Path):
-    result = runner.invoke(app, ["channels", "enable", "carrier-pigeon", "--config", str(config_path)])
-    assert result.exit_code == 2
-
-
-def test_channels_enable_succeeds_when_complete(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
-    )
-    result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
-    assert result.exit_code == 0
-    assert "enabled" in result.output.lower()
-    assert yaml.safe_load(config_path.read_text())["alerts"]["slack"]["enabled"] is True
-
-
-def test_channels_disable_preserves_secrets(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  twilio:\n    account_sid: AC1\n    auth_token: tok123\n"
-        "    from_number: '+15551234567'\n    to_numbers: ['+15559876543']\n    enabled: true\n"
-    )
-    result = runner.invoke(app, ["channels", "disable", "twilio", "--config", str(config_path)])
-    assert result.exit_code == 0
-    body = yaml.safe_load(config_path.read_text())
-    assert body["alerts"]["twilio"]["enabled"] is False
-    assert body["alerts"]["twilio"]["auth_token"] == "tok123"
-
-
-def test_channels_disable_preserves_digest_selection_with_note(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
-        "digest:\n  channels: [slack]\n"
-    )
-    result = runner.invoke(app, ["channels", "disable", "slack", "--config", str(config_path)])
-    assert result.exit_code == 0
-    assert "inactive while the channel itself is disabled" in result.output
-    body = yaml.safe_load(config_path.read_text())
-    assert body["digest"]["channels"] == ["slack"]  # preserved, not cleared
-
-
-def test_channels_test_requires_enabled(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
-    )
-    result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
-    assert result.exit_code == 2
-    assert "enable slack" in result.output.lower()
-
-
-def test_channels_test_requires_complete_config(config_path: Path):
-    result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
-    assert result.exit_code == 2
-    assert "not fully configured" in result.output.lower()
-
-
-def test_channels_test_success_uses_real_transport(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
-    )
-    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
-        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
-        result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
-    assert result.exit_code == 0
-    assert mock_urlopen.called
-    request = mock_urlopen.call_args[0][0]
-    assert request.full_url == "https://hooks.slack.com/x"
-    assert b"LAN Fence test message" in request.data
-
-
-def test_channels_test_failure_nonzero_exit(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
-    )
-    with patch("lanfence.channels.urllib.request.urlopen", side_effect=OSError("refused")):
-        result = runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
-    assert result.exit_code == 1
-    assert "failed" in result.output.lower()
-
-
-def test_channels_test_does_not_create_device_or_event(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
-    )
-    cfg_dict = yaml.safe_load(config_path.read_text())
-    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
-        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
-        runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
-
-    with DeviceStore(cfg_dict["db_path"]) as store:
-        assert store.all_devices() == []
-
-
-def test_channels_test_does_not_touch_alert_cooldowns(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
-    )
-    cfg_dict = yaml.safe_load(config_path.read_text())
-    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
-        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
-        runner.invoke(app, ["channels", "test", "slack", "--config", str(config_path)])
-
-    with DeviceStore(cfg_dict["db_path"]) as store:
-        row = store._conn.execute("SELECT COUNT(*) AS n FROM alert_log").fetchone()  # noqa: SLF001
-        assert row["n"] == 0
-
-
-def test_channels_malformed_yaml_leaves_file_untouched(config_path: Path):
+def test_setup_malformed_yaml_leaves_file_untouched(config_path: Path):
     original = "not: [valid: yaml: at: all"
     config_path.write_text(original)
-    result = runner.invoke(app, ["channels", "--config", str(config_path)])
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["setup", "--config", str(config_path)])
     assert result.exit_code == 2
     assert config_path.read_text() == original
 
 
-def test_channels_concurrent_modification_detected_via_enable(config_path: Path):
+def test_setup_concurrent_modification_detected(config_path: Path):
     config_path.write_text(
         config_path.read_text()
         + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
@@ -2817,37 +2656,33 @@ def test_channels_concurrent_modification_detected_via_enable(config_path: Path)
         config_path.write_text(config_path.read_text() + "\n# concurrent edit\n")
         return real_save(loaded, updated_raw)
 
-    with patch("lanfence.cli.save_channels_config_file", side_effect=racing_save):
-        result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
+    with patch("lanfence.cli.save_channels_config_file", side_effect=racing_save), \
+         patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["setup", "slack", "--config", str(config_path)],
+            input="\n\ny\ny\nn\nn\nn\n",  # keep url, keep timeout, enable=y, save=y, digest=n, test=n, another=n
+        )
     assert result.exit_code == 2
     assert "changed on disk" in result.output.lower()
 
 
-def test_channels_restricts_insecure_permissions_on_save(config_path: Path):
+def test_setup_restricts_insecure_permissions_on_save(config_path: Path):
     config_path.chmod(0o644)
     config_path.write_text(
         config_path.read_text()
         + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: false\n"
     )
-    result = runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(
+            app, ["setup", "slack", "--config", str(config_path)],
+            input="\n\ny\ny\nn\nn\nn\n",  # keep url, keep timeout, enable=y, save=y, digest=n, test=n, another=n
+        )
     assert result.exit_code == 0
     assert "restricted" in result.output.lower()
     import stat
 
     mode = stat.S_IMODE(config_path.stat().st_mode)
     assert mode == 0o600
-
-
-def test_channels_validation_and_listing_perform_no_network_calls(config_path: Path):
-    config_path.write_text(
-        config_path.read_text()
-        + "alerts:\n  slack:\n    webhook_url: https://hooks.slack.com/x\n    enabled: true\n"
-    )
-    with patch("lanfence.channels.urllib.request.urlopen") as mock_urlopen:
-        runner.invoke(app, ["channels", "--config", str(config_path)])
-        runner.invoke(app, ["channels", "enable", "slack", "--config", str(config_path)])
-        runner.invoke(app, ["channels", "disable", "slack", "--config", str(config_path)])
-    mock_urlopen.assert_not_called()
 
 
 def test_monitor_quit_key_uses_clean_shutdown(config_path: Path, monkeypatch):

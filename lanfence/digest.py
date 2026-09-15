@@ -86,22 +86,23 @@ def _to_entry(device: Device, *, services_summary: str | None = None) -> DigestD
     )
 
 
-def _bounded_section(
-    devices: list[Device], *, limit: int, store: DeviceStore | None = None, now: datetime | None = None,
+def _section(
+    devices: list[Device], *, store: DeviceStore | None = None, now: datetime | None = None,
 ) -> DigestSection:
     """``store``/``now`` are given only for the ``new_devices`` section -
     see :func:`_service_summary`. Every other section leaves
     ``services_summary`` ``None`` to keep routine review/investigating/
-    missing-always-on rows terse."""
+    missing-always-on rows terse.
+
+    Lists every device, never truncated - a digest is only useful if it's
+    complete."""
 
     ordered = sorted(devices, key=lambda d: d.mac)
-    total = len(ordered)
-    shown = ordered[:limit]
     items = [
         _to_entry(d, services_summary=_service_summary(store, d.mac, now=now) if store and now else None)
-        for d in shown
+        for d in ordered
     ]
-    return DigestSection(items=items, total_count=total, omitted_count=max(0, total - limit))
+    return DigestSection(items=items, total_count=len(ordered), omitted_count=0)
 
 
 def build_digest(
@@ -110,7 +111,6 @@ def build_digest(
     *,
     since: datetime,
     until: datetime,
-    max_devices_per_section: int = 20,
 ) -> Digest:
     """Aggregate one digest for the window ``since``..``until``.
 
@@ -156,10 +156,10 @@ def build_digest(
         window_end=until,
         known_devices=len(inventory),
         online_devices=sum(1 for d in inventory if d.status == "online"),
-        new_devices=_bounded_section(new_devices, limit=max_devices_per_section, store=store, now=until),
-        needs_review=_bounded_section(needs_review, limit=max_devices_per_section),
-        investigating=_bounded_section(investigating, limit=max_devices_per_section),
-        missing_always_on=_bounded_section(missing_always_on, limit=max_devices_per_section),
+        new_devices=_section(new_devices, store=store, now=until),
+        needs_review=_section(needs_review),
+        investigating=_section(investigating),
+        missing_always_on=_section(missing_always_on),
         activity=activity,
         omitted_capabilities=[
             "historical security-finding severity (not persisted; only lifecycle events are)",

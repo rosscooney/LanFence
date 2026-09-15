@@ -19,7 +19,6 @@ def test_defaults():
     assert cfg.alerts.min_severity == "medium"
     assert cfg.digest.channels == []
     assert cfg.digest.send_when_empty is False
-    assert cfg.digest.max_devices_per_section == 20
 
 
 def test_digest_channels_rejects_unsupported_name(tmp_path: Path):
@@ -37,11 +36,6 @@ def test_digest_channels_rejects_syslog():
 def test_digest_channels_accepts_supported_names():
     cfg = Config(digest={"channels": ["email", "webhook", "slack", "discord", "teams", "ntfy"]})
     assert cfg.digest.channels == ["email", "webhook", "slack", "discord", "teams", "ntfy"]
-
-
-def test_digest_max_devices_per_section_rejects_zero():
-    with pytest.raises(Exception):
-        Config(digest={"max_devices_per_section": 0})
 
 
 def test_digest_send_when_empty_default_false():

@@ -653,7 +653,7 @@ def _advertised_service_lines(services: list[AdvertisedService]) -> list[str]:
 
 
 def render_channels_table(statuses: list, *, plain: bool = False) -> str:
-    """Render ``lanfence channels`` - one row per communication channel
+    """Render the per-channel status table shown inside `lanfence setup`
     (see :func:`lanfence.channels.list_channel_statuses`). Never shows a
     password, token, full webhook URL, or credential-bearing path - each
     row's ``summary`` is already sanitized by the caller."""

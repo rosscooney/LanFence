@@ -407,10 +407,10 @@ class DigestDeviceEntry(BaseModel):
 
 
 class DigestSection(BaseModel):
-    """A bounded list of devices for one part of the digest - "and N more"
-    instead of an unbounded dump. ``total_count`` is the true count before
-    truncation, so a caller can tell "20 shown, 20 total" from "20 shown, 45
-    total"."""
+    """The full list of devices for one part of the digest - never
+    truncated. ``omitted_count`` is always 0 and kept only so a JSON
+    consumer written against an older digest doesn't break on a missing
+    field; ``total_count`` equals ``len(items)``."""
 
     items: list[DigestDeviceEntry] = Field(default_factory=list)
     total_count: int = 0

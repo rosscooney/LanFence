@@ -139,13 +139,12 @@ python3 -m venv ~/.venvs/lanfence
 ```
 
 Scanning needs raw-socket access, so `scan`/`monitor` typically need `sudo`
-(or `CAP_NET_RAW` on the interpreter). `allow`, `report` and `check` do not.
+(or `CAP_NET_RAW` on the interpreter). `allow`, `device`/`digest` and `check` do not.
 
 ## Commands
 
 ```text
 lanfence scan                  # one-time active ARP scan; table + findings
-lanfence run                    # exact alias for `scan`
 lanfence scan --format json    # same, machine-readable
 lanfence monitor                # continuous: active sweeps + passive sniffing
 lanfence allow <MAC> --name X   # trust a device; its findings become info
@@ -153,11 +152,11 @@ lanfence allow <MAC> --yes      # skip the device-context confirmation prompt (s
 lanfence allow --list           # show the allowlist
 lanfence allow --remove <MAC>   # untrust a device
 lanfence reset                  # permanently wipe scanned device history (and allowlist)
-lanfence devices                # list previously observed devices - no scan
-lanfence devices --review-needed --format json
+lanfence device                 # list previously observed devices - no scan
+lanfence device --review-needed --format json
 lanfence device <MAC>           # one device's details, trust state, timeline
 lanfence device <MAC> --presence intermittent   # set a presence policy (separate from trust)
-lanfence devices --presence always-on
+lanfence device --presence always-on
 lanfence review                 # interactively work through devices needing review
 lanfence review <MAC> --trust --name "Kitchen speaker"
 lanfence review <MAC> --snooze 24h
@@ -165,16 +164,21 @@ lanfence review <MAC> --investigate --notes "..."
 lanfence review <MAC> --clear
 lanfence inspect <MAC>          # optional: actively probe one known device's open ports
 lanfence inspect <MAC> --no-nmap  # force the built-in scan, skip the optional nmap integration
-lanfence report --since 24h     # summarize events/findings from the database
 lanfence digest                 # preview a 24h summary; add --send to deliver it
+lanfence digest --verbose       # also list every event/finding in the window (formerly `lanfence report`)
 lanfence digest --since 7d --send --channel email
 lanfence dhcp-servers            # observed DHCP servers and their approval status
+lanfence setup                  # interactive setup: communications and application settings
 lanfence check                  # verify permissions, scapy, nmap, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
 lanfence upgrade --check        # only report whether an update is available
 lanfence link                   # make `sudo lanfence` work (pipx/--user installs)
 lanfence vendor-refresh         # pull a current copy of the IEEE OUI registry
 ```
+
+`scan` and `upgrade` also have exact hidden aliases, `run` and `update`
+respectively - not shown in `--help` (to keep the command list short), but
+fully supported for anyone who reaches for those names instead.
 
 `scan`/`monitor` warn (and show copy-pasteable fixes) if not run as root, since
 ARP scanning needs raw-socket access. A pipx / `pip install --user` install
@@ -186,7 +190,7 @@ default - `sudo lanfence scan` then fails with "command not found". Run
 works. `lanfence link --remove` undoes it.
 
 Mixing `sudo lanfence scan`/`monitor` (needs root for raw sockets) with a
-plain, unprivileged `lanfence devices`/`review`/`allow`/`report` is the
+plain, unprivileged `lanfence device`/`review`/`allow`/`digest` is the
 normal way to use LAN Fence, and both read/write the same database and
 allowlist: the default `~/.local/share/lanfence/...`/`~/.config/lanfence/...`
 paths resolve against your own home directory even under `sudo` (which
@@ -272,7 +276,7 @@ in LAN Fence - see [Device inventory and review](#device-inventory-and-review)):
 - **New**: devices this session's positive observations inserted into the
   database for the first time - a previously-known device reappearing is
   never counted as new.
-- **Review**: the same needs-review count `lanfence devices --review-needed`
+- **Review**: the same needs-review count `lanfence device --review-needed`
   uses (trust/snooze/investigation rules included).
 - **Scan**: time until the next scheduled active sweep, or "scanning" while
   one is running - computed from the real scheduler, never a separate UI
@@ -302,13 +306,13 @@ Seen this session: 24 devices · Newly discovered: 2 · Findings: 3
 
 ## Device inventory and review
 
-`scan`/`monitor` find devices; `devices`, `device`, and `review` let you work
-through what's already in the database, without touching the network.
+`scan`/`monitor` find devices; `device` and `review` let you work through
+what's already in the database, without touching the network.
 
 ```text
-lanfence devices                          # every observed device, no scan
-lanfence devices --status online          # combine filters with AND
-lanfence devices --untrusted --review-needed --format json
+lanfence device                            # every observed device, no scan
+lanfence device --status online            # combine filters with AND
+lanfence device --untrusted --review-needed --format json
 lanfence device aa:bb:cc:dd:ee:ff          # one device's details + timeline
 lanfence device aa:bb:cc:dd:ee:ff --since 7d --format json
 lanfence review                           # walk the review queue interactively
@@ -318,14 +322,15 @@ lanfence review <MAC> --investigate --notes "..."
 lanfence review <MAC> --clear
 ```
 
-`lanfence devices` lists every device ever observed, straight from SQLite -
-it never scans. Each row's trusted/untrusted state is looked up fresh against
-the *current* allowlist file, not whatever it was on that device's last scan.
-`--status online|offline`, `--untrusted`, and `--review-needed` combine with
-AND: `--status online --untrusted` shows only devices that are both online
-and off the allowlist. **Review-needed** means untrusted, not currently
-snoozed, and not already flagged investigating - trusting, an active snooze,
-or an investigation flag all take it out of the queue.
+`lanfence device` with no MAC argument lists every device ever observed,
+straight from SQLite - it never scans. Each row's trusted/untrusted state is
+looked up fresh against the *current* allowlist file, not whatever it was on
+that device's last scan. `--status online|offline`, `--untrusted`, and
+`--review-needed` combine with AND: `--status online --untrusted` shows only
+devices that are both online and off the allowlist. **Review-needed** means
+untrusted, not currently snoozed, and not already flagged investigating -
+trusting, an active snooze, or an investigation flag all take it out of the
+queue.
 
 `lanfence device <MAC>` shows one device in two clearly separated parts:
 *current details* (IP/hostname/vendor/status/trust/review state), which
@@ -625,7 +630,7 @@ field - setting and clearing the same field in one call is rejected.
 Metadata edits never scan, alert, fire a lifecycle event, or interact with
 trust/review/presence in any way - they are pure inventory bookkeeping.
 
-`lanfence devices` gained matching filters (`--owner`, `--group`,
+`lanfence device` (with no MAC) supports matching filters (`--owner`, `--group`,
 `--location` - exact match, case-insensitive) and an opt-in `--details` flag
 that adds Owner/Purpose/Group/Location columns to the table without
 bloating the default view. JSON output always includes metadata (nested
@@ -737,7 +742,7 @@ lanfence device <MAC> --presence always-on       # sustained absence is unexpect
 lanfence device <MAC> --presence always-on --offline-after 10m
 lanfence device <MAC> --presence unspecified     # back to the default
 lanfence device <MAC> --clear-offline-after      # restore the global default delay
-lanfence devices --presence intermittent
+lanfence device --presence intermittent          # (no MAC) list devices with that policy
 ```
 
 Three policies, per device:
@@ -789,12 +794,12 @@ exiting that follow-up prompt never undoes the trust decision you just made.
 
 ## Digest
 
-`lanfence report` and `scan --alert` are about *every* event as it happens;
-`lanfence digest` is the opposite - one concise summary of a rolling window
-(default 24h) so you can check in without a notification for every routine
-connect/reappear. It never scans the network and never changes trust,
-review, snooze, or lifecycle state - a pure read of what's already in the
-database, same as `lanfence devices`.
+`lanfence digest --verbose` and `scan --alert` are about *every* event as it
+happens; `lanfence digest` (without `--verbose`) is the opposite - one
+concise summary of a rolling window (default 24h) so you can check in
+without a notification for every routine connect/reappear. It never scans
+the network and never changes trust, review, snooze, or lifecycle state - a
+pure read of what's already in the database, same as `lanfence device`.
 
 ```text
 lanfence digest                        # preview only - sends nothing
@@ -803,6 +808,8 @@ lanfence digest --format json          # machine-readable
 lanfence digest --send                 # also deliver, via digest.channels
 lanfence digest --send --channel email
 lanfence digest --send --channel email --channel ntfy --send-empty
+lanfence digest --verbose               # also list every event/finding in the window
+lanfence digest --verbose --fail-on-findings   # exit non-zero when medium+ findings are present
 ```
 
 A digest reports, clearly separated:
@@ -823,16 +830,20 @@ A digest reports, clearly separated:
 
 A device can legitimately appear in more than one section (e.g. new *and*
 still needing review) since each section states a different fact; within a
-single section a device is never duplicated. Every section is capped at
-`digest.max_devices_per_section` (default 20), with an explicit "and N more"
-rather than an unbounded dump. Historical accuracy matters: "new devices"
-and the activity summary come from the persisted lifecycle event log, not
-from re-deriving security severity out of today's allowlist/signatures - a
-device trusted *after* it was recorded as new-in-window still correctly
-shows as new-in-window, just with its now-current trust status alongside
-it. Security findings themselves aren't persisted anywhere in this version,
-so a digest never claims to show historical finding severity - only
-current trust/review state, exactly what's actually stored.
+single section a device is never duplicated. Every section lists every
+matching device - there is no cap or "and N more" truncation. Historical
+accuracy matters: "new devices" and the activity summary come from the
+persisted lifecycle event log, not from re-deriving security severity out
+of today's allowlist/signatures - a device trusted *after* it was recorded
+as new-in-window still correctly shows as new-in-window, just with its
+now-current trust status alongside it. Security findings themselves aren't
+persisted anywhere in this version, so the summary above never claims to
+show historical finding severity - only current trust/review state, exactly
+what's actually stored. `--verbose` additionally lists every
+connect/disconnect/reappearance event in the window and its findings
+(computed fresh from that window's events, unlike the summary above) - the
+detail formerly shown by the separate `lanfence report` command, which no
+longer exists.
 
 ### Sending a digest
 
@@ -840,7 +851,6 @@ current trust/review state, exactly what's actually stored.
 digest:
   channels: [email]        # which existing alert destinations also get a digest
   send_when_empty: false
-  max_devices_per_section: 20
 ```
 
 Delivery reuses your existing `alerts.<channel>` destinations (email,
@@ -873,41 +883,21 @@ or writes the per-MAC alert cooldown, so sending a digest can never suppress
 
 Configuring Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog by hand
 means editing YAML and hunting down each provider's webhook-setup screen.
-`lanfence channels` is an interactive wizard for the same `alerts.<channel>`
+`lanfence setup` is an interactive wizard for the same `alerts.<channel>`
 settings above - it doesn't add a new configuration system, just a safer,
-guided way to edit the one that already exists.
+guided way to edit the one that already exists. It needs a real terminal;
+for scripted/noninteractive use, edit the config file directly instead.
 
 ```text
-lanfence channels setup          # unified setup: communications and application settings
-lanfence channels setup --config /etc/lanfence/config.yaml
-lanfence channels setup slack    # go directly to Slack setup
-lanfence channels                # status table - enabled? configured? safe summary
-lanfence channels test slack     # send one clearly-labeled test message
+lanfence setup                    # unified setup: communications and application settings
+lanfence setup --config /etc/lanfence/config.yaml
+lanfence setup slack              # go directly to Slack's own setup wizard
 ```
 
-```text
-$ lanfence channels
-                          Channels
-┏━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━┓
-┃ Channel ┃ Enabled ┃ Configured ┃ Digest ┃ Destination    ┃
-┡━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ slack   │ yes     │ yes        │ yes    │ hooks.slack.com│
-│ discord │ no      │ no         │ no     │ not configured │
-│ ...
-```
-
-The status table and every summary shown during setup are deliberately
-**safe to screenshot**: never a password, token, full webhook URL, URL query
-string, or credential-bearing path - only a hostname (Slack/Discord/Teams/
-webhook/ntfy), a masked recipient address or count (email), masked phone
-numbers (Twilio), or a socket path (syslog). "Configured" means the required
-fields are present, never that delivery has actually been tested - use
-`channels test` for that.
-
-`lanfence channels setup` opens a numbered application setup menu. Choose
-Communications to edit destinations, or Scanning, Offline detection, DHCP
-servers, Service discovery, Daily digest, Storage, or Alert delivery. All
-sections share an unsaved draft: **Review** shows a redacted before/after
+`lanfence setup` (no argument) opens a numbered application setup menu.
+Choose Communications to edit destinations, or Scanning, Offline detection,
+DHCP servers, Service discovery, Daily digest, Storage, or Alert delivery.
+All sections share an unsaved draft: **Review** shows a redacted before/after
 summary; **Save** validates everything and asks for confirmation; **Discard**
 restores the last saved configuration. Exit with unsaved edits offers Save,
 Discard, or Return. Ctrl+C/EOF discards only edits since the last save.
@@ -942,62 +932,55 @@ restricting file permissions. A running monitor must be restarted with the same
 schedule installation happens automatically. After saving changed enabled
 channels, it offers an optional test for each destination, defaulting to no.
 
-`lanfence channels setup slack` still goes directly to the channel wizard,
-prompting for its real config
-fields (existing values shown as defaults where it's safe to display them),
-a one-line pointer to where to obtain each setting, local validation (URL
-scheme/hostname, port range, E.164 phone numbers, email syntax, timeouts,
-supported priorities/facilities - never a network request, so passing this
-never proves delivery will actually work), a sanitized preview, and a
-save/cancel prompt. A secret (webhook URL, SMTP/Twilio credentials) is never
-echoed back: an existing one shows as "already configured", and you choose
-to leave it, type a new value, or type `clear` to remove it - leaving the
-prompt blank always preserves what's already there. Digest-eligible
-channels (email, webhook, Slack, Discord, Teams, ntfy - not Twilio/syslog)
-get one extra "use this for daily digests too?" prompt, touching only
-`digest.channels`; the digest schedule, severity thresholds, and per-MAC
-cooldowns are never touched by this command. After a successful save you
-can optionally send a test message (defaults to **no**; Twilio warns that a
-test SMS may incur provider charges).
+`lanfence setup slack` still goes directly to the channel wizard, prompting
+for its real config fields (existing values shown as defaults where it's
+safe to display them), a one-line pointer to where to obtain each setting,
+local validation (URL scheme/hostname, port range, E.164 phone numbers,
+email syntax, timeouts, supported priorities/facilities - never a network
+request, so passing this never proves delivery will actually work), a
+sanitized preview, and a save/cancel prompt. A secret (webhook URL, SMTP/
+Twilio credentials) is never echoed back: an existing one shows as "already
+configured", and you choose to leave it, type a new value, or type `clear`
+to remove it - leaving the prompt blank always preserves what's already
+there. Digest-eligible channels (email, webhook, Slack, Discord, Teams,
+ntfy - not Twilio/syslog) get one extra "use this for daily digests too?"
+prompt, touching only `digest.channels`; the digest schedule, severity
+thresholds, and per-MAC cooldowns are never touched by this command. After a
+successful save you can optionally send a test message (defaults to **no**;
+Twilio warns that a test SMS may incur provider charges) - the only way to
+trigger a test message; there is no separate standalone test/enable/disable
+command, so toggling a channel outside the wizard means hand-editing
+`alerts.<channel>.enabled` in the config file.
 
-`lanfence channels enable/disable <channel>` make the same edit
-noninteractively, since the requested change is already fully explicit:
-`enable` refuses if required fields are missing, `disable` preserves every
-setting and credential (and any existing digest selection - digest delivery
-to a disabled channel is simply inactive, not removed from the list).
-`lanfence channels test <channel>` requires the channel to already be
-enabled and sends one message via the real transport, reporting its actual
-outcome (never "success" on a swallowed exception) with a nonzero exit code
-on failure - it bypasses `alerts.min_severity` entirely and never creates a
-device, finding, lifecycle event, or alert-dispatch cooldown entry.
-
-**Email/SMTP**: every email send path (alerts, digests, and `channels test
-email`) verifies the SMTP relay's certificate and hostname before
-authenticating or sending anything - `email.use_tls: true` (the default)
-never falls back to an unverified STARTTLS upgrade. If your relay's
-certificate is signed by a private/internal CA, set `email.ca_file` to a
-PEM bundle to trust it in addition to the system trust store; there is no
-setting to disable verification itself. `email.username`/`password` are
+**Email/SMTP**: every email send path (alerts, digests, and setup's
+post-save test message) verifies the SMTP relay's certificate and hostname
+before authenticating or sending anything - `email.use_tls: true` (the
+default) never falls back to an unverified STARTTLS upgrade. If your
+relay's certificate is signed by a private/internal CA, set `email.ca_file`
+to a PEM bundle to trust it in addition to the system trust store; there is
+no setting to disable verification itself. `email.username`/`password` are
 refused (delivery aborts rather than sending a password in the clear) if
 `use_tls` is disabled - an explicitly configured unauthenticated local
 relay (`use_tls: false` with no username/password) is unaffected.
 
 **Config file location**: LAN Fence has no other default *writable* config
 file (every other command treats a missing `--config` as "built-in
-defaults, touch no file"), so `channels` uses a conventional per-user path,
+defaults, touch no file"), so `setup` uses a conventional per-user path,
 `~/.config/lanfence/config.yaml`, when `--config` isn't given - shown before
 saving, along with a reminder to pass the same `--config` path to `monitor`
 (config is read once at startup, not while running, so a running `monitor`
-needs a restart to pick up a change here). Saving is atomic and safe:
-existing unrelated sections, other channels, and disabled channels' own
-settings/secrets are always preserved; malformed YAML is never overwritten
-(the file is left untouched with a clear error instead); a concurrent edit
-between load and save is detected and refused rather than clobbered; a
-newly-written file is owner-readable/writable only (`0600`), and an
-existing file found more permissive than that is tightened with a clear
-note. Values are always preserved, but - like `lanfence allow`'s own
-YAML writer - hand-written comments and formatting are not, since that
-would need a new dependency this project avoids.
+needs a restart to pick up a change here); resolved against your own home
+directory even under `sudo`, so `sudo lanfence setup` and a plain `lanfence
+setup` edit the *same* file. Saving is atomic and safe: existing unrelated
+sections, other channels, and disabled channels' own settings/secrets are
+always preserved; malformed YAML is never overwritten (the file is left
+untouched with a clear error instead); a concurrent edit between load and
+save is detected and refused rather than clobbered; a newly-written file is
+owner-readable/writable only (`0600`), and an existing file found more
+permissive than that is tightened with a clear note. Values are always
+preserved, but - like `lanfence allow`'s own YAML writer - hand-written
+comments and formatting are not, since that would need a new dependency
+this project avoids.
 
 ## Unexpected DHCP servers
 
@@ -1231,7 +1214,7 @@ that interpreter/script too.
 **Daily report** - a cron entry (`sudo crontab -e`):
 
 ```cron
-0 7 * * * /usr/local/bin/lanfence report --since 24h --format json > /var/log/lanfence/daily.json
+0 7 * * * /usr/local/bin/lanfence digest --verbose --since 24h --format json > /var/log/lanfence/daily.json
 ```
 
 **Daily digest** (see [Digest](#digest) below) - `lanfence monitor` already
@@ -1361,7 +1344,6 @@ alerts:
 digest:
   channels: []                  # which alerts.<channel> destinations also get a digest, e.g. [email]
   send_when_empty: false
-  max_devices_per_section: 20
 
 dhcp_servers:
   enabled: false                # opt-in; needs scan.passive/scan.dhcp_snooping too - see "Unexpected DHCP servers"

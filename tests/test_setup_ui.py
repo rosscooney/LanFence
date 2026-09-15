@@ -27,7 +27,7 @@ def run_setup(path, answers):
     with patch('lanfence.cli._stdin_is_interactive', return_value=True), patch(
         'lanfence.cli.send_channel_test_message', return_value=(True, 'accepted')
     ) as transport:
-        result = runner.invoke(app, ['channels', 'setup', '--config', str(path)], input=answers)
+        result = runner.invoke(app, ['setup', '--config', str(path)], input=answers)
     assert result.exit_code == 0, (result.output, result.exception)
     return result, transport
 
@@ -183,7 +183,7 @@ def test_concurrent_edit_not_overwritten(tmp_path):
     with patch('lanfence.cli._stdin_is_interactive', return_value=True), patch(
         'lanfence.cli.save_channels_config_file', side_effect=concurrent_save
     ):
-        result = runner.invoke(app, ['channels', 'setup', '--config', str(path)],
+        result = runner.invoke(app, ['setup', '--config', str(path)],
                                input='2\n1\neth1\nback\nsave\ny\n')
     assert result.exit_code == 2
     assert 'changed on disk' in result.output

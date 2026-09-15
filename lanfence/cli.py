@@ -38,13 +38,11 @@ from lanfence.channels import (
     apply_channel_values,
     apply_digest_selection,
     check_insecure_permissions,
-    is_channel_configured,
     list_channel_statuses,
     load_channels_config_file,
     resolve_channels_config_path,
     save_channels_config_file,
     send_channel_test_message,
-    set_channel_enabled,
     supports_digest,
     validate_channel_values,
 )
@@ -121,11 +119,6 @@ def _root(
     pass
 
 
-channels_app = typer.Typer(
-    help="Configure Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog destinations.",
-    no_args_is_help=False,
-)
-app.add_typer(channels_app, name="channels")
 
 
 def _load_config(config_path: Optional[Path]) -> Config:
@@ -411,8 +404,9 @@ def scan(
 
 #: `lanfence run` is an exact alias for `lanfence scan` - same function, same
 #: options, same behavior, just a second name for anyone who reaches for
-#: "run" instead of "scan".
-app.command(name="run")(scan)
+#: "run" instead of "scan". Hidden from --help (scan is the documented
+#: name) but still works exactly as before - never removed outright.
+app.command(name="run", hidden=True)(scan)
 
 
 def _finding_identity(finding: Finding) -> str:
@@ -905,65 +899,13 @@ def monitor(
 
 
 @app.command()
-def report(
-    since: str = typer.Option("24h", "--since", help="How far back to report, e.g. 30m, 24h, 7d."),
-    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
-    fail_on_findings: bool = typer.Option(
-        False, "--fail-on-findings", help="Exit non-zero when medium+ findings are present in the window."
-    ),
-) -> None:
-    """Summarize device activity (connects/disconnects/reappearances) since a point in time."""
-
-    cfg = _load_config(config)
-    since_dt = _parse_since(since)
-    signatures = SignatureSet.load(cfg.rogue_signatures_file)
-    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-
-    with DeviceStore(cfg.resolved_db_path()) as store:
-        events = store.events_since(since_dt)
-        devices_by_mac = {d.mac: d for d in store.all_devices()}
-
-    findings: list[Finding] = []
-    for event in events:
-        if event.event_type == "disconnected":
-            continue
-        device = devices_by_mac.get(event.mac)
-        if device is None:
-            continue
-        allow_entry = allowlist.match(event.mac)
-        device = device.model_copy(
-            update={
-                "allowlisted": allow_entry is not None,
-                "allowlist_name": allow_entry.name if allow_entry else None,
-            }
-        )
-        _, matches = fingerprint_device(
-            event.mac, device.hostname, signatures=signatures, vendor_file=cfg.vendor_file
-        )
-        findings.extend(build_findings(device, event.event_type, matches))
-
-    if output_format == "json":
-        payload = {
-            "since": since_dt.isoformat(),
-            "events": [e.model_dump(mode="json") for e in events],
-            "findings": [f.model_dump(mode="json") for f in findings],
-        }
-        typer.echo(json.dumps(payload, indent=2))
-    else:
-        typer.secho(f"LAN Fence report - since {since_dt.isoformat()}", fg="cyan", bold=True)
-        render_events(events)
-        typer.echo("")
-        render_findings(findings)
-
-    if fail_on_findings:
-        raise typer.Exit(code=exit_code_for_findings(findings))
-
-
-@app.command()
 def digest(
     since: str = typer.Option("24h", "--since", help="Rolling window to summarize, e.g. 24h, 7d."),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v",
+        help="Also show detailed device activity (connects/disconnects/reappearances) and findings for the window.",
+    ),
     send: bool = typer.Option(
         False, "--send", help="Also send through configured digest destinations (default: preview only)."
     ),
@@ -972,6 +914,10 @@ def digest(
     ),
     send_empty: bool = typer.Option(
         False, "--send-empty", help="With --send, send even if the digest is empty (overrides digest.send_when_empty)."
+    ),
+    fail_on_findings: bool = typer.Option(
+        False, "--fail-on-findings",
+        help="With --verbose, exit non-zero when medium+ findings are present in the window.",
     ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
@@ -983,6 +929,10 @@ def digest(
     never changes trust, review, snooze, or lifecycle state. Independent of
     the immediate-alert pipeline (`alerts.min_severity`, per-MAC cooldowns,
     `scan --alert`) - sending a digest never affects those, and vice versa.
+
+    `--verbose` additionally lists every connect/disconnect/reappearance
+    event in the window plus their findings (the detail formerly shown by
+    the separate `lanfence report` command).
     """
 
     if output_format not in ("table", "json"):
@@ -1001,17 +951,50 @@ def digest(
 
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=cfg.scan.interface)
+    signatures = SignatureSet.load(cfg.rogue_signatures_file) if verbose else None
 
     with DeviceStore(cfg.resolved_db_path()) as store:
-        digest_obj = build_digest(
-            store, allowlist, since=since_dt, until=until,
-            max_devices_per_section=cfg.digest.max_devices_per_section,
-        )
+        digest_obj = build_digest(store, allowlist, since=since_dt, until=until)
+        events = store.events_since(since_dt) if verbose else []
+        devices_by_mac = {d.mac: d for d in store.all_devices()} if verbose else {}
+
+    findings: list[Finding] = []
+    if verbose:
+        for event in events:
+            if event.event_type == "disconnected":
+                continue
+            device = devices_by_mac.get(event.mac)
+            if device is None:
+                continue
+            allow_entry = allowlist.match(event.mac)
+            device = device.model_copy(
+                update={
+                    "allowlisted": allow_entry is not None,
+                    "allowlist_name": allow_entry.name if allow_entry else None,
+                }
+            )
+            _, matches = fingerprint_device(
+                event.mac, device.hostname, signatures=signatures, vendor_file=cfg.vendor_file
+            )
+            findings.extend(build_findings(device, event.event_type, matches))
 
     if output_format == "json":
-        typer.echo(digest_obj.model_dump_json(indent=2))
+        payload = digest_obj.model_dump(mode="json")
+        if verbose:
+            payload["events"] = [e.model_dump(mode="json") for e in events]
+            payload["findings"] = [f.model_dump(mode="json") for f in findings]
+        typer.echo(json.dumps(payload, indent=2))
     else:
         render_digest(digest_obj)
+        if verbose:
+            typer.echo("")
+            typer.secho(f"Detailed activity - since {since_dt.isoformat()}", fg="cyan", bold=True)
+            render_events(events)
+            typer.echo("")
+            render_findings(findings)
+
+    if verbose and fail_on_findings:
+        raise typer.Exit(code=exit_code_for_findings(findings))
 
     if not send:
         return
@@ -1301,34 +1284,26 @@ def reset(
 _PRESENCE_POLICIES = ("unspecified", "intermittent", "always-on")
 
 
-@app.command()
-def devices(
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status: online | offline."),
-    untrusted: bool = typer.Option(False, "--untrusted", help="Only devices not on the allowlist."),
-    review_needed: bool = typer.Option(
-        False, "--review-needed",
-        help="Only devices needing review: untrusted, not actively snoozed, not flagged investigating.",
-    ),
-    presence: Optional[str] = typer.Option(
-        None, "--presence", help="Filter by presence policy: unspecified | intermittent | always-on."
-    ),
-    owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner metadata (exact, case-insensitive)."),
-    group: Optional[str] = typer.Option(None, "--group", help="Filter by group metadata (exact, case-insensitive)."),
-    location: Optional[str] = typer.Option(
-        None, "--location", help="Filter by location metadata (exact, case-insensitive)."
-    ),
-    details: bool = typer.Option(
-        False, "--details", help="Also show owner/purpose/group/location columns (table format only)."
-    ),
-    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+def _list_devices(
+    *,
+    status: Optional[str],
+    untrusted: bool,
+    review_needed: bool,
+    presence: Optional[str],
+    owner: Optional[str],
+    group: Optional[str],
+    location: Optional[str],
+    details: bool,
+    output_format: str,
+    config: Optional[Path],
 ) -> None:
     """List every previously observed device from the database - no scan.
 
-    Filters combine with AND: `--status online --untrusted` shows only
-    devices that are both online and not on the allowlist. Allowlist
-    membership is applied fresh from the current allowlist file, not
-    whatever it was the last time a scan ran.
+    This is `lanfence device`'s no-MAC behavior (formerly the standalone
+    `lanfence devices` command). Filters combine with AND: `--status online
+    --untrusted` shows only devices that are both online and not on the
+    allowlist. Allowlist membership is applied fresh from the current
+    allowlist file, not whatever it was the last time a scan ran.
 
     `--owner`/`--group`/`--location` match a device's user-provided
     metadata exactly (after trimming whitespace, case-insensitive) - a
@@ -1412,10 +1387,12 @@ def _validate_metadata_value(field: str, value: str) -> str:
 
 @app.command()
 def device(
-    mac: str = typer.Argument(..., help="MAC address to show."),
+    mac: Optional[str] = typer.Argument(
+        None, help="MAC address to show. Omit to list every observed device instead (see --status etc.)."
+    ),
     since: str = typer.Option("30d", "--since", help="How far back to show the lifecycle timeline, e.g. 24h, 7d."),
     presence: Optional[str] = typer.Option(
-        None, "--presence", help="Set presence policy: unspecified | intermittent | always-on."
+        None, "--presence", help="With a MAC: set presence policy: unspecified | intermittent | always-on."
     ),
     offline_after: Optional[str] = typer.Option(
         None, "--offline-after",
@@ -1425,23 +1402,37 @@ def device(
     clear_offline_after: bool = typer.Option(
         False, "--clear-offline-after", help="Remove the --offline-after override; restore the global default."
     ),
-    owner: Optional[str] = typer.Option(None, "--owner", help="Set the owner metadata field."),
-    purpose: Optional[str] = typer.Option(None, "--purpose", help="Set the purpose metadata field."),
-    group: Optional[str] = typer.Option(None, "--group", help="Set the group metadata field."),
-    location: Optional[str] = typer.Option(None, "--location", help="Set the location metadata field."),
+    owner: Optional[str] = typer.Option(None, "--owner", help="With a MAC: set the owner metadata field."),
+    purpose: Optional[str] = typer.Option(None, "--purpose", help="With a MAC: set the purpose metadata field."),
+    group: Optional[str] = typer.Option(None, "--group", help="With a MAC: set the group metadata field."),
+    location: Optional[str] = typer.Option(None, "--location", help="With a MAC: set the location metadata field."),
     clear_owner: bool = typer.Option(False, "--clear-owner", help="Clear the owner metadata field."),
     clear_purpose: bool = typer.Option(False, "--clear-purpose", help="Clear the purpose metadata field."),
     clear_group: bool = typer.Option(False, "--clear-group", help="Clear the group metadata field."),
     clear_location: bool = typer.Option(False, "--clear-location", help="Clear the location metadata field."),
+    status: Optional[str] = typer.Option(
+        None, "--status", help="Without a MAC: filter the list by status: online | offline."
+    ),
+    untrusted: bool = typer.Option(
+        False, "--untrusted", help="Without a MAC: only list devices not on the allowlist."
+    ),
+    review_needed: bool = typer.Option(
+        False, "--review-needed",
+        help="Without a MAC: only list devices needing review (untrusted, not snoozed, not investigating).",
+    ),
+    details: bool = typer.Option(
+        False, "--details", help="Without a MAC: also show owner/purpose/group/location columns (table format only)."
+    ),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
-    """Show one device's current details, trust/review state, and lifecycle timeline.
+    """Show one device's details, or (with no MAC) list every observed device.
 
-    "Current details" (IP/hostname/vendor/status) reflect only the most
-    recent sighting; the timeline below is a separate, append-only log of
-    connect/reappear/disconnect transitions - not a complete history of
-    every address this MAC has ever held (see the timeline's own caveat).
+    With a MAC address: "current details" (IP/hostname/vendor/status)
+    reflect only the most recent sighting; the timeline below is a
+    separate, append-only log of connect/reappear/disconnect transitions -
+    not a complete history of every address this MAC has ever held (see the
+    timeline's own caveat).
 
     With `--presence`/`--offline-after`/`--clear-offline-after`, also edits
     that device's presence policy - see `lanfence device <MAC> --presence
@@ -1458,7 +1449,19 @@ def device(
     plain `lanfence device <MAC>`. Metadata edits never scan, alert, or
     create a lifecycle event, and never create a device that hasn't
     actually been observed.
+
+    Without a MAC address: lists every previously observed device from the
+    database (no scan) - `--status`/`--untrusted`/`--review-needed`/
+    `--details` filter and shape that listing; see `lanfence device --help`.
     """
+
+    if mac is None:
+        _list_devices(
+            status=status, untrusted=untrusted, review_needed=review_needed,
+            presence=presence, owner=owner, group=group, location=location,
+            details=details, output_format=output_format, config=config,
+        )
+        return
 
     if output_format not in ("table", "json"):
         typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
@@ -2331,6 +2334,12 @@ def upgrade(
     raise typer.Exit(code=10)
 
 
+#: `lanfence update` is an exact alias for `lanfence upgrade` - hidden from
+#: --help (upgrade is the documented name) but still works exactly the
+#: same, for anyone who reaches for "update" instead.
+app.command(name="update", hidden=True)(upgrade)
+
+
 _IEEE_OUI_CSV_URL = "https://standards-oui.ieee.org/oui/oui.csv"
 
 
@@ -2392,7 +2401,7 @@ def vendor_refresh(
         typer.echo(f"add this to your config to use it:\n  vendor_file: {dest}")
 
 
-# --- lanfence channels -------------------------------------------------
+# --- lanfence setup ----------------------------------------------------
 
 
 def _channels_load_or_exit(config: Optional[Path]):
@@ -2447,27 +2456,6 @@ def _channels_save_or_exit(path: Path, loaded, updated_raw: dict) -> None:
         f"`lanfence monitor` reads this file once at startup, not while running - restart it "
         f"(e.g. `lanfence monitor --config {path}`) for this change to take effect."
     )
-
-
-@channels_app.callback(invoke_without_command=True)
-def channels_default(
-    ctx: typer.Context,
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
-) -> None:
-    """Configure Slack/Discord/Teams/ntfy/email/webhook/Twilio/syslog destinations.
-
-    With no subcommand, shows every channel's enabled/configured status and
-    a safe destination summary (never a password, token, full webhook URL,
-    or credential-bearing path) - a pure read, no network access. See
-    `lanfence channels setup` to configure one interactively.
-    """
-
-    if ctx.invoked_subcommand is not None:
-        return
-    path, loaded = _channels_load_or_exit(config)
-    if not loaded.existed:
-        typer.echo(f"No configuration file at {path} yet - every channel below is unconfigured.")
-    render_channels_table(list_channel_statuses(loaded.cfg))
 
 
 def _prompt_secret_field(f, current_value: Optional[str]):
@@ -2598,24 +2586,27 @@ def _run_channel_wizard(channel: str, path: Path, loaded, *, explicit_config: Op
         return
 
 
-@channels_app.command("setup")
-def channels_setup(
-    channel: Optional[str] = typer.Argument(None, help="Channel to configure directly, e.g. slack."),
+@app.command(name="setup")
+def setup_cmd(
+    channel: Optional[str] = typer.Argument(
+        None, help="Channel to configure directly instead of the unified menu, e.g. slack."
+    ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
     """Set up communications and application settings interactively.
 
-    With no argument, opens unified setup with a shared unsaved draft;
-    `lanfence channels setup slack` goes straight to that channel's wizard.
-    Needs an interactive terminal - use `lanfence channels enable`/`disable`
-    (and hand-edit the config for field values) for scripted/noninteractive
-    use instead of piping answers into this command.
+    With no argument, opens the unified setup menu (Communications,
+    Scanning, Offline detection, DHCP servers, Service discovery, Daily
+    digest, Storage, Alert delivery) with a shared unsaved draft;
+    `lanfence setup slack` goes straight to that channel's wizard. Needs an
+    interactive terminal - for scripted/noninteractive use, edit the
+    config file directly instead of piping answers into this command.
     """
 
     if not _stdin_is_interactive():
         typer.secho(
-            "error: `lanfence channels setup` needs an interactive terminal. For scripted use, "
-            "edit the config file directly and use `lanfence channels enable/disable`.",
+            "error: `lanfence setup` needs an interactive terminal. For scripted use, "
+            "edit the config file directly instead.",
             fg="red", err=True,
         )
         raise typer.Exit(code=2)
@@ -2655,111 +2646,6 @@ def channels_setup(
     except (typer.Abort, EOFError):
         typer.echo("\ncancelled - no further changes saved.")
 
-
-@channels_app.command("test")
-def channels_test(
-    channel: str = typer.Argument(..., help="Channel to send a test message to, e.g. slack."),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
-) -> None:
-    """Send one clearly-labeled test message to CHANNEL using its real transport.
-
-    Running this command is itself explicit authorization to send - no
-    further confirmation is asked. Requires the channel to already be
-    enabled (`lanfence channels enable <channel>` first) and its
-    configuration to be complete; reports the transport's actual outcome
-    (never "success" if it raised) with a nonzero exit code on failure.
-    Bypasses `alerts.min_severity` entirely - it never goes through the
-    finding-severity pipeline - and never touches devices, findings,
-    lifecycle events, or alert-dispatch cooldowns.
-    """
-
-    if channel not in CHANNEL_NAMES:
-        typer.secho(f"error: unknown channel {channel!r} - choose one of: {', '.join(CHANNEL_NAMES)}",
-                    fg="red", err=True)
-        raise typer.Exit(code=2)
-
-    _, loaded = _channels_load_or_exit(config)
-    if not is_channel_configured(channel, loaded.cfg):
-        typer.secho(
-            f"error: {channel} is not fully configured - run `lanfence channels setup {channel}` first",
-            fg="red", err=True,
-        )
-        raise typer.Exit(code=2)
-    if not getattr(loaded.cfg.alerts, channel).enabled:
-        typer.secho(
-            f"error: {channel} is disabled - run `lanfence channels enable {channel}` first",
-            fg="red", err=True,
-        )
-        raise typer.Exit(code=2)
-
-    ok, message = send_channel_test_message(channel, loaded.cfg)
-    if ok:
-        typer.secho(f"test message {message}.", fg="green")
-    else:
-        typer.secho(f"test message failed: {message}", fg="red", err=True)
-        raise typer.Exit(code=1)
-
-
-@channels_app.command("enable")
-def channels_enable(
-    channel: str = typer.Argument(..., help="Channel to enable, e.g. slack."),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
-) -> None:
-    """Enable CHANNEL for immediate alerts - never sends a message by itself.
-
-    Requires its configuration to already be complete (`lanfence channels
-    setup <channel>` first if not); noninteractive, since the requested
-    change is already fully explicit.
-    """
-
-    if channel not in CHANNEL_NAMES:
-        typer.secho(f"error: unknown channel {channel!r} - choose one of: {', '.join(CHANNEL_NAMES)}",
-                    fg="red", err=True)
-        raise typer.Exit(code=2)
-
-    path, loaded = _channels_load_or_exit(config)
-    if not is_channel_configured(channel, loaded.cfg):
-        typer.secho(
-            f"error: cannot enable {channel} - its configuration is incomplete. "
-            f"Run `lanfence channels setup {channel}` first.",
-            fg="red", err=True,
-        )
-        raise typer.Exit(code=2)
-
-    updated_raw = set_channel_enabled(loaded.raw, channel, enabled=True)
-    _channels_new_file_notice(path, loaded.existed, config)
-    _channels_save_or_exit(path, loaded, updated_raw)
-    typer.secho(f"{channel} enabled.", fg="green")
-
-
-@channels_app.command("disable")
-def channels_disable(
-    channel: str = typer.Argument(..., help="Channel to disable, e.g. slack."),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
-) -> None:
-    """Disable CHANNEL - preserves its settings and any stored credentials.
-
-    Noninteractive, since the requested change is already fully explicit.
-    If this channel is currently selected for daily digests, that selection
-    is preserved (not cleared) - digest delivery to it is simply inactive
-    while the channel itself is disabled.
-    """
-
-    if channel not in CHANNEL_NAMES:
-        typer.secho(f"error: unknown channel {channel!r} - choose one of: {', '.join(CHANNEL_NAMES)}",
-                    fg="red", err=True)
-        raise typer.Exit(code=2)
-
-    path, loaded = _channels_load_or_exit(config)
-    updated_raw = set_channel_enabled(loaded.raw, channel, enabled=False)
-    _channels_new_file_notice(path, loaded.existed, config)
-    _channels_save_or_exit(path, loaded, updated_raw)
-    typer.secho(f"{channel} disabled.", fg="green")
-    if supports_digest(channel) and channel in loaded.cfg.digest.channels:
-        typer.echo(
-            f"note: {channel} is still selected for daily digests, but digest delivery to it is "
-            "inactive while the channel itself is disabled."
-        )
 
 
 def main() -> None:  # pragma: no cover - entry point shim

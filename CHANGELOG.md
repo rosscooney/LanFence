@@ -15,6 +15,31 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Changed
+
+- **CLI consolidated: fewer top-level commands, each with one clear job.**
+  - `lanfence channels` is gone; `lanfence setup` is now the top-level
+    command for the same interactive wizard (`lanfence setup` for the
+    unified menu, `lanfence setup slack` etc. straight to one channel).
+    The old bare `lanfence channels` status table and the noninteractive
+    `channels test`/`enable`/`disable` subcommands are removed outright -
+    toggling/testing a channel now happens inside `lanfence setup` itself
+    (its "enable now?"/"send a test message now?" prompts), or by editing
+    the config file directly.
+  - `lanfence report` is gone; pass `--verbose` to `lanfence digest`
+    instead for the same detailed event/finding listing, alongside the
+    regular digest summary. `--fail-on-findings` moved with it.
+  - `lanfence devices` is gone; `lanfence device` (with no MAC argument)
+    now shows that listing, with the same filters (`--status`,
+    `--untrusted`, `--review-needed`, `--owner`, `--group`, `--location`,
+    `--details`).
+  - `lanfence digest` no longer caps each section at 20 devices
+    (`digest.max_devices_per_section`, now removed from the config schema
+    entirely) - every section always lists every matching device.
+  - `lanfence run` (alias for `scan`) and the new `lanfence update` (alias
+    for `upgrade`) still work exactly as before/as their target command,
+    but no longer clutter `--help`.
+
 ### Fixed
 
 - **`sudo lanfence channels`/`setup` and a plain invocation read/wrote

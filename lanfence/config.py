@@ -280,9 +280,6 @@ class DigestConfig(BaseModel):
     #: Send even when the digest has no window activity, no outstanding
     #: review/investigation items, and no missing always-on devices.
     send_when_empty: bool = False
-    #: Cap on how many devices are listed per digest section before
-    #: truncating with an explicit "and N more".
-    max_devices_per_section: int = 20
 
     @field_validator("channels")
     @classmethod
@@ -292,13 +289,6 @@ class DigestConfig(BaseModel):
                 raise ValueError(
                     f"unsupported digest channel {name!r}; must be one of {', '.join(DIGEST_CHANNELS)}"
                 )
-        return value
-
-    @field_validator("max_devices_per_section")
-    @classmethod
-    def _positive_section_limit(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("max_devices_per_section must be an integer >= 1")
         return value
 
 

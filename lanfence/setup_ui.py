@@ -33,7 +33,7 @@ SECTIONS = {
     "Offline detection": ["scan.offline_grace_seconds", "scan.offline_after_missed_scans"],
     "DHCP servers": ["dhcp_servers.enabled", "dhcp_servers.alert_cooldown_seconds"],
     "Service discovery": ["discovery.mdns", "discovery.ssdp"],
-    "Daily digest": ["digest.channels", "digest.send_when_empty", "digest.max_devices_per_section"],
+    "Daily digest": ["digest.channels", "digest.send_when_empty"],
     "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file"],
     "Alert delivery": ["alerts.min_severity", "alerts.rate_limit_seconds"],
 }

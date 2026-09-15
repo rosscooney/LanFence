@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Interactive setup, safe listing, and test-message delivery for LAN
-Fence's communication channels (``lanfence channels``).
+Fence's communication channels (``lanfence setup``).
 
 This module has three jobs, deliberately kept separate from the Typer
 commands themselves (``lanfence/cli.py``) so they can be tested without a
@@ -30,8 +30,8 @@ terminal or a real network:
 
 Nothing here is a new secret-storage mechanism: a channel's password/token/
 webhook URL is stored exactly like every other config value, in the same
-YAML file - `lanfence channels` only adds a safer, listing/summary-aware
-way to edit it than hand-editing the file.
+YAML file - `lanfence setup` only adds a safer, guided way to edit it than
+hand-editing the file.
 """
 
 from __future__ import annotations
@@ -292,7 +292,8 @@ def supports_digest(channel: str) -> bool:
 
 @dataclass(frozen=True)
 class ChannelStatus:
-    """One row of ``lanfence channels`` - see :func:`list_channel_statuses`."""
+    """One channel's status, shown in `lanfence setup`'s per-channel preview
+    - see :func:`list_channel_statuses`."""
 
     channel: str
     enabled: bool
@@ -483,7 +484,7 @@ def save_channels_config_file(loaded: LoadedConfigFile, updated_raw: dict) -> No
 
     Refuses (raising :class:`ConcurrentModificationError`) if the file's
     on-disk bytes no longer match what was captured at load time - another
-    edit (a hand edit, another `lanfence channels` invocation, `monitor`
+    edit (a hand edit, another `lanfence setup` invocation, `monitor`
     holds no write path here) happened in between, and blindly overwriting
     it would silently discard that change. Refuses (raising
     :class:`ConfigFileError`) if the fully-merged result fails schema
@@ -581,7 +582,7 @@ def set_channel_enabled(raw: dict, channel: str, *, enabled: bool) -> dict:
 
 _TEST_TITLE = "LAN Fence test message"
 _TEST_BODY = (
-    "This is a test message from LAN Fence, sent by `lanfence channels test`. "
+    "This is a test message from LAN Fence, sent from `lanfence setup`. "
     "No action is needed - it confirms this destination accepts messages from LAN Fence. "
     "It is not a real security finding."
 )
@@ -612,7 +613,7 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
         return False, f"unknown channel: {channel}"
     channel_cfg = _channel_config(cfg, channel)
     if not channel_cfg.enabled:
-        return False, f"{channel} is disabled - run `lanfence channels enable {channel}` first"
+        return False, f"{channel} is disabled - run `lanfence setup {channel}` and enable it first"
 
     if channel == "slack":
         return _post_json_ok(
