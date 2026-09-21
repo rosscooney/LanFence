@@ -896,6 +896,38 @@ def test_monitor_shutdown_summary_uses_real_counters(tmp_path: Path, monkeypatch
     assert "Findings: 1" in result.output
 
 
+def test_monitor_writes_and_removes_pidfile(tmp_path: Path, monkeypatch):
+    from lanfence import monitor_status
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(tmp_path / "lanfence.db"),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "scan": {"resolve_hostnames": False, "passive": False, "scan_interval_seconds": 0.001},
+        }),
+        encoding="utf-8",
+    )
+    pid_file = tmp_path / "monitor.pid"
+    seen_running = []
+
+    def fake_sleep(*_):
+        seen_running.append(monitor_status.is_running())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("lanfence.monitor_status._resolved_pid_file", lambda: pid_file)
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan_v6", lambda *, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.time.sleep", fake_sleep)
+
+    result = runner.invoke(app, ["monitor", "--no-live", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert seen_running == [True]
+    assert not pid_file.exists()
+
+
 def test_monitor_shutdown_summary_findings_count_matches_non_live_printed_findings(tmp_path: Path, monkeypatch):
     """A regression check for the finding counter being wired into
     MonitorStats regardless of live/non-live rendering path."""
@@ -1399,6 +1431,122 @@ def test_devices_rejects_invalid_status(config_path: Path):
 def test_devices_rejects_invalid_format(config_path: Path):
     result = runner.invoke(app, ["device", "--format", "xml", "--config", str(config_path)])
     assert result.exit_code == 2
+
+
+# --- device --delete-new-offline ----------------------------------------
+
+
+def _make_offline(config_path: Path, *, still_online: set = frozenset()):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    with DeviceStore(Path(raw["db_path"])) as store:
+        store.mark_offline(still_online, as_of=_now())
+
+
+def test_delete_new_offline_removes_pending_offline_untrusted_device(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    db_path = Path(raw["db_path"])
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.1", hostname="newbie", vendor=None, seen_at=_now())
+    _make_offline(config_path)
+
+    result = runner.invoke(app, ["device", "--delete-new-offline", "--yes", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "deleted 1 device(s)" in result.output
+    with DeviceStore(db_path) as store:
+        assert store.get_device("aa:aa:aa:aa:aa:aa") is None
+
+
+def test_delete_new_offline_skips_investigating_device(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    db_path = Path(raw["db_path"])
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.1", hostname="watched", vendor=None, seen_at=_now())
+        store.set_investigating("aa:aa:aa:aa:aa:aa", notes="hmm", updated_at=_now())
+    _make_offline(config_path)
+
+    result = runner.invoke(app, ["device", "--delete-new-offline", "--yes", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "No new, offline devices to delete" in result.output
+    with DeviceStore(db_path) as store:
+        assert store.get_device("aa:aa:aa:aa:aa:aa") is not None
+
+
+def test_delete_new_offline_skips_online_device(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    db_path = Path(raw["db_path"])
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.1", hostname="newbie", vendor=None, seen_at=_now())
+
+    result = runner.invoke(app, ["device", "--delete-new-offline", "--yes", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "No new, offline devices to delete" in result.output
+    with DeviceStore(db_path) as store:
+        assert store.get_device("aa:aa:aa:aa:aa:aa") is not None
+
+
+def test_delete_new_offline_skips_trusted_device(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    db_path = Path(raw["db_path"])
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.1", hostname="trusted-thing", vendor=None, seen_at=_now())
+    _make_offline(config_path)
+    runner.invoke(app, ["allow", "aa:aa:aa:aa:aa:aa", "--yes", "--config", str(config_path)])
+
+    result = runner.invoke(app, ["device", "--delete-new-offline", "--yes", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "No new, offline devices to delete" in result.output
+    with DeviceStore(db_path) as store:
+        assert store.get_device("aa:aa:aa:aa:aa:aa") is not None
+
+
+def test_delete_new_offline_requires_confirmation_interactively(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    db_path = Path(raw["db_path"])
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.1", hostname="newbie", vendor=None, seen_at=_now())
+    _make_offline(config_path)
+
+    with patch("lanfence.cli._stdin_is_interactive", return_value=True):
+        result = runner.invoke(app, ["device", "--delete-new-offline", "--config", str(config_path)], input="n\n")
+    assert result.exit_code == 0
+    assert "aborted" in result.output.lower()
+    with DeviceStore(db_path) as store:
+        assert store.get_device("aa:aa:aa:aa:aa:aa") is not None
+
+
+def test_delete_new_offline_noninteractive_without_yes_fails_helpfully(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    db_path = Path(raw["db_path"])
+    with DeviceStore(db_path) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.1", hostname="newbie", vendor=None, seen_at=_now())
+    _make_offline(config_path)
+
+    result = runner.invoke(app, ["device", "--delete-new-offline", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "--yes" in result.output
+    with DeviceStore(db_path) as store:
+        assert store.get_device("aa:aa:aa:aa:aa:aa") is not None
 
 
 # --- device <mac> ------------------------------------------------------
@@ -2752,6 +2900,22 @@ def test_digest_shows_not_running_note_when_enabled_but_not_actually_running(con
     assert result.exit_code == 0
     assert "Manage devices" not in result.output
     assert "Web portal is not running" in result.output
+
+
+def test_digest_shows_monitor_running(config_path: Path):
+    with patch("lanfence.cli.monitor_status.is_running", return_value=True), \
+         patch("lanfence.web.is_server_running", return_value=False):
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Monitor: running" in result.output
+
+
+def test_digest_shows_monitor_not_running(config_path: Path):
+    with patch("lanfence.cli.monitor_status.is_running", return_value=False), \
+         patch("lanfence.web.is_server_running", return_value=False):
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Monitor: not running" in result.output
 
 
 def test_monitor_quit_key_uses_clean_shutdown(config_path: Path, monkeypatch):

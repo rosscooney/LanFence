@@ -10,6 +10,9 @@ feel. Constants only - no behavior, no dependencies beyond the stdlib.
 
 from __future__ import annotations
 
+import struct
+import zlib
+
 #: The website's dark palette (see lanfence.com's own stylesheet).
 COLORS = {
     "bg": "#0b1120",
@@ -46,19 +49,93 @@ def logo_svg(size: int = 28) -> str:
     return f'<svg width="{size}" height="{size}" viewBox="0 0 64 64" role="img" aria-label="LAN Fence logo">{_LOGO_INNER}</svg>'
 
 
-#: Plain-HTML copyright/license/repo line, used in the web portal's page
-#: footer.
-FOOTER_HTML = (
-    '&copy; 2026 <a href="https://www.stablestate.co.uk">Stable State Consulting Ltd</a>. '
-    "LAN Fence is open-source software released under the "
-    '<a href="https://opensource.org/licenses/MIT">MIT License</a>. '
-    '<a href="https://github.com/rosscooney/lanfence">Source (GitHub)</a>.'
-)
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
-#: Same information as :data:`FOOTER_HTML`, reordered/relined for the HTML
-#: digest email specifically (license/source line first, copyright line
-#: second) - see ``lanfence/digest.py``'s ``format_digest_html``.
-EMAIL_FOOTER_HTML = (
+
+def render_logo_png(size: int = 64) -> bytes:
+    """A raster (PNG) rendition of the logo mark, pixel-drawn in pure
+    Python (``struct``/``zlib`` only - no image library dependency) and
+    hand-encoded as a real PNG file. Used only for the HTML digest email's
+    inline logo (``lanfence/digest.py``): many mail clients (Gmail among
+    them) strip inline ``<svg>`` markup from HTML email entirely, so the
+    crisper :func:`logo_svg` used by the web portal isn't a safe choice
+    there - a `Content-ID`-attached raster image is the one approach that
+    reliably renders across mail clients, including older ones that also
+    reject SVG and data-URI images alike.
+
+    Deliberately a simplified approximation of the vector mark (flat
+    fill, no gradient, no rounded corners) rather than a pixel-perfect
+    match - correctness of the PNG format matters far more here than
+    fidelity for a small decorative logo.
+    """
+
+    bg = (0x0F, 0x17, 0x2A)
+    border = (0x23, 0x30, 0x4D)
+    fence = (0xE6, 0xEC, 0xF7)
+    accent = (0x2D, 0xD4, 0xBF)
+
+    pixels = [[bg for _ in range(size)] for _ in range(size)]
+    scale = size / 64.0
+
+    def set_px(x: int, y: int, color: tuple[int, int, int]) -> None:
+        if 0 <= x < size and 0 <= y < size:
+            pixels[y][x] = color
+
+    def fill_rect(x0: float, y0: float, x1: float, y1: float, color: tuple[int, int, int]) -> None:
+        for y in range(round(y0 * scale), round(y1 * scale)):
+            for x in range(round(x0 * scale), round(x1 * scale)):
+                set_px(x, y, color)
+
+    # Border ring.
+    fill_rect(0, 0, 64, 2, border)
+    fill_rect(0, 62, 64, 64, border)
+    fill_rect(0, 0, 2, 64, border)
+    fill_rect(62, 0, 64, 64, border)
+
+    # Three fence-post bars and two rails, echoing the SVG mark's motif.
+    for x0 in (12, 22, 32):
+        fill_rect(x0, 11, x0 + 3, 38, fence)
+    fill_rect(9, 21, 42, 24, fence)
+    fill_rect(9, 31, 42, 34, fence)
+
+    # Magnifier ring (a flat accent colour standing in for the SVG's
+    # gradient stroke - solid fill is simpler and reads fine at this size).
+    cx, cy, radius, thickness = 42.0, 40.0, 11.0, 3.2
+    for y in range(size):
+        for x in range(size):
+            dx, dy = x / scale - cx, y / scale - cy
+            dist = (dx * dx + dy * dy) ** 0.5
+            if radius - thickness / 2 <= dist <= radius + thickness / 2:
+                set_px(x, y, accent)
+
+    # Magnifier handle: a short thick diagonal line.
+    hx0, hy0, hx1, hy1 = 50.0, 48.0, 57.0, 55.0
+    steps = size * 4
+    for i in range(steps + 1):
+        t = i / steps
+        lx, ly = hx0 + (hx1 - hx0) * t, hy0 + (hy1 - hy0) * t
+        for ox in (-1.5, -0.5, 0.5, 1.5):
+            for oy in (-1.5, -0.5, 0.5, 1.5):
+                set_px(round((lx + ox) * scale), round((ly + oy) * scale), accent)
+
+    raw = bytearray()
+    for row in pixels:
+        raw.append(0)  # scanline filter type 0 ("None")
+        for r, g, b in row:
+            raw.extend((r, g, b))
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit depth, colour type 2 = truecolor
+    idat = zlib.compress(bytes(raw), 9)
+    return signature + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
+
+
+#: Plain-HTML copyright/license/repo footer, shared verbatim by the web
+#: portal's page footer (``lanfence/web.py``) and the HTML digest email
+#: (``lanfence/digest.py``'s ``format_digest_html``) - license/source line
+#: first, copyright line second.
+FOOTER_HTML = (
     "LAN Fence is open-source software released under the "
     '<a href="https://opensource.org/licenses/MIT">MIT License</a>. '
     '<a href="https://github.com/rosscooney/lanfence">Source (GitHub)</a>.<br>'

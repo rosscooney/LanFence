@@ -12,6 +12,7 @@ from lanfence.digest import (
     dispatch_digest,
     format_digest_html,
     format_digest_text,
+    monitor_status_line,
     send_digest_discord,
     send_digest_email,
     send_digest_ntfy,
@@ -318,6 +319,36 @@ def test_format_digest_text_omits_portal_line_when_none(tmp_path: Path):
     assert "Manage devices" not in format_digest_text(digest)
 
 
+def test_digest_monitor_running_defaults_to_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
+    assert digest.monitor_running is None
+    assert monitor_status_line(digest) is None
+
+
+def test_digest_monitor_running_true_shown_in_text_and_html(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(
+            store, Allowlist.load(None), since=now - timedelta(hours=1), until=now, monitor_running=True,
+        )
+    assert monitor_status_line(digest) == "Monitor: running"
+    assert "Monitor: running" in format_digest_text(digest)
+    assert "Monitor: running" in format_digest_html(digest)
+
+
+def test_digest_monitor_running_false_shown_as_not_running(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(
+            store, Allowlist.load(None), since=now - timedelta(hours=1), until=now, monitor_running=False,
+        )
+    assert monitor_status_line(digest) == "Monitor: not running"
+    assert "Monitor: not running" in format_digest_text(digest)
+    assert "Monitor: not running" in format_digest_html(digest)
+
+
 def test_digest_webhook_payload_includes_portal_url(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         now = _now()
@@ -422,7 +453,7 @@ def test_format_digest_html_contains_branding_and_device(tmp_path: Path):
     assert "stablestate.co.uk" in html_body
     assert "MIT License" in html_body
     assert "github.com/rosscooney/lanfence" in html_body
-    assert "<svg" in html_body
+    assert 'src="cid:lanfence-logo"' in html_body
 
 
 def test_format_digest_html_includes_portal_link_when_present(tmp_path: Path):
@@ -470,6 +501,27 @@ def test_send_digest_email_is_multipart_with_html_alternative(tmp_path: Path):
     assert "text/html" in content_types
     html_part = next(part for part in sent_msg.walk() if part.get_content_type() == "text/html")
     assert "LAN Fence" in html_part.get_content()
+
+
+def test_send_digest_email_attaches_logo_with_matching_content_id(tmp_path: Path):
+    digest = _digest(tmp_path)
+    cfg = Config(alerts={"email": {
+        "enabled": True, "from_addr": "lanfence@example.com", "to_addrs": ["me@example.com"],
+    }})
+
+    with patch("lanfence.digest.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        send_digest_email(digest, cfg)
+    sent_msg = instance.send_message.call_args.args[0]
+
+    image_parts = [part for part in sent_msg.walk() if part.get_content_type() == "image/png"]
+    assert len(image_parts) == 1
+    assert image_parts[0].get("Content-ID") == "<lanfence-logo>"
+    assert image_parts[0].get("Content-Disposition", "").startswith("inline")
+    assert image_parts[0].get_payload(decode=True)[:8] == b"\x89PNG\r\n\x1a\n"
+
+    html_part = next(part for part in sent_msg.walk() if part.get_content_type() == "text/html")
+    assert 'src="cid:lanfence-logo"' in html_part.get_content()
 
 
 def test_send_digest_webhook_success(tmp_path: Path):

@@ -750,6 +750,89 @@ def test_reset_all_on_empty_database_is_a_noop(tmp_path: Path):
         assert store.all_devices() == []
 
 
+# --- delete_device ---------------------------------------------------------
+
+
+def test_delete_device_removes_device_and_per_device_data(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=t0)
+        store.set_investigating("aa:bb:cc:dd:ee:ff", notes="hmm", updated_at=t0)
+        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Ross")
+
+        deleted = store.delete_device("aa:bb:cc:dd:ee:ff")
+
+        assert deleted is True
+        assert store.get_device("aa:bb:cc:dd:ee:ff") is None
+        assert store.events_since(t0 - timedelta(days=1)) == []
+        assert store.get_review("aa:bb:cc:dd:ee:ff").state == "pending"  # back to the empty-row default
+        assert store.get_device_metadata("aa:bb:cc:dd:ee:ff").owner is None
+
+
+def test_delete_device_returns_false_for_unknown_mac(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        assert store.delete_device("aa:bb:cc:dd:ee:ff") is False
+
+
+def test_delete_device_leaves_other_devices_untouched(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=t0)
+        store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=t0)
+
+        store.delete_device("aa:bb:cc:dd:ee:ff")
+
+        assert store.get_device("aa:bb:cc:dd:ee:ff") is None
+        assert store.get_device("11:22:33:44:55:66") is not None
+
+
+# --- preferred_addresses_by_family_for_macs --------------------------------
+
+
+def test_preferred_addresses_by_family_returns_both_families(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=t0)
+        store.record_address_evidence(
+            mac="aa:bb:cc:dd:ee:ff", ip="fe80::1234", interface="eth0",
+            source="ipv6_nd", kind="direct", seen_at=t0,
+        )
+        result = store.preferred_addresses_by_family_for_macs(["aa:bb:cc:dd:ee:ff"])
+        assert result["aa:bb:cc:dd:ee:ff"] == {"ipv4": "10.0.0.5", "ipv6": "fe80::1234"}
+
+
+def test_preferred_addresses_by_family_missing_family_is_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+        result = store.preferred_addresses_by_family_for_macs(["aa:bb:cc:dd:ee:ff"])
+        assert result["aa:bb:cc:dd:ee:ff"] == {"ipv4": "10.0.0.5", "ipv6": None}
+
+
+def test_preferred_addresses_by_family_empty_macs_list(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        assert store.preferred_addresses_by_family_for_macs([]) == {}
+
+
+def test_preferred_addresses_by_family_unknown_mac_absent(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        result = store.preferred_addresses_by_family_for_macs(["aa:bb:cc:dd:ee:ff"])
+        assert result == {}
+
+
+def test_preferred_addresses_by_family_prefers_most_recent_within_tier(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        t1 = t0 + timedelta(minutes=5)
+        store.record_address_evidence(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", interface="eth0", source="arp", kind="direct", seen_at=t0,
+        )
+        store.record_address_evidence(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.9", interface="eth0", source="arp", kind="direct", seen_at=t1,
+        )
+        result = store.preferred_addresses_by_family_for_macs(["aa:bb:cc:dd:ee:ff"])
+        assert result["aa:bb:cc:dd:ee:ff"]["ipv4"] == "10.0.0.9"
+
+
 # --- active inspection results ----------------------------------------------
 
 

@@ -22,6 +22,7 @@ from lanfence.models import (
     NameEvidence,
     ScanResult,
 )
+from lanfence.digest import monitor_status_line
 from lanfence.web import PORTAL_NOT_RUNNING_NOTE
 
 try:  # rich ships with typer, but keep rendering optional
@@ -369,6 +370,21 @@ def presence_label(device: Device, *, default_offline_after_seconds: float | Non
     return f"Presence: {_presence_value(device, default_offline_after_seconds=default_offline_after_seconds)}"
 
 
+def _ip_display(device: Device, *, empty: str = "-") -> str:
+    """Both addresses side by side for a dual-stack device ("192.168.1.5 /
+    fe80::1234"), or whichever one it actually has; ``device.ip`` (the
+    single "preferred overall" address - see
+    :meth:`lanfence.db.DeviceStore.preferred_address`) is only a fallback,
+    for the rare legacy-data case where per-family evidence isn't
+    available but a raw value is - see ``ipv4``/``ipv6``'s own docstring
+    on :class:`lanfence.models.Device`."""
+
+    parts = [ip for ip in (device.ipv4, device.ipv6) if ip]
+    if parts:
+        return " / ".join(parts)
+    return device.ip or empty
+
+
 def render_device_inventory(
     devices: list[Device], *, now: datetime, total_count: int | None = None, plain: bool = False,
     default_offline_after_seconds: float | None = None, show_metadata: bool = False,
@@ -395,7 +411,7 @@ def render_device_inventory(
         trust = f"trusted ({d.allowlist_name})" if d.allowlisted else "untrusted"
         presence = _presence_value(d, default_offline_after_seconds=default_offline_after_seconds)
         line = (
-            f"  - {d.mac}  {d.ip or '-':<15}  {d.hostname or '[unknown]':<24}  "
+            f"  - {d.mac}  {_ip_display(d):<15}  {d.hostname or '[unknown]':<24}  "
             f"{d.vendor or '[unknown]':<20}  {d.status:<8}  {trust:<20}  "
             f"{review_status_label(d, now=now):<28}  {presence:<28}  "
             f"{d.last_seen.isoformat(timespec='seconds')}"
@@ -435,7 +451,7 @@ def render_device_inventory(
     for d in devices:
         row = [
             d.mac,
-            d.ip or "-",
+            _rich_escape(_ip_display(d)),
             _rich_escape(d.hostname or "[unknown]"),
             _rich_escape(d.vendor or "[unknown]"),
             d.status,
@@ -803,7 +819,7 @@ def render_device_detail(
         f"Device {device.mac}",
         "",
         "Current details (as of the most recent sighting):",
-        f"  IP:         {device.ip or '[unknown]'}",
+        f"  IP:         {_ip_display(device, empty='[unknown]')}",
         f"  Hostname:   {device.hostname or '[unknown]'}",
         f"  Vendor:     {device.vendor or '[unknown]'}",
         f"  Status:     {device.status}",
@@ -869,7 +885,7 @@ def render_device_detail(
     console = Console()
     detail_lines = [
         "[bold]Current details[/bold] (as of the most recent sighting):",
-        f"IP:         {device.ip or '[unknown]'}",
+        f"IP:         {_rich_escape(_ip_display(device, empty='[unknown]'))}",
         f"Hostname:   {_rich_escape(device.hostname or '[unknown]')}",
         f"Vendor:     {_rich_escape(device.vendor or '[unknown]')}",
         f"Status:     {device.status}",
@@ -1034,6 +1050,9 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         f"Missing always-on: {digest.missing_always_on.total_count}",
         digest.monitoring_health,
     ]
+    status_line = monitor_status_line(digest)
+    if status_line:
+        lines.append(status_line)
     lines.append(f"Manage devices: {digest.portal_url}" if digest.portal_url else PORTAL_NOT_RUNNING_NOTE)
     lines.append("")
     lines += _section_lines("New devices", digest.new_devices)
@@ -1064,6 +1083,10 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         f"Investigating: {digest.investigating.total_count}   "
         f"Missing always-on: {digest.missing_always_on.total_count}"
     )
+    status_line = monitor_status_line(digest)
+    if status_line:
+        style = "green" if digest.monitor_running else "dim"
+        console.print(f"[{style}]{_rich_escape(status_line)}[/{style}]")
     if digest.portal_url:
         console.print(f"[dim]Manage devices: {_rich_escape(digest.portal_url)}[/dim]")
     else:

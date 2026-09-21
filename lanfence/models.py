@@ -101,6 +101,14 @@ class Device(BaseModel):
 
     mac: str
     ip: str | None = None
+    #: This device's current preferred address in each family separately
+    #: (see :meth:`lanfence.db.DeviceStore.preferred_addresses_by_family_for_macs`),
+    #: so a dual-stack device can show both instead of just whichever
+    #: family ``ip`` above happens to prefer overall. ``None`` unless a
+    #: device inventory query has populated it - same join-at-read pattern
+    #: as ``review_state``/``metadata``.
+    ipv4: str | None = None
+    ipv6: str | None = None
     hostname: str | None = None
     vendor: str | None = None
     status: Literal["online", "offline"] = "online"
@@ -139,7 +147,7 @@ class Device(BaseModel):
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("ip", "hostname", "vendor", "allowlist_name", "review_notes")
+    @field_validator("ip", "ipv4", "ipv6", "hostname", "vendor", "allowlist_name", "review_notes")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None
@@ -460,6 +468,16 @@ class Digest(BaseModel):
     activity: DigestActivity = Field(default_factory=DigestActivity)
 
     monitoring_health: str = "Monitoring health unavailable"
+    #: Whether `lanfence monitor` is running right now, checked via its own
+    #: pidfile (see ``lanfence/monitor_status.py``) - ``None`` if this was
+    #: never checked. Distinct from ``monitoring_health`` above: this is a
+    #: live, present-tense check ("is the process up as of right now"),
+    #: not a durable historical record of past uptime/alert-delivery
+    #: success, which this version still doesn't persist. Set by the
+    #: caller (`lanfence digest`), never computed inside
+    #: :func:`lanfence.digest.build_digest` itself, for the same
+    #: presentation-vs-database-read reason as ``portal_url`` below.
+    monitor_running: bool | None = None
     #: Capabilities this digest could not draw on because the underlying
     #: data isn't implemented/persisted in this version - e.g. historical
     #: security-finding storage, or monitor health tracking.

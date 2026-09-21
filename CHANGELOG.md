@@ -13,6 +13,48 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Changed
+
+- The web portal's footer now matches the digest email's (license/source
+  line first, copyright line second) - both are the same shared constant,
+  so they can't drift apart again.
+
+### Added
+
+- The web portal's device list is now sortable by clicking any column
+  heading (Name, MAC, IP, Vendor, Status, Trust); clicking again reverses
+  direction. Plain server-rendered links (`?sort=<column>&dir=asc|desc`),
+  no JavaScript. IP addresses sort numerically, not as plain text.
+- **Untrust a device from the web portal.** A trusted device's page now
+  has an "Untrust this device" action (with a confirmation prompt) - the
+  same effect as the CLI's existing `lanfence allow --remove <MAC>`.
+- **Dual-stack IP display.** A device with both a currently-retained IPv4
+  and IPv6 address now shows both, side by side, in `lanfence device`
+  (list and single-device views) and the web portal (list and detail
+  pages) - not just whichever one LAN Fence would otherwise treat as the
+  single "preferred" address.
+- **`lanfence device --delete-new-offline`**: permanently deletes every
+  device that's never been reviewed at all (still "pending"), is
+  currently offline, and isn't on the allowlist - a bulk cleanup for
+  one-off devices that showed up once and aren't coming back. Never
+  touches a snoozed/investigating/trusted/online device. Lists matches
+  and asks for confirmation first (`--yes` for scripted use); cannot be
+  undone.
+- **`lanfence digest` now reports whether `lanfence monitor` is running**
+  right now ("Monitor: running"/"Monitor: not running"), checked via the
+  same pidfile convention the web portal uses - shown in the CLI table,
+  the plain-text/HTML digest bodies, and the JSON payload
+  (`Digest.monitor_running`). Distinct from the existing "Monitoring
+  health unavailable" line, which remains a historical record this
+  version still doesn't persist.
+- **The digest email's logo is now a real embedded image** (a
+  `Content-ID`-attached PNG, generated at send time with the standard
+  library only - no image-library dependency), replacing the inline
+  `<svg>` that several mail clients (Gmail among them) silently strip
+  from HTML email.
+
 ## [0.5.2] - 2026-09-21
 
 ### Changed

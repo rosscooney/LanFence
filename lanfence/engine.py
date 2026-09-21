@@ -544,14 +544,21 @@ def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
 
 
 def _join_device_context(
-    device: Device, *, review, presence, metadata: DeviceMetadata, allow_entry,
+    device: Device, *, review, presence, metadata: DeviceMetadata, allow_entry, addresses_by_family=None,
 ) -> Device:
     """The allowlist/review/presence/metadata join shared by
     :func:`build_inventory` (bulk) and :func:`build_device` (one MAC) - the
     single place this join is implemented, so `lanfence device`/`review`/
     `allow` and anything else needing "this device's current joined state"
-    never reimplement their own slightly-different copy of it."""
+    never reimplement their own slightly-different copy of it.
 
+    ``addresses_by_family`` (``{"ipv4": ..., "ipv6": ...}``, or ``None`` if
+    there's no address evidence at all) is this device's preferred address
+    in each family separately - see
+    :meth:`lanfence.db.DeviceStore.preferred_addresses_by_family_for_macs`.
+    """
+
+    addresses_by_family = addresses_by_family or {}
     return device.model_copy(
         update={
             "allowlisted": allow_entry is not None,
@@ -562,6 +569,8 @@ def _join_device_context(
             "presence_policy": presence.policy,
             "offline_after_seconds": presence.offline_after_seconds,
             "metadata": metadata,
+            "ipv4": addresses_by_family.get("ipv4"),
+            "ipv6": addresses_by_family.get("ipv6"),
         }
     )
 
@@ -571,14 +580,18 @@ def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
     presence/metadata state joined in. Does not perform a scan - purely a
     database read.
 
-    Metadata is fetched in one bulk query for the whole inventory (see
-    :meth:`lanfence.db.DeviceStore.device_metadata_for_macs`) rather than
-    one query per device, since a device list can be large and metadata is
-    shown for every row.
+    Metadata and per-family preferred addresses are each fetched in one
+    bulk query for the whole inventory (see
+    :meth:`lanfence.db.DeviceStore.device_metadata_for_macs`/
+    ``preferred_addresses_by_family_for_macs``) rather than one query per
+    device, since a device list can be large and both are shown for every
+    row.
     """
 
     devices = store.all_devices()
-    metadata_by_mac = store.device_metadata_for_macs([d.mac for d in devices])
+    macs = [d.mac for d in devices]
+    metadata_by_mac = store.device_metadata_for_macs(macs)
+    addresses_by_mac = store.preferred_addresses_by_family_for_macs(macs)
     return [
         _join_device_context(
             device,
@@ -586,6 +599,7 @@ def build_inventory(store: DeviceStore, allowlist: Allowlist) -> list[Device]:
             presence=store.get_presence(device.mac),
             metadata=metadata_by_mac.get(device.mac) or DeviceMetadata(mac=device.mac),
             allow_entry=allowlist.match(device.mac),
+            addresses_by_family=addresses_by_mac.get(device.mac),
         )
         for device in devices
     ]
@@ -603,12 +617,14 @@ def build_device(store: DeviceStore, allowlist: Allowlist, mac: str) -> Device |
     raw_device = store.get_device(mac)
     if raw_device is None:
         return None
+    addresses_by_mac = store.preferred_addresses_by_family_for_macs([mac])
     return _join_device_context(
         raw_device,
         review=store.get_review(mac),
         presence=store.get_presence(mac),
         metadata=store.get_device_metadata(mac),
         allow_entry=allowlist.match(mac),
+        addresses_by_family=addresses_by_mac.get(mac),
     )
 
 

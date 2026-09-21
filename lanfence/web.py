@@ -592,6 +592,8 @@ thead th {
   background: var(--bg-alt); font-size: 0.78rem; text-transform: uppercase;
   letter-spacing: 0.05em; color: var(--muted);
 }
+thead th a { color: inherit; text-decoration: none; white-space: nowrap; }
+thead th a:hover { color: var(--text); text-decoration: underline; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: rgba(148,163,184,0.06); }
 code { font-family: var(--mono); font-size: 0.85em; background: rgba(148,163,184,0.14); padding: 0.1em 0.4em; border-radius: 5px; }
@@ -615,6 +617,8 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn:hover { background: #4fe3d2; }
 .btn--ghost { background: transparent; border-color: var(--border); color: var(--text); }
 .btn--ghost:hover { border-color: var(--accent); background: transparent; }
+.btn--danger { background: transparent; border-color: #7c3d3d; color: #fca5a5; }
+.btn--danger:hover { background: rgba(248,113,113,0.12); }
 .flash { padding: 0.7rem 1rem; border-radius: var(--radius); margin-bottom: 1.2rem; }
 .flash--ok { background: rgba(45,212,191,0.12); border: 1px solid #1f6f63; color: #9df0e4; }
 .flash--error { background: rgba(248,113,113,0.12); border: 1px solid #7c3d3d; color: #fca5a5; }
@@ -674,28 +678,82 @@ def _trust_badge(device: Device) -> str:
     return '<span class="badge badge--untrusted">untrusted</span>'
 
 
-def _render_device_list(devices: list[Device]) -> str:
+def _ip_display(device: Device) -> str:
+    """Both addresses for a dual-stack device, or whichever one it
+    actually has - see ``lanfence.report``'s identical helper and
+    ``Device.ipv4``/``ipv6``'s own docstring for why ``device.ip`` (a
+    single "preferred overall" address) is only a fallback."""
+
+    parts = [ip for ip in (device.ipv4, device.ipv6) if ip]
+    if parts:
+        return " / ".join(parts)
+    return device.ip or "-"
+
+
+def _ip_sort_key(ip: str | None) -> tuple[int, object]:
+    """Numeric ordering for dotted-quad addresses (so .9 sorts before .10,
+    unlike a plain string sort) - devices with no IP sort last either way."""
+
+    if not ip:
+        return (1, "")
+    try:
+        return (0, int(ipaddress.ip_address(ip)))
+    except ValueError:
+        return (1, ip)
+
+
+#: Column key -> (header label, sort key function). Order here is the
+#: table's column order. Every sort key is on the same text actually shown
+#: in that column (e.g. "trusted"/"untrusted", not the raw boolean), so
+#: sorting always matches what you see.
+_DEVICE_LIST_COLUMNS: dict[str, tuple[str, object]] = {
+    "name": ("Name", lambda d: (d.allowlist_name or d.hostname or "").casefold()),
+    "mac": ("MAC", lambda d: d.mac),
+    "ip": ("IP", lambda d: _ip_sort_key(d.ip)),
+    "vendor": ("Vendor", lambda d: (d.vendor or "").casefold()),
+    "status": ("Status", lambda d: d.status),
+    "trust": ("Trust", lambda d: "trusted" if d.allowlisted else "untrusted"),
+}
+_DEFAULT_SORT = "mac"
+
+
+def _render_device_list(devices: list[Device], *, sort: str = _DEFAULT_SORT, direction: str = "asc") -> str:
+    if sort not in _DEVICE_LIST_COLUMNS:
+        sort = _DEFAULT_SORT
+    if direction not in ("asc", "desc"):
+        direction = "asc"
+    key_fn = _DEVICE_LIST_COLUMNS[sort][1]
+    ordered = sorted(devices, key=key_fn, reverse=(direction == "desc"))
+
     if not devices:
         rows = '<tr><td colspan="6" class="muted">No devices in the database yet - run `lanfence scan` first.</td></tr>'
     else:
         rows = ""
-        for device in sorted(devices, key=lambda d: d.mac):
+        for device in ordered:
             label = html.escape(device.allowlist_name or device.hostname or "[unknown]")
             rows += (
                 "<tr>"
                 f'<td><a href="/device/{html.escape(device.mac)}">{label}</a></td>'
                 f"<td><code>{html.escape(device.mac)}</code></td>"
-                f"<td>{html.escape(device.ip or '-')}</td>"
+                f"<td>{html.escape(_ip_display(device))}</td>"
                 f"<td>{html.escape(device.vendor or '[unknown]')}</td>"
                 f"<td>{_status_badge(device)}</td>"
                 f"<td>{_trust_badge(device)}</td>"
                 "</tr>"
             )
+
+    headers = ""
+    for key, (label, _fn) in _DEVICE_LIST_COLUMNS.items():
+        is_active = key == sort
+        next_dir = "desc" if is_active and direction == "asc" else "asc"
+        indicator = (" &#9650;" if direction == "asc" else " &#9660;") if is_active else ""
+        headers += f'<th><a href="/?sort={key}&amp;dir={next_dir}">{html.escape(label)}{indicator}</a></th>'
+
     body = f"""
 <h1>Devices</h1>
 <div class="table-scroll panel" style="padding:0">
 <table>
-<thead><tr><th>Name</th><th>MAC</th><th>IP</th><th>Vendor</th><th>Status</th><th>Trust</th></tr></thead>
+<thead><tr>{headers}</tr></thead>
 <tbody>{rows}</tbody>
 </table>
 </div>
@@ -750,6 +808,11 @@ def _render_device_detail(device: Device, *, message: str | None = None, error: 
 </div>
 <button class="btn" type="submit">Save name</button>
 </form>
+<form method="post" action="/device/{html.escape(device.mac)}" style="margin-top:0.9rem"
+      onsubmit="return confirm('Remove this device from the allowlist? Its findings will be treated as untrusted again.');">
+<input type="hidden" name="action" value="untrust">
+<button class="btn btn--danger" type="submit">Untrust this device</button>
+</form>
 """
     else:
         trust_section = f"""
@@ -781,7 +844,7 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 <div class="panel">
 <p>
 <code>{html.escape(device.mac)}</code> &middot;
-{html.escape(device.ip or '-')} &middot;
+{html.escape(_ip_display(device))} &middot;
 {html.escape(device.vendor or '[unknown]')} &middot;
 {_status_badge(device)} {_trust_badge(device)}
 </p>
@@ -908,11 +971,17 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
         # --- handlers ------------------------------------------------------
 
         def _handle_index(self) -> None:
+            query = parse_qs(urlsplit(self.path).query)
+            sort = query.get("sort", [_DEFAULT_SORT])[0]
+            direction = query.get("dir", ["asc"])[0]
             with DeviceStore(context.cfg.resolved_db_path()) as store:
                 allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
                 apply_self_trust(allowlist, interface=context.cfg.scan.interface)
                 devices = build_inventory(store, allowlist)
-            self._send(HTTPStatus.OK, _page(title="Devices", body=_render_device_list(devices), authed=True))
+            self._send(
+                HTTPStatus.OK,
+                _page(title="Devices", body=_render_device_list(devices, sort=sort, direction=direction), authed=True),
+            )
 
         def _handle_device_get(self, raw_mac: str) -> None:
             try:
@@ -954,6 +1023,13 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                     allowlist.add(mac, name, existing.notes if existing else "")
                     allowlist.save()
                     message = "Device trusted." if action == "trust" else "Name updated."
+            elif action == "untrust":
+                entry = allowlist.remove(mac)
+                if entry is None:
+                    error = "This device is not on the allowlist."
+                else:
+                    allowlist.save()
+                    message = "Device untrusted - its findings are treated as untrusted again."
             elif action == "metadata":
                 updates: dict[str, str | None] = {}
                 try:

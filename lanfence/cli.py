@@ -24,7 +24,7 @@ from typing import Optional
 
 import typer
 
-from lanfence import __version__, active_inspect, alerts, discovery, monitor_ui, scanner, web
+from lanfence import __version__, active_inspect, alerts, discovery, monitor_status, monitor_ui, scanner, web
 from lanfence.alert_worker import AlertDeliveryWorker
 from lanfence.allowlist import Allowlist
 from lanfence.channels import (
@@ -587,6 +587,8 @@ def monitor(
     if not _is_root():
         _warn_not_root("monitor")
 
+    monitor_status.write_pid_file()
+
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     store = DeviceStore(
@@ -896,6 +898,7 @@ def monitor(
         stop_event.set()
         alert_worker.shutdown()
         store.close()
+        monitor_status.remove_pid_file()
 
 
 @app.command()
@@ -953,9 +956,12 @@ def digest(
     apply_self_trust(allowlist, interface=cfg.scan.interface)
     signatures = SignatureSet.load(cfg.rogue_signatures_file) if verbose else None
     portal_url = web.build_portal_url(cfg)
+    monitor_running = monitor_status.is_running()
 
     with DeviceStore(cfg.resolved_db_path()) as store:
-        digest_obj = build_digest(store, allowlist, since=since_dt, until=until, portal_url=portal_url)
+        digest_obj = build_digest(
+            store, allowlist, since=since_dt, until=until, portal_url=portal_url, monitor_running=monitor_running,
+        )
         events = store.events_since(since_dt) if verbose else []
         devices_by_mac = {d.mac: d for d in store.all_devices()} if verbose else {}
 
@@ -1363,6 +1369,49 @@ def _list_devices(
         )
 
 
+def _delete_new_offline_devices(*, config: Optional[Path], yes: bool) -> None:
+    """`lanfence device --delete-new-offline` - see that command's own
+    docstring for exactly what "new" means here. Permanently deletes each
+    matching device via :meth:`lanfence.db.DeviceStore.delete_device`;
+    never touches the allowlist (a matching device is never on it, by
+    definition - ``allowlisted`` is part of the filter)."""
+
+    cfg = _load_config(config)
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interface)
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        inventory = build_inventory(store, allowlist)
+        targets = [
+            d for d in inventory
+            if d.review_state == "pending" and d.status == "offline" and not d.allowlisted
+        ]
+        if not targets:
+            typer.echo("No new, offline devices to delete.")
+            return
+
+        typer.secho(f"{len(targets)} device(s) will be permanently deleted:", fg="yellow")
+        for d in targets:
+            label = d.hostname or "[unknown]"
+            typer.echo(f"  {d.mac}  {label}  {d.vendor or '[unknown]'}")
+
+        if not yes:
+            if not _stdin_is_interactive():
+                typer.secho(
+                    "error: this needs confirmation - pass --yes to run noninteractively.",
+                    fg="red", err=True,
+                )
+                raise typer.Exit(code=2)
+            if not typer.confirm("Permanently delete these devices? This cannot be undone.", default=False):
+                typer.echo("aborted - nothing changed.")
+                return
+
+        for d in targets:
+            store.delete_device(d.mac)
+
+    typer.secho(f"deleted {len(targets)} device(s).", fg="green")
+
+
 @app.command()
 def device(
     mac: Optional[str] = typer.Argument(
@@ -1401,6 +1450,14 @@ def device(
     details: bool = typer.Option(
         False, "--details", help="Without a MAC: also show owner/purpose/group/location columns (table format only)."
     ),
+    delete_new_offline: bool = typer.Option(
+        False, "--delete-new-offline",
+        help="Without a MAC: permanently delete every never-reviewed, currently-offline, "
+        "untrusted device. Lists them and asks for confirmation first.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt for --delete-new-offline."
+    ),
     output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
 ) -> None:
@@ -1431,7 +1488,22 @@ def device(
     Without a MAC address: lists every previously observed device from the
     database (no scan) - `--status`/`--untrusted`/`--review-needed`/
     `--details` filter and shape that listing; see `lanfence device --help`.
+
+    `--delete-new-offline` (also without a MAC) permanently deletes every
+    device that has never been reviewed at all (still "pending" - never
+    trusted, snoozed, or flagged investigating), is currently offline, and
+    is not on the allowlist - a bulk cleanup for one-off devices that
+    showed up once and aren't coming back. It never touches a device
+    that's been snoozed or flagged investigating, since that reflects a
+    deliberate decision already made about it. Lists the matching devices
+    and asks for confirmation before deleting anything (`--yes` skips
+    this for scripted use); this cannot be undone, and does not touch the
+    allowlist (a device this matches is by definition not on it).
     """
+
+    if delete_new_offline:
+        _delete_new_offline_devices(config=config, yes=yes)
+        return
 
     if mac is None:
         _list_devices(

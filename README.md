@@ -316,6 +316,7 @@ lanfence device --status online            # combine filters with AND
 lanfence device --untrusted --review-needed --format json
 lanfence device aa:bb:cc:dd:ee:ff          # one device's details + timeline
 lanfence device aa:bb:cc:dd:ee:ff --since 7d --format json
+lanfence device --delete-new-offline       # bulk-delete never-reviewed, offline devices
 lanfence review                           # walk the review queue interactively
 lanfence review <MAC> --trust --name "Kitchen speaker" --notes "..."
 lanfence review <MAC> --snooze 24h
@@ -339,7 +340,23 @@ reflect only the most recent sighting, and a *lifecycle timeline* of
 connect/reappear/disconnect events since `--since` (default `30d`). The
 timeline is an append-only event log, not a full history of every address a
 MAC has ever held - LAN Fence does not retain that. An invalid or
-never-before-seen MAC exits non-zero with a clear error.
+never-before-seen MAC exits non-zero with a clear error. A dual-stack
+device (both an IPv4 and an IPv6 address currently retained as evidence)
+shows both, side by side (`192.168.1.5 / fe80::1234`), in this view and in
+the no-MAC listing above - not just whichever address LAN Fence would
+otherwise treat as the single "preferred" one.
+
+`lanfence device --delete-new-offline` permanently deletes every device
+that's never been reviewed at all (still "pending" - never trusted,
+snoozed, or flagged investigating), is currently offline, and isn't on the
+allowlist - a bulk cleanup for one-off devices (a visitor's phone, a
+delivery scanner) that showed up once and aren't coming back. It never
+touches a device you've already snoozed or flagged investigating, since
+that reflects a deliberate decision already made about it, nor a currently
+trusted or online one. Lists the matching devices and asks for
+confirmation first (`--yes` skips this for scripted/cron use); this cannot
+be undone, and never touches the allowlist (a matching device is by
+definition not on it).
 
 `lanfence review` is how you act on the queue. With no MAC, it walks devices
 needing review one at a time, ordered by **review priority** (see
@@ -828,6 +845,11 @@ A digest reports, clearly separated:
   uptime or alert-delivery success/failure to draw on, so this always reads
   *"Monitoring health unavailable"* rather than guessing "healthy" - a
   known, documented gap, not a bug.
+- **Monitor status**: separately, whether `lanfence monitor` is running on
+  this host *right now* ("Monitor: running"/"Monitor: not running"),
+  checked via the same pidfile convention as the web portal - a live,
+  present-tense check, not the historical record "Monitoring health"
+  above still doesn't have.
 
 A device can legitimately appear in more than one section (e.g. new *and*
 still needing review) since each section states a different fact; within a
@@ -869,7 +891,13 @@ color palette, matching the web portal - see below) - sent as a standard
 multipart message with a plain-text alternative alongside it, so a
 text-only mail client still gets a complete, readable body either way.
 Every value that could come from an untrusted device (a hostname, a name)
-is HTML-escaped before it's ever put in the email body.
+is HTML-escaped before it's ever put in the email body. The logo is a
+small raster image attached with a `Content-ID` and referenced as
+`cid:lanfence-logo` in the HTML - not an inline `<svg>` - since several
+mail clients (Gmail among them) strip inline SVG from HTML email entirely;
+a `Content-ID`-attached image is the one approach that reliably renders
+across mail clients, including older ones. It's generated at send time
+with the standard library only (no image-library dependency).
 
 A digest is **empty** when there's no window activity, no outstanding
 review/investigation items, no missing always-on devices, and no known
@@ -993,11 +1021,21 @@ this project avoids.
 ## Web portal
 
 `lanfence web` is a small local web server for browsing the device
-inventory and trusting/renaming/labeling a device from a browser instead of
-the CLI - the same underlying operations as `lanfence allow`/`device
---owner`/etc., just with a clickable interface. Built on the standard
-library only (no new dependency): a handful of small pages, not a general
-web application.
+inventory and trusting/untrusting/renaming/labeling a device from a
+browser instead of the CLI - the same underlying operations as `lanfence
+allow`/`lanfence allow --remove`/`device --owner`/etc., just with a
+clickable interface. Built on the standard library only (no new
+dependency): a handful of small pages, not a general web application. A
+trusted device's page has an "Untrust this device" action (with a
+confirmation prompt) - the same effect as `lanfence allow --remove <MAC>`.
+
+The device list is sortable by clicking any column heading (Name, MAC, IP,
+Vendor, Status, Trust) - clicking again reverses direction. This is plain
+server-rendered HTML (`?sort=<column>&dir=asc|desc`), no JavaScript
+required. IP addresses sort numerically (`10.0.0.2` before `10.0.0.10`),
+not as plain text. A dual-stack device shows both its IPv4 and IPv6
+address, side by side, in both the list and its own detail page - the
+same as the CLI's `lanfence device`.
 
 ```text
 lanfence setup       # Web portal section: enable it, set a password

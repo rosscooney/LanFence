@@ -1231,6 +1231,45 @@ class DeviceStore:
         )
         return best["ip"]
 
+    def preferred_addresses_by_family_for_macs(self, macs: list[str]) -> dict[str, dict[str, str | None]]:
+        """For each of ``macs``, its preferred IPv4 and IPv6 address
+        separately - :meth:`preferred_address`'s own priority rules
+        (directly-observed outranks DHCP-reported outranks legacy, most
+        recent wins within a tier), applied independently per address
+        family, so a device with both an IPv4 and an IPv6 address can show
+        both instead of just whichever family happens to win overall.
+
+        One query for every MAC requested, mirroring
+        :meth:`device_metadata_for_macs` - used by
+        :func:`lanfence.engine.build_inventory` so listing every device
+        doesn't cost two extra queries per row. A MAC with no evidence for
+        a given family is simply absent from that family's slot (``None``).
+        """
+
+        if not macs:
+            return {}
+        normalized = [normalize_mac(m) for m in macs]
+        placeholders = ",".join("?" * len(normalized))
+        rows = self._conn.execute(
+            f"SELECT mac, ip, family, source, last_seen FROM device_addresses WHERE mac IN ({placeholders})",
+            normalized,
+        ).fetchall()
+        best: dict[tuple[str, str], tuple[tuple, str]] = {}
+        for row in rows:
+            key = (row["mac"], row["family"])
+            candidate_rank = (
+                self._ADDRESS_SOURCE_PRIORITY.get(row["source"], 99),
+                -_parse_dt(row["last_seen"]).timestamp(),
+                row["ip"],
+            )
+            current = best.get(key)
+            if current is None or candidate_rank < current[0]:
+                best[key] = (candidate_rank, row["ip"])
+        result: dict[str, dict[str, str | None]] = {}
+        for (mac, family), (_rank, ip) in best.items():
+            result.setdefault(mac, {"ipv4": None, "ipv6": None})[family] = ip
+        return result
+
     def preferred_name(self, mac: str) -> str | None:
         """The single best display name for ``mac`` from retained evidence:
         a nonempty DHCP-reported name outranks reverse DNS, which outranks
@@ -1750,6 +1789,37 @@ class DeviceStore:
         for table in _DISCOVERY_TABLES_WITH_EXPIRY:
             self._conn.execute(f"DELETE FROM {table}")
         self._conn.commit()
+
+    #: Per-device tables cleared by :meth:`delete_device` - the same
+    #: per-MAC subset :meth:`reset_all` clears for every device, for
+    #: exactly one. Deliberately excludes global-scope tables
+    #: (``dhcp_servers``/``dhcp_server_findings``/``alert_global_window``/
+    #: ``sms_budget``, none of which are owned by one device) and the
+    #: mDNS/SSDP discovery-cache tables (only loosely associated with a
+    #: device by hostname/IP match, not a hard foreign key - left to their
+    #: own TTL-based expiry rather than risk deleting a shared record).
+    _PER_DEVICE_TABLES = (
+        "events", "alert_log", "device_review", "device_presence",
+        "device_addresses", "device_names", "device_metadata", "device_inspections",
+    )
+
+    def delete_device(self, mac: str) -> bool:
+        """Permanently delete one device and its per-device data (see
+        :data:`_PER_DEVICE_TABLES`) - the single-MAC equivalent of
+        :meth:`reset_all`. Returns whether a ``devices`` row actually
+        existed to delete (``False`` is not an error - deleting an
+        already-gone MAC is a no-op). Cannot be undone. Never touches the
+        allowlist - untrust separately first (``lanfence allow --remove``)
+        if the device is currently trusted.
+        """
+
+        mac = normalize_mac(mac)
+        cursor = self._conn.execute("DELETE FROM devices WHERE mac = ?", (mac,))
+        existed = cursor.rowcount > 0
+        for table in self._PER_DEVICE_TABLES:
+            self._conn.execute(f"DELETE FROM {table} WHERE mac = ?", (mac,))
+        self._conn.commit()
+        return existed
 
     # --- DHCP server observations -------------------------------------
 

@@ -19,6 +19,7 @@ from lanfence import web
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
+from lanfence.models import Device
 
 
 # --- password hashing ----------------------------------------------------
@@ -551,6 +552,66 @@ def test_rename_action_preserves_existing_notes(running_portal):
     assert entry.notes == "do not remove"
 
 
+def test_untrust_action_removes_device_from_allowlist(running_portal):
+    base_url, cfg = running_portal
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    allowlist.add("aa:bb:cc:dd:ee:ff", "Ross Laptop")
+    allowlist.save()
+
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+    data = urllib.parse.urlencode({"action": "untrust"}).encode()
+    resp = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data)
+    body = resp.read().decode()
+    assert "Device untrusted" in body
+    assert "badge--untrusted" in body
+
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    assert allowlist.match("aa:bb:cc:dd:ee:ff") is None
+
+
+def test_untrust_action_on_already_untrusted_device_reports_error(running_portal):
+    base_url, _ = running_portal
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+    data = urllib.parse.urlencode({"action": "untrust"}).encode()
+    resp = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data)
+    body = resp.read().decode()
+    assert "not on the allowlist" in body
+
+
+def test_untrust_button_only_shown_when_trusted(running_portal):
+    base_url, cfg = running_portal
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "Untrust this device" not in body
+
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    allowlist.add("aa:bb:cc:dd:ee:ff", "Ross Laptop")
+    allowlist.save()
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "Untrust this device" in body
+
+
+def test_device_list_and_detail_show_both_ipv4_and_ipv6(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.record_address_evidence(
+            mac="aa:bb:cc:dd:ee:ff", ip="fe80::abcd", interface="eth0",
+            source="ipv6_nd", kind="direct", seen_at=datetime.now(timezone.utc),
+        )
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/").read().decode()
+    assert "10.0.0.5 / fe80::abcd" in body
+
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "10.0.0.5 / fe80::abcd" in body
+
+
 def test_metadata_rejects_overlong_value(running_portal):
     base_url, _ = running_portal
     opener = _opener()
@@ -562,6 +623,85 @@ def test_metadata_rejects_overlong_value(running_portal):
     resp = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data)
     body = resp.read().decode()
     assert "must be at most" in body
+
+
+# --- device list sorting --------------------------------------------------
+
+
+def _device(mac, *, name=None, hostname=None, ip=None, vendor=None, status="online", trusted=False):
+    now = datetime.now(timezone.utc)
+    return Device(
+        mac=mac, ip=ip, hostname=hostname, vendor=vendor, status=status, first_seen=now, last_seen=now,
+        allowlisted=trusted, allowlist_name=name,
+    )
+
+
+def test_ip_sort_key_orders_numerically_not_lexicographically():
+    assert web._ip_sort_key("10.0.0.2") < web._ip_sort_key("10.0.0.10")
+
+
+def test_ip_sort_key_sorts_missing_ip_last():
+    assert web._ip_sort_key("10.0.0.2") < web._ip_sort_key(None)
+
+
+def test_render_device_list_defaults_to_mac_ascending():
+    devices = [_device("bb:bb:bb:bb:bb:bb"), _device("aa:aa:aa:aa:aa:aa")]
+    body = web._render_device_list(devices)
+    assert body.index("aa:aa:aa:aa:aa:aa") < body.index("bb:bb:bb:bb:bb:bb")
+
+
+def test_render_device_list_sorts_by_name_case_insensitively():
+    devices = [_device("aa:aa:aa:aa:aa:aa", name="zeta"), _device("bb:bb:bb:bb:bb:bb", name="Alpha")]
+    body = web._render_device_list(devices, sort="name", direction="asc")
+    assert body.index("Alpha") < body.index("zeta")
+
+
+def test_render_device_list_direction_desc_reverses_order():
+    devices = [_device("aa:aa:aa:aa:aa:aa", name="alpha"), _device("bb:bb:bb:bb:bb:bb", name="zeta")]
+    body = web._render_device_list(devices, sort="name", direction="desc")
+    assert body.index("zeta") < body.index("alpha")
+
+
+def test_render_device_list_sorts_by_ip_numerically():
+    devices = [_device("aa:aa:aa:aa:aa:aa", ip="10.0.0.10"), _device("bb:bb:bb:bb:bb:bb", ip="10.0.0.2")]
+    body = web._render_device_list(devices, sort="ip", direction="asc")
+    assert body.index("10.0.0.2") < body.index("10.0.0.10")
+
+
+def test_render_device_list_sorts_by_trust():
+    devices = [_device("aa:aa:aa:aa:aa:aa", trusted=True), _device("bb:bb:bb:bb:bb:bb", trusted=False)]
+    body = web._render_device_list(devices, sort="trust", direction="asc")
+    assert body.index("badge--trusted") < body.index("badge--untrusted")
+
+
+def test_render_device_list_unknown_sort_falls_back_to_default():
+    devices = [_device("bb:bb:bb:bb:bb:bb"), _device("aa:aa:aa:aa:aa:aa")]
+    body = web._render_device_list(devices, sort="not-a-real-column", direction="asc")
+    assert body.index("aa:aa:aa:aa:aa:aa") < body.index("bb:bb:bb:bb:bb:bb")
+
+
+def test_render_device_list_invalid_direction_falls_back_to_asc():
+    devices = [_device("bb:bb:bb:bb:bb:bb"), _device("aa:aa:aa:aa:aa:aa")]
+    body = web._render_device_list(devices, sort="mac", direction="sideways")
+    assert body.index("aa:aa:aa:aa:aa:aa") < body.index("bb:bb:bb:bb:bb:bb")
+
+
+def test_render_device_list_headers_link_to_toggled_direction():
+    body = web._render_device_list([], sort="name", direction="asc")
+    assert "sort=name&amp;dir=desc" in body
+    assert "sort=mac&amp;dir=asc" in body
+
+
+def test_index_route_honors_sort_query_params(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.observe(mac="00:00:00:00:00:01", ip="10.0.0.1", hostname="aardvark", vendor=None, seen_at=datetime.now(timezone.utc))
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+    body = opener.open(f"{base_url}/?sort=name&dir=asc").read().decode()
+    assert body.index("aardvark") < body.index("testhost")
+    body = opener.open(f"{base_url}/?sort=name&dir=desc").read().decode()
+    assert body.index("testhost") < body.index("aardvark")
 
 
 def test_unknown_device_returns_404(running_portal):

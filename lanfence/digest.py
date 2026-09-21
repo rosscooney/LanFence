@@ -115,6 +115,7 @@ def build_digest(
     since: datetime,
     until: datetime,
     portal_url: str | None = None,
+    monitor_running: bool | None = None,
 ) -> Digest:
     """Aggregate one digest for the window ``since``..``until``.
 
@@ -124,9 +125,10 @@ def build_digest(
     requirements. Pure read: never writes to the database, never changes
     trust/review/presence state, and never touches alert-dispatch cooldowns.
 
-    ``portal_url`` is passed straight through onto ``Digest.portal_url`` -
-    this function never computes it itself (that needs a live network
-    probe, not a database read; see :func:`lanfence.web.build_portal_url`).
+    ``portal_url``/``monitor_running`` are passed straight through onto
+    ``Digest.portal_url``/``Digest.monitor_running`` - this function never
+    computes either itself (checking a pidfile isn't a database read; see
+    :func:`lanfence.web.build_portal_url`/:mod:`lanfence.monitor_status`).
     """
 
     inventory = build_inventory(store, allowlist)
@@ -174,6 +176,7 @@ def build_digest(
             "monitor uptime / alert-delivery health tracking (not persisted)",
         ],
         portal_url=portal_url,
+        monitor_running=monitor_running,
     )
 
 
@@ -199,6 +202,17 @@ def _format_section_plain(title: str, section: DigestSection) -> list[str]:
     return lines
 
 
+def monitor_status_line(digest: Digest) -> str | None:
+    """"Monitor: running"/"Monitor: not running", or ``None`` if this was
+    never checked (``Digest.monitor_running`` is ``None``) - reused by the
+    plain-text/HTML digest bodies here and ``lanfence/report.py``'s
+    console renderer so the three don't drift on wording."""
+
+    if digest.monitor_running is None:
+        return None
+    return f"Monitor: {'running' if digest.monitor_running else 'not running'}"
+
+
 def format_digest_text(digest: Digest) -> str:
     """Readable plain-text body shared by email and every text-based channel."""
 
@@ -215,6 +229,9 @@ def format_digest_text(digest: Digest) -> str:
         f"Missing always-on: {digest.missing_always_on.total_count}",
         f"{digest.monitoring_health}",
     ]
+    status_line = monitor_status_line(digest)
+    if status_line:
+        lines.append(status_line)
     lines.append(f"Manage devices: {digest.portal_url}" if digest.portal_url else PORTAL_NOT_RUNNING_NOTE)
     lines.append("")
     lines += _format_section_plain("New devices", digest.new_devices)
@@ -290,6 +307,14 @@ def format_digest_html(digest: Digest) -> str:
         f"{html.escape(digest.portal_url)}</a>"
         if digest.portal_url else html.escape(PORTAL_NOT_RUNNING_NOTE)
     )
+    status_text = monitor_status_line(digest)
+    monitor_row = ""
+    if status_text:
+        monitor_color = "#4ade80" if digest.monitor_running else colors["muted"]
+        monitor_row = (
+            f'<tr><td style="padding-top:10px;color:{monitor_color};font-size:13px;">'
+            f"{html.escape(status_text)}</td></tr>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -297,7 +322,9 @@ def format_digest_html(digest: Digest) -> str:
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_EMAIL_TABLE_STYLE}">
 <tr><td style="padding:24px 20px 0;">
   <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-    <td style="padding-right:8px;">{branding.logo_svg(28)}</td>
+    <td style="padding-right:8px;">
+      <img src="cid:lanfence-logo" width="28" height="28" alt="LAN Fence" style="display:block;border:0;">
+    </td>
     <td style="font-size:18px;font-weight:700;">LAN Fence digest</td>
   </tr></table>
   <p style="{_EMAIL_MUTED_STYLE}font-size:13px;margin:8px 0 0;">
@@ -319,6 +346,7 @@ def format_digest_html(digest: Digest) -> str:
       Missing always-on: <strong>{digest.missing_always_on.total_count}</strong>
     </td></tr>
     <tr><td style="padding-top:10px;{_EMAIL_MUTED_STYLE}font-size:13px;">{html.escape(digest.monitoring_health)}</td></tr>
+    {monitor_row}
     <tr><td style="padding-top:6px;font-size:13px;">{portal_line}</td></tr>
   </table>
 </td></tr>
@@ -327,7 +355,7 @@ def format_digest_html(digest: Digest) -> str:
 {_html_section_table("Investigating", digest.investigating)}
 {_html_section_table("Missing always-on devices", digest.missing_always_on)}
 <tr><td style="padding:20px 20px 28px;{_EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
-  {branding.EMAIL_FOOTER_HTML}
+  {branding.FOOTER_HTML}
 </td></tr>
 </table>
 </body>
@@ -366,6 +394,13 @@ def send_digest_email(digest: Digest, cfg: Config) -> bool:
     # version, but nothing is lost for one that can't/won't.
     msg.set_content(format_digest_text(digest))
     msg.add_alternative(format_digest_html(digest), subtype="html")
+    # The logo as a Content-ID-attached image (referenced as "cid:lanfence-logo"
+    # in format_digest_html's <img> tag) rather than inline <svg> - many mail
+    # clients (Gmail among them) strip inline SVG from HTML email entirely, but
+    # a related raster image is universally supported, including in older
+    # clients that also reject data-URI images.
+    html_part = msg.get_payload()[-1]
+    html_part.add_related(branding.render_logo_png(64), maintype="image", subtype="png", cid="<lanfence-logo>")
 
     try:
         send_smtp_message(msg, email_cfg)
