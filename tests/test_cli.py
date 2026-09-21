@@ -2685,6 +2685,76 @@ def test_setup_restricts_insecure_permissions_on_save(config_path: Path):
     assert mode == 0o600
 
 
+# --- lanfence web --------------------------------------------------------
+
+
+def test_web_refuses_when_not_enabled(config_path: Path):
+    result = runner.invoke(app, ["web", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "disabled" in result.output.lower()
+
+
+def test_web_refuses_when_no_password_set(config_path: Path):
+    config_path.write_text(config_path.read_text() + "web:\n  enabled: true\n")
+    result = runner.invoke(app, ["web", "--config", str(config_path)])
+    assert result.exit_code == 2
+    assert "password" in result.output.lower()
+
+
+def test_web_refuses_when_no_private_lan_address_found(config_path: Path):
+    config_path.write_text(
+        config_path.read_text() + "web:\n  enabled: true\n  password_hash: 'a'\n  password_salt: 'b'\n"
+    )
+    with patch("lanfence.web.detect_lan_ip", return_value=None):
+        result = runner.invoke(app, ["web", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "could not determine" in result.output.lower()
+
+
+def test_web_starts_server_when_configured(config_path: Path):
+    config_path.write_text(
+        config_path.read_text() + "web:\n  enabled: true\n  password_hash: 'a'\n  password_salt: 'b'\n"
+    )
+    with patch("lanfence.web.detect_lan_ip", return_value="192.168.1.20"), \
+         patch("lanfence.web.run_server") as run_mock:
+        result = runner.invoke(app, ["web", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "192.168.1.20" in result.output
+    run_mock.assert_called_once()
+    assert run_mock.call_args.kwargs["host"] == "192.168.1.20"
+
+
+def test_digest_includes_portal_link_when_web_running(config_path: Path):
+    config_path.write_text(
+        config_path.read_text() + "web:\n  enabled: true\n  port: 9000\n  password_hash: 'a'\n  password_salt: 'b'\n"
+    )
+    with patch("lanfence.web.is_server_running", return_value=True), \
+         patch("lanfence.web.detect_lan_ip", return_value="192.168.1.30"):
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "https://192.168.1.30:9000/" in result.output
+
+
+def test_digest_shows_not_running_note_when_web_disabled(config_path: Path):
+    with patch("lanfence.web.is_server_running", return_value=False):
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Manage devices" not in result.output
+    assert "Web portal is not running" in result.output
+
+
+def test_digest_shows_not_running_note_when_enabled_but_not_actually_running(config_path: Path):
+    # cfg.web.enabled alone must never produce a link - see build_portal_url.
+    config_path.write_text(
+        config_path.read_text() + "web:\n  enabled: true\n  password_hash: 'a'\n  password_salt: 'b'\n"
+    )
+    with patch("lanfence.web.is_server_running", return_value=False):
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Manage devices" not in result.output
+    assert "Web portal is not running" in result.output
+
+
 def test_monitor_quit_key_uses_clean_shutdown(config_path: Path, monkeypatch):
     monkeypatch.setattr('lanfence.cli.monitor_ui.should_use_live', lambda *args: (True, None))
     monkeypatch.setattr('lanfence.cli.monitor_ui.MonitorDisplay.check_quit',

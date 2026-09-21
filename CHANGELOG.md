@@ -13,6 +13,46 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Added
+
+- **`lanfence web`: a local web portal for browsing and labeling devices.**
+  A small, single-user, LAN-only HTTP server (standard library only - no
+  new dependency) listing every observed device and letting you trust/
+  rename a device or edit its owner/purpose/group/location metadata from a
+  browser instead of the CLI. Configured entirely through `lanfence
+  setup`'s new **Web portal** section - enable it, set a password (there
+  is no separate `lanfence web enable`/`set-password` command) - and
+  `lanfence web` (or the new `packaging/lanfence-web.service` systemd
+  unit) just starts what that section already describes. `setup` also
+  offers to start it immediately after enabling it, and stops it
+  automatically if you disable it again.
+  - Binds only to this host's own detected LAN address (never `0.0.0.0`
+    or a public interface) - refuses to start otherwise.
+  - Single shared login (no per-user accounts), a salted `scrypt` password
+    hash stored in `config.yaml` (never the password itself), an in-memory
+    session cookie, and a per-source-IP lockout after repeated failed
+    logins.
+  - Always HTTPS via a self-signed certificate generated on first run (and
+    regenerated if the host's LAN address changes) - there is no plain-HTTP
+    mode and no setting to disable it, since "on the LAN" doesn't mean
+    "trustworthy" for a tool whose whole purpose is distrusting other
+    devices on that LAN. Needs the `openssl` CLI (not a new Python
+    dependency) to generate the certificate.
+  - `lanfence digest` now always mentions the portal in every delivered
+    digest: a link to it if it's actually running right now (never just
+    because `web.enabled` is set - a stale link would be worse than
+    saying so), or a note that it isn't and how to start it otherwise.
+    The link is recomputed fresh each time, since a DHCP-assigned address
+    can change and it's never a stored/configured value.
+- **The digest email is now a branded HTML email**, sent as a standard
+  multipart message alongside the existing plain-text body (so a
+  text-only client still gets a complete body). Uses LAN Fence's own logo
+  and dark color palette, matching the new web portal - both now share
+  one visual identity (`lanfence/branding.py`). Every device-supplied
+  value (hostname, name, ...) is HTML-escaped before rendering.
+
 ## [0.4.6] - 2026-09-15
 
 ### Changed

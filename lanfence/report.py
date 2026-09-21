@@ -22,6 +22,7 @@ from lanfence.models import (
     NameEvidence,
     ScanResult,
 )
+from lanfence.web import PORTAL_NOT_RUNNING_NOTE
 
 try:  # rich ships with typer, but keep rendering optional
     from rich.console import Console
@@ -1032,8 +1033,9 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         f"Investigating: {digest.investigating.total_count}   "
         f"Missing always-on: {digest.missing_always_on.total_count}",
         digest.monitoring_health,
-        "",
     ]
+    lines.append(f"Manage devices: {digest.portal_url}" if digest.portal_url else PORTAL_NOT_RUNNING_NOTE)
+    lines.append("")
     lines += _section_lines("New devices", digest.new_devices)
     lines.append("")
     lines += _section_lines("Needs review", digest.needs_review)
@@ -1062,6 +1064,10 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         f"Investigating: {digest.investigating.total_count}   "
         f"Missing always-on: {digest.missing_always_on.total_count}"
     )
+    if digest.portal_url:
+        console.print(f"[dim]Manage devices: {_rich_escape(digest.portal_url)}[/dim]")
+    else:
+        console.print(f"[dim]{_rich_escape(PORTAL_NOT_RUNNING_NOTE)}[/dim]")
 
     for title, section in (
         ("New devices", digest.new_devices),

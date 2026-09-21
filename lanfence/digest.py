@@ -30,6 +30,7 @@ functions, not new calls into the existing ``send_*`` ones.
 
 from __future__ import annotations
 
+import html
 import json
 import smtplib
 import urllib.error
@@ -37,6 +38,7 @@ import urllib.request
 from datetime import datetime
 from email.message import EmailMessage
 
+from lanfence import branding
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
@@ -45,6 +47,7 @@ from lanfence.logging_config import get_logger
 from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, DigestSection
 from lanfence.safe_errors import summarize_error
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
+from lanfence.web import PORTAL_NOT_RUNNING_NOTE
 
 log = get_logger("digest")
 
@@ -111,6 +114,7 @@ def build_digest(
     *,
     since: datetime,
     until: datetime,
+    portal_url: str | None = None,
 ) -> Digest:
     """Aggregate one digest for the window ``since``..``until``.
 
@@ -119,6 +123,10 @@ def build_digest(
     used consistently throughout, per the digest's own accuracy
     requirements. Pure read: never writes to the database, never changes
     trust/review/presence state, and never touches alert-dispatch cooldowns.
+
+    ``portal_url`` is passed straight through onto ``Digest.portal_url`` -
+    this function never computes it itself (that needs a live network
+    probe, not a database read; see :func:`lanfence.web.build_portal_url`).
     """
 
     inventory = build_inventory(store, allowlist)
@@ -165,6 +173,7 @@ def build_digest(
             "historical security-finding severity (not persisted; only lifecycle events are)",
             "monitor uptime / alert-delivery health tracking (not persisted)",
         ],
+        portal_url=portal_url,
     )
 
 
@@ -205,8 +214,9 @@ def format_digest_text(digest: Digest) -> str:
         f"Investigating: {digest.investigating.total_count}   "
         f"Missing always-on: {digest.missing_always_on.total_count}",
         f"{digest.monitoring_health}",
-        "",
     ]
+    lines.append(f"Manage devices: {digest.portal_url}" if digest.portal_url else PORTAL_NOT_RUNNING_NOTE)
+    lines.append("")
     lines += _format_section_plain("New devices", digest.new_devices)
     lines.append("")
     lines += _format_section_plain("Needs review", digest.needs_review)
@@ -215,6 +225,114 @@ def format_digest_text(digest: Digest) -> str:
     lines.append("")
     lines += _format_section_plain("Missing always-on devices", digest.missing_always_on)
     return "\n".join(lines).rstrip() + "\n"
+
+
+#: Inline styles only (no <style> block, no external assets) - many email
+#: clients strip <head>/<style> or block remote resources, so this follows
+#: old-school HTML-email conventions: a single fixed-width table, colors
+#: and spacing set directly on each element. Palette/logo/footer are
+#: shared with the web portal via lanfence.branding, so the two never
+#: drift into two different looks.
+_EMAIL_BODY_STYLE = f"margin:0;background:{branding.COLORS['bg']};color:{branding.COLORS['text']};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+_EMAIL_TABLE_STYLE = f"width:100%;max-width:640px;margin:0 auto;border-collapse:collapse;background:{branding.COLORS['bg']};"
+_EMAIL_PANEL_STYLE = f"background:{branding.COLORS['panel']};border:1px solid {branding.COLORS['border']};border-radius:12px;padding:16px 18px;"
+_EMAIL_MUTED_STYLE = f"color:{branding.COLORS['muted']};"
+
+
+def _html_section_table(title: str, section: DigestSection) -> str:
+    rows = ""
+    if not section.items:
+        rows = f'<tr><td style="padding:8px 0;{_EMAIL_MUTED_STYLE}">none</td></tr>'
+    else:
+        for entry in section.items:
+            label = html.escape(entry.name or entry.mac)
+            context = ""
+            if entry.owner or entry.group:
+                bits = [html.escape(b) for b in (entry.owner, entry.group) if b]
+                context = f" &middot; {', '.join(bits)}"
+            rows += (
+                '<tr><td style="padding:8px 0;border-top:1px solid '
+                f'{branding.COLORS["border"]};font-size:14px;">'
+                f'<strong>{label}</strong> '
+                f'<span style="{_EMAIL_MUTED_STYLE}font-size:12px;">({html.escape(entry.mac)})</span><br>'
+                f'<span style="{_EMAIL_MUTED_STYLE}font-size:13px;">'
+                f'{html.escape(entry.ip or "-")} &middot; {html.escape(entry.hostname or "[unknown]")}{context}'
+                "</span></td></tr>"
+            )
+        if section.omitted_count:
+            rows += (
+                f'<tr><td style="padding:8px 0;{_EMAIL_MUTED_STYLE}font-size:13px;">'
+                f"... and {section.omitted_count} more</td></tr>"
+            )
+    return f"""
+<tr><td style="padding:20px 0 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_EMAIL_PANEL_STYLE}">
+    <tr><td style="font-size:15px;font-weight:700;padding-bottom:4px;">{html.escape(title)} ({section.total_count})</td></tr>
+    {rows}
+  </table>
+</td></tr>
+"""
+
+
+def format_digest_html(digest: Digest) -> str:
+    """Branded HTML alternative to :func:`format_digest_text`, sent
+    alongside the plain-text body (see :func:`send_digest_email`) so mail
+    clients that prefer HTML get LAN Fence's own look and feel, and
+    plain-text-only clients still get a complete, readable body either
+    way. Every value that could come from an untrusted device (a name,
+    hostname, owner label, ...) is HTML-escaped - the same devices this
+    tool exists to be suspicious of can set their own DHCP hostname.
+    """
+
+    colors = branding.COLORS
+    portal_line = (
+        f'<a href="{html.escape(digest.portal_url)}" style="color:{colors["accent2"]};">'
+        f"{html.escape(digest.portal_url)}</a>"
+        if digest.portal_url else html.escape(PORTAL_NOT_RUNNING_NOTE)
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="{_EMAIL_BODY_STYLE}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_EMAIL_TABLE_STYLE}">
+<tr><td style="padding:24px 20px 0;">
+  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+    <td style="padding-right:8px;">{branding.logo_svg(28)}</td>
+    <td style="font-size:18px;font-weight:700;">LAN Fence digest</td>
+  </tr></table>
+  <p style="{_EMAIL_MUTED_STYLE}font-size:13px;margin:8px 0 0;">
+    {html.escape(digest.window_start.isoformat(timespec="seconds"))} to
+    {html.escape(digest.window_end.isoformat(timespec="seconds"))}
+    &middot; generated {html.escape(digest.generated_at.isoformat(timespec="seconds"))}
+  </p>
+</td></tr>
+<tr><td style="padding:16px 20px 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_EMAIL_PANEL_STYLE}">
+    <tr><td style="font-size:14px;">
+      Known devices: <strong>{digest.known_devices}</strong> &middot;
+      Online now: <strong>{digest.online_devices}</strong><br>
+      New: <strong>{digest.activity.new_device_count}</strong> &middot;
+      Reappeared: <strong>{digest.activity.reappeared_device_count}</strong> &middot;
+      Disconnected: <strong>{digest.activity.disconnected_device_count}</strong><br>
+      Needs review: <strong>{digest.needs_review.total_count}</strong> &middot;
+      Investigating: <strong>{digest.investigating.total_count}</strong> &middot;
+      Missing always-on: <strong>{digest.missing_always_on.total_count}</strong>
+    </td></tr>
+    <tr><td style="padding-top:10px;{_EMAIL_MUTED_STYLE}font-size:13px;">{html.escape(digest.monitoring_health)}</td></tr>
+    <tr><td style="padding-top:6px;font-size:13px;">{portal_line}</td></tr>
+  </table>
+</td></tr>
+{_html_section_table("New devices", digest.new_devices)}
+{_html_section_table("Needs review", digest.needs_review)}
+{_html_section_table("Investigating", digest.investigating)}
+{_html_section_table("Missing always-on devices", digest.missing_always_on)}
+<tr><td style="padding:20px 20px 28px;{_EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
+  {branding.FOOTER_HTML}
+</td></tr>
+</table>
+</body>
+</html>
+"""
 
 
 def _digest_summary_line(digest: Digest) -> str:
@@ -243,7 +361,11 @@ def send_digest_email(digest: Digest, cfg: Config) -> bool:
     msg["Subject"] = _digest_summary_line(digest)
     msg["From"] = email_cfg.from_addr
     msg["To"] = ", ".join(email_cfg.to_addrs)
+    # Plain text first (the primary/fallback body for text-only clients),
+    # HTML as the alternative - most mail clients then render the HTML
+    # version, but nothing is lost for one that can't/won't.
     msg.set_content(format_digest_text(digest))
+    msg.add_alternative(format_digest_html(digest), subtype="html")
 
     try:
         send_smtp_message(msg, email_cfg)

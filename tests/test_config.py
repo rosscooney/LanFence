@@ -436,3 +436,37 @@ def test_scan_config_passive_queue_maxsize_default():
 def test_scan_config_passive_queue_maxsize_rejects_non_positive():
     with pytest.raises(Exception):
         Config(scan={"passive_queue_maxsize": 0})
+
+
+# --- web portal -------------------------------------------------------
+
+
+def test_web_config_defaults():
+    cfg = Config()
+    assert cfg.web.enabled is False
+    assert cfg.web.port == 8080
+    assert cfg.web.password_hash is None
+    assert cfg.web.password_salt is None
+
+
+def test_web_config_rejects_out_of_range_port():
+    with pytest.raises(Exception):
+        Config(web={"port": 0})
+    with pytest.raises(Exception):
+        Config(web={"port": 70000})
+
+
+def test_web_config_rejects_hash_without_salt():
+    with pytest.raises(Exception):
+        Config(web={"password_hash": "abc"})
+
+
+def test_web_config_rejects_salt_without_hash():
+    with pytest.raises(Exception):
+        Config(web={"password_salt": "abc"})
+
+
+def test_web_config_accepts_hash_and_salt_together():
+    cfg = Config(web={"password_hash": "abc", "password_salt": "def"})
+    assert cfg.web.password_hash == "abc"
+    assert cfg.web.password_salt == "def"

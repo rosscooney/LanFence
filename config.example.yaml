@@ -85,6 +85,15 @@ discovery:
   # Both only take effect while passively capturing (scan.passive: true) - `monitor` warns if
   # enabled without it. Read once at `monitor` startup like every other scan.*/discovery.* setting.
 
+web:
+  enabled: false          # opt-in local web portal - browse/label devices from a browser
+  port: 8080
+  password_hash: null     # set via `lanfence setup`'s Web portal section, never by hand
+  password_salt: null
+  # Binds only to this host's own detected LAN address, never 0.0.0.0 - see README's
+  # "Web portal" section. `lanfence web` starts what this section describes; there is
+  # no separate enable/set-password command.
+
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
 vendor_file: null             # extra OUI table, merged with the packaged one

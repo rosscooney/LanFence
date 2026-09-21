@@ -292,6 +292,42 @@ class DigestConfig(BaseModel):
         return value
 
 
+class WebConfig(BaseModel):
+    """`lanfence web`'s local device-browsing/labeling portal - see
+    ``lanfence/web.py``. Configured entirely through `lanfence setup`'s Web
+    portal section (there is no separate `lanfence web set-password` or
+    similar command) - `lanfence web` only starts the server this section
+    already describes, and refuses to start if ``enabled`` is false or no
+    password has been set yet.
+
+    ``password_hash``/``password_salt`` are a salted ``hashlib.scrypt``
+    digest, never the password itself - the same "never store the literal
+    secret in memory/logs longer than needed" posture as every other
+    credential this project handles."""
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    #: High by default so the portal never needs root to bind - unlike
+    #: scanning, nothing here needs a raw socket or a privileged port.
+    port: int = 8080
+    password_hash: str | None = None
+    password_salt: str | None = None
+
+    @field_validator("port")
+    @classmethod
+    def _valid_port(cls, value: int) -> int:
+        if not 1 <= value <= 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return value
+
+    @model_validator(mode="after")
+    def _hash_and_salt_paired(self) -> "WebConfig":
+        if (self.password_hash is None) != (self.password_salt is None):
+            raise ValueError("password_hash and password_salt must both be set, or both left unset")
+        return self
+
+
 class ApprovedDhcpServer(BaseModel):
     """One DHCP server approved to answer on a given interface.
 
@@ -481,6 +517,7 @@ class Config(BaseModel):
     dhcp_servers: DhcpServerConfig = Field(default_factory=DhcpServerConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
     #: Where the persistent device database lives.
     db_path: Path = Path("~/.local/share/lanfence/lanfence.db")
     #: YAML allowlist of trusted devices; findings about them are downgraded to info.

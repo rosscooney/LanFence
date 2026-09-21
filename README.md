@@ -169,6 +169,7 @@ lanfence digest --verbose       # also list every event/finding in the window (f
 lanfence digest --since 7d --send --channel email
 lanfence dhcp-servers            # observed DHCP servers and their approval status
 lanfence setup                  # interactive setup: communications and application settings
+lanfence web                    # run the local web portal (enable/configure it via `lanfence setup` first)
 lanfence check                  # verify permissions, scapy, nmap, interface, storage
 lanfence upgrade                # check PyPI and install a newer release, if any
 lanfence upgrade --check        # only report whether an update is available
@@ -863,6 +864,13 @@ clear error if requested. `--send` with no `digest.channels` configured and
 no `--channel` given fails with a helpful error rather than silently doing
 nothing; a preview with no destinations configured still works fine.
 
+The **email** digest is a branded HTML email (LAN Fence's own logo and dark
+color palette, matching the web portal - see below) - sent as a standard
+multipart message with a plain-text alternative alongside it, so a
+text-only mail client still gets a complete, readable body either way.
+Every value that could come from an untrusted device (a hostname, a name)
+is HTML-escaped before it's ever put in the email body.
+
 A digest is **empty** when there's no window activity, no outstanding
 review/investigation items, no missing always-on devices, and no known
 monitoring/delivery problems - an unchanged device count alone does not
@@ -981,6 +989,93 @@ permissive than that is tightened with a clear note. Values are always
 preserved, but - like `lanfence allow`'s own YAML writer - hand-written
 comments and formatting are not, since that would need a new dependency
 this project avoids.
+
+## Web portal
+
+`lanfence web` is a small local web server for browsing the device
+inventory and trusting/renaming/labeling a device from a browser instead of
+the CLI - the same underlying operations as `lanfence allow`/`device
+--owner`/etc., just with a clickable interface. Built on the standard
+library only (no new dependency): a handful of small pages, not a general
+web application.
+
+```text
+lanfence setup       # Web portal section: enable it, "p" to set a password
+lanfence web         # start the already-configured portal (foreground)
+```
+
+There is no separate `lanfence web enable`/`set-password` command -
+everything is configured through `lanfence setup`'s **Web portal** section
+(`web.enabled`, `web.port`, and a dedicated `p` action to set/change/clear
+the password). `lanfence web` only starts what that section already
+describes, and refuses to start if the portal isn't enabled or no password
+has been set yet. Right after enabling it and setting a password, `setup`
+offers to start it immediately for convenience; disabling it again stops
+whatever's currently running automatically.
+
+**Security posture, by design:**
+
+- **Binds only to this host's own detected LAN address** (found the same
+  way a browser or any other LAN client would resolve "my own address" -
+  never `0.0.0.0` or a public interface), and refuses to start if that
+  can't be confirmed as a private address. A device on your own LAN is
+  exactly the population this whole tool exists to distrust, so the portal
+  is never reachable from anywhere else, including the internet, even if
+  this host also has a public interface.
+- **Always HTTPS, via a self-signed certificate generated on first run -
+  there is no plain-HTTP mode.** "On your own LAN" doesn't mean
+  "trustworthy" - the whole premise of this tool is that other devices on
+  the LAN might not be, so the login password must never go out in
+  cleartext to them. There's deliberately no setting to turn TLS off; an
+  optional insecure mode just recreates the problem for whoever leaves it
+  off. Because the certificate is self-signed rather than CA-issued, every
+  browser shows a one-time "connection is not private" warning to click
+  through the first time - the same experience as any router or NAS admin
+  panel on your LAN. Generating the certificate needs the `openssl` CLI
+  (not a new Python dependency - present on essentially every Linux/macOS
+  install already); it's cached under the state directory and only
+  regenerated if the host's LAN address changes.
+- **Single shared login**, no per-user accounts - this is a household tool,
+  not a multi-tenant one. The password is stored as a salted `scrypt` hash
+  in `config.yaml` (`web.password_hash`/`web.password_salt`), never the
+  password itself; sessions are an in-memory cookie only (a restart means
+  logging in again, rather than ever persisting a session token to disk).
+  Repeated failed logins from the same address are locked out for a short
+  period, the same as any internet-facing login would be.
+
+**Starting it for real, not just "right now"**: the convenience start
+offered by `setup` is exactly that - a background process that won't
+survive a reboot or come back automatically after a crash. For anything
+long-lived, install the packaged systemd unit instead:
+
+```bash
+cp packaging/lanfence-web.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now lanfence-web
+```
+
+See the comments at the top of `packaging/lanfence-web.service` for the
+one-time setup (the same dedicated, unprivileged service account
+`lanfence.service` uses - this one needs no raw-socket capability at all).
+Disabling the portal via `lanfence setup` stops it correctly either
+way - a running systemd-managed instance is stopped with `systemctl stop`
+(so it doesn't just get restarted by the unit's own restart policy),
+never sent a raw kill signal directly.
+
+**In a digest**: every delivered digest (email, Slack, Discord, Teams,
+ntfy, and the `webhook` JSON payload) always mentions the portal one way
+or the other. If it's actually running right now, the digest includes a
+link to it - "here's where to go label that new device." If it isn't
+(never enabled, enabled but not started, or stopped), the digest says so
+instead ("Web portal is not running - enable it with `lanfence setup`")
+rather than a broken or absent link, which doubles as a reminder the
+feature exists even if you've never touched it. This is deliberately keyed
+off whether the process is actually running, not just `web.enabled` in
+config - a stale "enabled" with nothing behind it would be a dead link.
+The link itself is never a fixed, configured address either: since the
+portal's bind address can change under DHCP, it's recomputed fresh each
+time a digest is generated, the same "as of now, not cached" posture the
+digest already applies to monitoring health elsewhere.
 
 ## Unexpected DHCP servers
 

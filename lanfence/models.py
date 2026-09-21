@@ -464,6 +464,17 @@ class Digest(BaseModel):
     #: data isn't implemented/persisted in this version - e.g. historical
     #: security-finding storage, or monitor health tracking.
     omitted_capabilities: list[str] = Field(default_factory=list)
+    #: Link to the web portal (see `lanfence/web.py`), if it's actually
+    #: running right now - never just because it's *enabled* in config,
+    #: since a stale/broken link would be worse than the "not running"
+    #: note shown in its place (see ``lanfence/digest.py``'s
+    #: ``format_digest_text``). Set by the caller (`lanfence digest`),
+    #: never computed inside :func:`lanfence.digest.build_digest` itself,
+    #: since it's a presentation/delivery detail, not database-derived
+    #: digest data. Recomputed fresh each time (a DHCP-assigned address
+    #: can change), so this is never a stored/configured value - see
+    #: :func:`lanfence.web.build_portal_url`.
+    portal_url: str | None = None
 
     @property
     def is_empty(self) -> bool:

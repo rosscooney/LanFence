@@ -10,6 +10,7 @@ from lanfence.db import DeviceStore
 from lanfence.digest import (
     build_digest,
     dispatch_digest,
+    format_digest_html,
     format_digest_text,
     send_digest_discord,
     send_digest_email,
@@ -292,6 +293,45 @@ def test_digest_section_ordering_is_stable_by_mac(tmp_path: Path):
     assert [e.mac for e in digest.needs_review.items] == ["aa:aa:aa:aa:aa:aa", "cc:cc:cc:cc:cc:cc"]
 
 
+def test_digest_portal_url_defaults_to_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
+    assert digest.portal_url is None
+
+
+def test_digest_portal_url_passed_through_and_in_text(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(
+            store, Allowlist.load(None), since=now - timedelta(hours=1), until=now,
+            portal_url="http://192.168.1.5:8080/",
+        )
+    assert digest.portal_url == "http://192.168.1.5:8080/"
+    assert "Manage devices: http://192.168.1.5:8080/" in format_digest_text(digest)
+
+
+def test_format_digest_text_omits_portal_line_when_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
+    assert "Manage devices" not in format_digest_text(digest)
+
+
+def test_digest_webhook_payload_includes_portal_url(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(
+            store, Allowlist.load(None), since=now - timedelta(hours=1), until=now,
+            portal_url="http://192.168.1.5:8080/",
+        )
+    cfg = Config(alerts={"webhook": {"enabled": True, "url": "https://example.com/hook"}})
+    with patch("lanfence.digest._post_json_ok", return_value=True) as post_mock:
+        send_digest_webhook(digest, cfg)
+    payload = post_mock.call_args.args[1]
+    assert payload["digest"]["portal_url"] == "http://192.168.1.5:8080/"
+
+
 # --- build_digest: activity summary -----------------------------------------
 
 
@@ -371,6 +411,65 @@ def test_format_digest_text_is_stable_and_readable(tmp_path: Path):
     text = format_digest_text(digest)
     assert "LAN Fence digest" in text
     assert "aa:bb:cc:dd:ee:ff" in text
+
+
+def test_format_digest_html_contains_branding_and_device(tmp_path: Path):
+    digest = _digest(tmp_path)
+    html_body = format_digest_html(digest)
+    assert "<!doctype html>" in html_body.lower()
+    assert "LAN Fence" in html_body
+    assert "aa:bb:cc:dd:ee:ff" in html_body
+    assert "stablestate.co.uk" in html_body
+    assert "MIT License" in html_body
+    assert "github.com/rosscooney/lanfence" in html_body
+    assert "<svg" in html_body
+
+
+def test_format_digest_html_includes_portal_link_when_present(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(
+            store, Allowlist.load(None), since=now - timedelta(hours=1), until=now,
+            portal_url="https://192.168.1.5:8080/",
+        )
+    html_body = format_digest_html(digest)
+    assert 'href="https://192.168.1.5:8080/"' in html_body
+
+
+def test_format_digest_html_shows_not_running_note_when_absent(tmp_path: Path):
+    digest = _digest(tmp_path)
+    html_body = format_digest_html(digest)
+    assert "Web portal is not running" in html_body
+
+
+def test_format_digest_html_escapes_hostile_device_data(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname="<script>alert(1)</script>", vendor=None, seen_at=now,
+        )
+        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
+    html_body = format_digest_html(digest)
+    assert "<script>alert(1)</script>" not in html_body
+    assert "&lt;script&gt;" in html_body
+
+
+def test_send_digest_email_is_multipart_with_html_alternative(tmp_path: Path):
+    digest = _digest(tmp_path)
+    cfg = Config(alerts={"email": {
+        "enabled": True, "from_addr": "lanfence@example.com", "to_addrs": ["me@example.com"],
+    }})
+
+    with patch("lanfence.digest.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        send_digest_email(digest, cfg)
+    sent_msg = instance.send_message.call_args.args[0]
+    assert sent_msg.is_multipart()
+    content_types = {part.get_content_type() for part in sent_msg.walk()}
+    assert "text/plain" in content_types
+    assert "text/html" in content_types
+    html_part = next(part for part in sent_msg.walk() if part.get_content_type() == "text/html")
+    assert "LAN Fence" in html_part.get_content()
 
 
 def test_send_digest_webhook_success(tmp_path: Path):

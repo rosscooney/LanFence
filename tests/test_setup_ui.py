@@ -179,6 +179,33 @@ def test_diff_hides_channel_values_and_unknown_values():
     assert '[replaced]' in lines
 
 
+def test_diff_hides_web_password_hash_and_salt():
+    before = {}
+    after = {'web': {'password_hash': 'HASHVALUE', 'password_salt': 'SALTVALUE'}}
+    lines = '\n'.join(diff_lines(before, after))
+    assert 'HASHVALUE' not in lines
+    assert 'SALTVALUE' not in lines
+    assert 'web.password (set)' in lines
+
+
+def test_diff_web_password_change_and_clear_wording():
+    before = {'web': {'password_hash': 'OLD', 'password_salt': 'OLDSALT'}}
+    changed = {'web': {'password_hash': 'NEW', 'password_salt': 'NEWSALT'}}
+    assert 'web.password (changed)' in '\n'.join(diff_lines(before, changed))
+    assert 'web.password (cleared)' in '\n'.join(diff_lines(before, {}))
+
+
+def test_warnings_for_flags_web_enabled_without_password():
+    cfg = Config(web={'enabled': True})
+    assert any('cannot start until' in w for w in warnings_for(cfg))
+
+
+def test_warnings_for_silent_when_web_disabled_or_password_set():
+    assert warnings_for(Config()) == []
+    cfg = Config(web={'enabled': True, 'password_hash': 'a', 'password_salt': 'b'})
+    assert warnings_for(cfg) == []
+
+
 def test_concurrent_edit_not_overwritten(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('{}\n')
@@ -250,3 +277,64 @@ def test_channel_test_failure_does_not_echo_remote_error(tmp_path):
         ok, message = send_channel_test_message('slack', cfg)
     assert not ok
     assert 'SECRET' not in message
+
+
+# --- Web portal section --------------------------------------------------
+
+
+def test_web_portal_enable_set_password_offers_and_starts(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/') as start_mock:
+        result, _ = run_setup(
+            path, '9\n1\ny\np\nhunter22\nhunter22\nback\nsave\ny\ny\nexit\n',
+        )
+    assert 'Web portal starting: http://192.168.1.5:8080/' in result.output
+    start_mock.assert_called_once_with(path)
+    raw = yaml.safe_load(path.read_text())
+    assert raw['web']['enabled'] is True
+    assert raw['web']['password_hash']
+    assert raw['web']['password_salt']
+    assert 'hunter22' not in result.output
+
+
+def test_web_portal_enable_without_password_does_not_offer_start(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.start_background') as start_mock:
+        result, _ = run_setup(path, '9\n1\ny\nback\nsave\ny\nexit\n')
+    assert 'cannot start until you set one' in result.output
+    start_mock.assert_not_called()
+
+
+def test_web_portal_declining_start_does_not_call_start_background(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.start_background') as start_mock:
+        result, _ = run_setup(path, '9\n1\ny\np\nhunter22\nhunter22\nback\nsave\ny\nn\nexit\n')
+    start_mock.assert_not_called()
+    assert result.exit_code == 0
+
+
+def test_web_portal_password_mismatch_leaves_it_unset(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, '9\np\nhunter1\nhunter2\nback\nexit\n')
+    assert 'did not match' in result.output.lower()
+
+
+def test_web_portal_disable_stops_running_server(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text(
+        yaml.safe_dump({'web': {'enabled': True, 'password_hash': 'x' * 64, 'password_salt': 'y' * 32}})
+    )
+    with patch('lanfence.web.stop_server', return_value=True) as stop_mock:
+        result, _ = run_setup(path, '9\n1\nn\nback\nsave\ny\nexit\n')
+    assert 'Web portal stopped.' in result.output
+    stop_mock.assert_called_once()
+
+
+def test_web_portal_password_change_while_running_notes_restart_needed(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text(
+        yaml.safe_dump({'web': {'enabled': True, 'password_hash': 'x' * 64, 'password_salt': 'y' * 32}})
+    )
+    with patch('lanfence.web.is_server_running', return_value=True):
+        result, _ = run_setup(path, '9\np\nnewpassword\nnewpassword\nback\nsave\ny\nexit\n')
+    assert "won't see this change until it's restarted" in result.output

@@ -1,0 +1,105 @@
+# Copyright (c) 2026-present Stable State Consulting Ltd
+# SPDX-License-Identifier: MIT
+#
+# Example systemd unit for the local web portal (`lanfence web`), so it
+# survives a reboot and restarts automatically after a crash - the
+# convenience "start it now" offered by `lanfence setup` after enabling the
+# portal does neither (see README.md's Web portal section).
+#
+# Unlike lanfence.service (continuous scanning), this needs no raw-socket
+# capability at all - it only reads/writes the same database and allowlist
+# `monitor` already uses, and binds to this host's own LAN address (never
+# 0.0.0.0 - see lanfence/web.py's resolve_bind_host()). It can run as the
+# exact same dedicated, unprivileged service account.
+#
+# --- One-time setup (run as root on the target host) -----------------------
+#
+#   1. If you haven't already (see lanfence.service), create the dedicated
+#      account and config file:
+#
+#        useradd --system --no-create-home --shell /usr/sbin/nologin lanfence
+#        mkdir -p /etc/lanfence
+#
+#   2. Configure the portal - enable it and set a password - via
+#      `lanfence setup` against that same config file:
+#
+#        lanfence setup --config /etc/lanfence/config.yaml
+#
+#      (Web portal section: enable it, "p" to set a password. Decline the
+#      "start it now?" prompt - this unit will start it instead.)
+#
+#        chown -R root:lanfence /etc/lanfence
+#        chmod 750 /etc/lanfence
+#        chmod 640 /etc/lanfence/config.yaml
+#
+#   3. Point db_path/allowlist_file at the same state directory `monitor`
+#      already uses (see lanfence.service step 3) - a dedicated system
+#      account has no real $HOME for `~` to expand against.
+#
+#   4. Install and enable the unit:
+#
+#        cp packaging/lanfence-web.service /etc/systemd/system/
+#        systemctl daemon-reload
+#        systemctl enable --now lanfence-web
+#
+# --- Validation --------------------------------------------------------
+#
+#   systemd-analyze verify /etc/systemd/system/lanfence-web.service
+#
+# This is STATIC validation only - see lanfence.service's own note. Confirm
+# it actually serves requests with `systemctl status lanfence-web`,
+# `journalctl -u lanfence-web`, and opening the URL `lanfence setup`/
+# `lanfence web` printed in a browser on the same LAN.
+
+[Unit]
+Description=LAN Fence local web portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/lanfence web --config /etc/lanfence/config.yaml
+Restart=on-failure
+RestartSec=5
+
+# --- Identity: the same dedicated, unprivileged, login-disabled account
+# lanfence.service uses - see step 1 above. No AmbientCapabilities needed:
+# this process never touches a raw socket.
+User=lanfence
+Group=lanfence
+NoNewPrivileges=true
+CapabilityBoundingSet=
+
+# --- Filesystem: writable state, read-only everything else -----------------
+# Shares the same StateDirectory (/var/lib/lanfence) as lanfence.service -
+# systemd is a no-op if it already exists and is owned correctly.
+StateDirectory=lanfence
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+
+# --- General sandboxing ------------------------------------------------
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+# AF_INET: the portal's own HTTP listener. AF_UNIX: local resolver sockets.
+# No AF_PACKET/AF_NETLINK - unlike lanfence.service, this never touches
+# raw sockets or interface enumeration.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

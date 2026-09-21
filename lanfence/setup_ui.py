@@ -26,8 +26,12 @@ from lanfence.channels import (
 )
 from lanfence.config import Config, ApprovedDhcpServer, DIGEST_CHANNELS
 from lanfence.sanitize import clean_text
+from lanfence import web
 
 # Only real model fields appear here; field types/defaults stay in config.py.
+# web.password_hash/password_salt are deliberately excluded - they're set
+# through the dedicated "p  Set/change password" action (edit_web_password
+# below), never edited as plain text like an ordinary field.
 SECTIONS = {
     "Scanning": [f"scan.{name}" for name in type(Config().scan).model_fields if not name.startswith("offline_")],
     "Offline detection": ["scan.offline_grace_seconds", "scan.offline_after_missed_scans"],
@@ -36,6 +40,7 @@ SECTIONS = {
     "Daily digest": ["digest.channels", "digest.send_when_empty"],
     "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file"],
     "Alert delivery": ["alerts.min_severity", "alerts.rate_limit_seconds"],
+    "Web portal": ["web.enabled", "web.port"],
 }
 MISSING = object()
 
@@ -121,12 +126,14 @@ def warnings_for(cfg):
     for name in cfg.digest.channels:
         if not getattr(cfg.alerts, name).enabled:
             warnings.append(f"Digest destination {name} is disabled; delivery to it is inactive.")
+    if cfg.web.enabled and cfg.web.password_hash is None:
+        warnings.append("Web portal is enabled but no password is set; it cannot start until one is.")
     return warnings
 
 
 def diff_lines(before, after):
     lines = []
-    paths = sum(SECTIONS.values(), []) + ["dhcp_servers.approved"]
+    paths = sum(SECTIONS.values(), []) + ["dhcp_servers.approved", "web.password_hash"]
     for channel in CHANNEL_NAMES:
         paths += [f"alerts.{channel}.{f.name}" for f in CHANNEL_FIELDS[channel]]
         paths.append(f"alerts.{channel}.enabled")
@@ -145,6 +152,10 @@ def diff_lines(before, after):
                     lines.append(f"{path}: added {safe_value(row)}")
             if new is MISSING:
                 lines.append(f"{path}: reset to default")
+            continue
+        if path == "web.password_hash":
+            action = "cleared" if new is MISSING else "set" if old is MISSING else "changed"
+            lines.append(f"web.password ({action})")
             continue
         # All channel field values are hidden in diffs, including extension-like URLs.
         if path.startswith("alerts.") and len(path.split(".")) == 3 and not path.endswith(".enabled"):
@@ -213,6 +224,36 @@ def edit_field(raw, path):
                 typer.echo(error)
             continue
         return candidate
+
+
+def edit_web_password(raw):
+    """The Web portal section's "p" action - sets/changes/clears the login
+    password. Kept out of the generic per-field ``edit_field`` flow (unlike
+    ``web.enabled``/``web.port``) since a password needs confirmation and
+    hashing, never a plain-text round trip like an ordinary setting."""
+
+    configured = value_at(raw, "web.password_hash") not in (MISSING, None)
+    typer.echo("Web portal password: " + ("already configured" if configured else "not set"))
+    answer = typer.prompt(
+        "New password (blank keeps it; clear = remove; back = return)",
+        default="", show_default=False, hide_input=True,
+    )
+    if not answer or answer == "back":
+        return raw
+    if answer == "clear":
+        raw = patch_value(raw, "web.password_hash")
+        raw = patch_value(raw, "web.password_salt")
+        typer.echo("Password cleared - the web portal cannot start until a new one is set.")
+        return raw
+    confirm = typer.prompt("Confirm new password", hide_input=True)
+    if confirm != answer:
+        typer.echo("Passwords did not match; not changed.")
+        return raw
+    password_hash, password_salt = web.hash_password(answer)
+    raw = patch_value(raw, "web.password_hash", password_hash)
+    raw = patch_value(raw, "web.password_salt", password_salt)
+    typer.echo("Password set.")
+    return raw
 
 
 def observed_servers(cfg):
@@ -302,11 +343,16 @@ def edit_section(raw, section):
             typer.echo(f"{i}  {path}: {safe_value(value_at(cfg, path))} ({origin})")
         if section == "DHCP servers":
             typer.echo("a  Approved DHCP servers")
+        elif section == "Web portal":
+            configured = value_at(raw, "web.password_hash") not in (MISSING, None)
+            typer.echo(f"p  Set/change password ({'configured' if configured else 'not set'})")
         choice = typer.prompt("Setting number, or back", default="back").lower()
         if choice == "back":
             return raw
         if choice == "a" and section == "DHCP servers":
             raw = edit_approvals(raw)
+        elif choice == "p" and section == "Web portal":
+            raw = edit_web_password(raw)
         elif choice.isdigit() and 1 <= int(choice) <= len(SECTIONS[section]):
             raw = edit_field(raw, SECTIONS[section][int(choice) - 1])
         else:
@@ -356,12 +402,15 @@ def render_overview(console, path, original, draft):
     table.add_column("Section")
     table.add_column("Effective settings")
     enabled = ", ".join(n for n in CHANNEL_NAMES if getattr(cfg.alerts, n).enabled) or "none enabled"
+    web_summary = "disabled"
+    if cfg.web.enabled:
+        web_summary = f"enabled, port {cfg.web.port} · " + ("password set" if cfg.web.password_hash else "no password")
     summaries = [enabled, f"{cfg.scan.interface or 'auto'} · every {cfg.scan.scan_interval_seconds:g}s",
                  f"{cfg.scan.offline_grace_seconds:g}s · {cfg.scan.offline_after_missed_scans} misses",
                  f"enabled={cfg.dhcp_servers.enabled} · {len(cfg.dhcp_servers.approved)} approved",
                  f"mDNS={cfg.discovery.mdns} · SSDP={cfg.discovery.ssdp}",
                  ", ".join(cfg.digest.channels) or "no destinations", "Paths only; no data migration",
-                 f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s"]
+                 f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s", web_summary]
     for i, (section, summary) in enumerate(zip(["Communications", *SECTIONS], summaries), 1):
         table.add_row(str(i), section, Text(clean_text(summary, max_len=300)))
     console.print(Panel(table, title="LAN Fence setup"))
@@ -416,6 +465,7 @@ def run_setup(path, loaded, explicit_config):
             if not typer.confirm("Save these changes?", default=False):
                 continue
             changed_channels = [n for n in CHANNEL_NAMES if value_at(loaded.raw, f"alerts.{n}") != value_at(draft, f"alerts.{n}")]
+            web_before = Config.model_validate(loaded.raw).web
             cli._channels_new_file_notice(path, loaded.existed, explicit_config)
             try:
                 cli._channels_save_or_exit(path, loaded, draft)
@@ -434,6 +484,29 @@ def run_setup(path, loaded, explicit_config):
                 if typer.confirm(f"Send a test message to {channel}?", default=False):
                     ok, _ = cli.send_channel_test_message(channel, loaded.cfg)
                     typer.echo(f"{channel}: {'accepted by destination' if ok else 'test failed; check destination settings'}")
+            web_after = loaded.cfg.web
+            if web_after.enabled and not web_before.enabled:
+                if web_after.password_hash is None:
+                    typer.echo("Web portal enabled, but no password is set yet - it cannot start until you set one.")
+                elif typer.confirm("Start the web portal now?", default=False):
+                    try:
+                        url = web.start_background(path)
+                        typer.echo(f"Web portal starting: {url}")
+                        typer.echo(
+                            "This is a convenience start for right now - it won't survive a reboot or "
+                            "restart automatically after a crash; see README for the packaged systemd unit."
+                        )
+                    except web.WebError as exc:
+                        typer.echo(f"Could not start the web portal: {exc}")
+            elif web_before.enabled and not web_after.enabled:
+                if web.stop_server():
+                    typer.echo("Web portal stopped.")
+            elif (
+                web_after.enabled and web_before.enabled
+                and (web_before.port, web_before.password_hash) != (web_after.port, web_after.password_hash)
+                and web.is_server_running()
+            ):
+                typer.echo("Note: the running web portal won't see this change until it's restarted.")
             if exiting:
                 return
         else:

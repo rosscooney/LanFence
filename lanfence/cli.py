@@ -24,7 +24,7 @@ from typing import Optional
 
 import typer
 
-from lanfence import __version__, active_inspect, alerts, discovery, monitor_ui, scanner
+from lanfence import __version__, active_inspect, alerts, discovery, monitor_ui, scanner, web
 from lanfence.alert_worker import AlertDeliveryWorker
 from lanfence.allowlist import Allowlist
 from lanfence.channels import (
@@ -48,6 +48,7 @@ from lanfence.channels import (
 )
 from lanfence.config import DIGEST_CHANNELS, Config, expand_operator_path
 from lanfence.db import DeviceStore
+from lanfence.device_metadata import validate_metadata_value
 from lanfence.dhcp_server import (
     dhcp_server_detection_active,
     dhcp_server_inventory,
@@ -74,7 +75,6 @@ from lanfence.logging_config import setup_logging
 from lanfence.models import Finding
 from lanfence.netutil import normalize_mac
 from lanfence.safe_errors import summarize_error
-from lanfence.sanitize import clean_text
 from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
@@ -952,9 +952,10 @@ def digest(
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=cfg.scan.interface)
     signatures = SignatureSet.load(cfg.rogue_signatures_file) if verbose else None
+    portal_url = web.build_portal_url(cfg)
 
     with DeviceStore(cfg.resolved_db_path()) as store:
-        digest_obj = build_digest(store, allowlist, since=since_dt, until=until)
+        digest_obj = build_digest(store, allowlist, since=since_dt, until=until, portal_url=portal_url)
         events = store.events_since(since_dt) if verbose else []
         devices_by_mac = {d.mac: d for d in store.all_devices()} if verbose else {}
 
@@ -1362,29 +1363,6 @@ def _list_devices(
         )
 
 
-#: Character limits for user-provided device metadata - long enough for a
-#: real value, short enough to keep the database and rendering sane.
-#: Overlong input is rejected with a clear error, never silently truncated.
-_METADATA_LIMITS = {"owner": 128, "purpose": 256, "group": 128, "location": 128}
-
-
-def _validate_metadata_value(field: str, value: str) -> str:
-    """Trim, sanitize, and length-check one metadata field's new value.
-
-    Raises ``ValueError`` (caller renders it and exits 2) for a blank
-    value (use ``--clear-<field>`` instead) or one over its limit - never
-    silently truncates.
-    """
-
-    trimmed = value.strip()
-    if not trimmed:
-        raise ValueError(f"--{field} must not be empty - use --clear-{field} to clear it")
-    limit = _METADATA_LIMITS[field]
-    if len(trimmed) > limit:
-        raise ValueError(f"--{field} must be at most {limit} characters (got {len(trimmed)})")
-    return clean_text(trimmed, max_len=limit)
-
-
 @app.command()
 def device(
     mac: Optional[str] = typer.Argument(
@@ -1493,13 +1471,13 @@ def device(
     metadata_updates: dict[str, Optional[str]] = {}
     try:
         if owner is not None:
-            metadata_updates["owner"] = _validate_metadata_value("owner", owner)
+            metadata_updates["owner"] = validate_metadata_value("owner", owner)
         if purpose is not None:
-            metadata_updates["purpose"] = _validate_metadata_value("purpose", purpose)
+            metadata_updates["purpose"] = validate_metadata_value("purpose", purpose)
         if group is not None:
-            metadata_updates["group"] = _validate_metadata_value("group", group)
+            metadata_updates["group"] = validate_metadata_value("group", group)
         if location is not None:
-            metadata_updates["location"] = _validate_metadata_value("location", location)
+            metadata_updates["location"] = validate_metadata_value("location", location)
     except ValueError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(code=2) from exc
@@ -1833,7 +1811,7 @@ def _run_interactive_review(cfg: Config) -> None:
                                     if current_value is not None:
                                         updates[field] = None
                                     continue
-                                validated = _validate_metadata_value(field, raw)
+                                validated = validate_metadata_value(field, raw)
                                 if validated != current_value:
                                     updates[field] = validated
                             if updates:
@@ -2338,6 +2316,39 @@ def upgrade(
 #: --help (upgrade is the documented name) but still works exactly the
 #: same, for anyone who reaches for "update" instead.
 app.command(name="update", hidden=True)(upgrade)
+
+
+@app.command(name="web")
+def web_cmd(config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file.")) -> None:
+    """Run the local web portal for browsing and labeling devices.
+
+    Configure it first via `lanfence setup`'s Web portal section (enable it
+    and set a password) - this command only starts the already-configured
+    server and has no flags of its own. Binds to this host's own detected
+    LAN address only (never 0.0.0.0 or a public interface), and refuses to
+    start if the portal isn't enabled or no password has been set yet.
+    Runs in the foreground until interrupted (Ctrl+C); see README for
+    running it continuously via the packaged systemd unit instead.
+    """
+
+    cfg = _load_config(config)
+    if not cfg.web.enabled:
+        typer.secho(
+            "error: the web portal is disabled - enable it via `lanfence setup`.", fg="red", err=True
+        )
+        raise typer.Exit(code=2)
+    if cfg.web.password_hash is None:
+        typer.secho(
+            "error: no web portal password is set - set one via `lanfence setup`.", fg="red", err=True
+        )
+        raise typer.Exit(code=2)
+    try:
+        host = web.resolve_bind_host()
+    except web.WebError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.secho(f"LAN Fence web portal: https://{host}:{cfg.web.port}/", fg="green")
+    web.run_server(cfg, host=host)
 
 
 _IEEE_OUI_CSV_URL = "https://standards-oui.ieee.org/oui/oui.csv"
