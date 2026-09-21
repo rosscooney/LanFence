@@ -46,11 +46,21 @@ def logo_svg(size: int = 28) -> str:
     return f'<svg width="{size}" height="{size}" viewBox="0 0 64 64" role="img" aria-label="LAN Fence logo">{_LOGO_INNER}</svg>'
 
 
-#: Plain-HTML copyright/license/repo line, reused verbatim in the web
-#: portal's page footer and the HTML digest email.
+#: Plain-HTML copyright/license/repo line, used in the web portal's page
+#: footer.
 FOOTER_HTML = (
     '&copy; 2026 <a href="https://www.stablestate.co.uk">Stable State Consulting Ltd</a>. '
     "LAN Fence is open-source software released under the "
     '<a href="https://opensource.org/licenses/MIT">MIT License</a>. '
     '<a href="https://github.com/rosscooney/lanfence">Source (GitHub)</a>.'
+)
+
+#: Same information as :data:`FOOTER_HTML`, reordered/relined for the HTML
+#: digest email specifically (license/source line first, copyright line
+#: second) - see ``lanfence/digest.py``'s ``format_digest_html``.
+EMAIL_FOOTER_HTML = (
+    "LAN Fence is open-source software released under the "
+    '<a href="https://opensource.org/licenses/MIT">MIT License</a>. '
+    '<a href="https://github.com/rosscooney/lanfence">Source (GitHub)</a>.<br>'
+    '&copy; 2026 <a href="https://www.stablestate.co.uk">Stable State Consulting Ltd</a>.'
 )

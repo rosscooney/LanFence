@@ -1000,18 +1000,21 @@ library only (no new dependency): a handful of small pages, not a general
 web application.
 
 ```text
-lanfence setup       # Web portal section: enable it, "p" to set a password
+lanfence setup       # Web portal section: enable it, set a password
 lanfence web         # start the already-configured portal (foreground)
 ```
 
 There is no separate `lanfence web enable`/`set-password` command -
 everything is configured through `lanfence setup`'s **Web portal** section
-(`web.enabled`, `web.port`, and a dedicated `p` action to set/change/clear
-the password). `lanfence web` only starts what that section already
+(`web.enabled`, `web.port`, and a "Set/change password" action listed
+alongside them). `lanfence web` only starts what that section already
 describes, and refuses to start if the portal isn't enabled or no password
 has been set yet. Right after enabling it and setting a password, `setup`
-offers to start it immediately for convenience; disabling it again stops
-whatever's currently running automatically.
+checks for an active local firewall (`ufw`/`firewalld`) that could block
+other LAN devices from reaching the port even though the portal itself is
+running, and offers to open it; it then offers to start the portal
+immediately for convenience. Disabling the portal again stops whatever's
+currently running automatically.
 
 **Security posture, by design:**
 
@@ -1042,6 +1045,20 @@ whatever's currently running automatically.
   logging in again, rather than ever persisting a session token to disk).
   Repeated failed logins from the same address are locked out for a short
   period, the same as any internet-facing login would be.
+
+**Reachable from other devices, not just this host**: binding to the LAN
+address is necessary but not sufficient - a local firewall (`ufw`,
+`firewalld`) can still block other devices on your LAN from reaching the
+port even though the process itself is up and the host responds to a
+`ping` (this shows up in a browser as something like
+`ERR_ADDRESS_UNREACHABLE`, distinct from the portal simply not running).
+Right after `setup` enables the portal, it checks for one of these two
+firewall managers being active and, if so, offers to open the port for
+you (scoped to the bound LAN address for `ufw`); if it can't (most
+commonly because `lanfence setup` itself isn't running as root), it
+prints the exact `sudo` command to run yourself. An nftables/iptables
+setup managed directly, or a filter on an upstream router, isn't
+something this can see or fix automatically.
 
 **Starting it for real, not just "right now"**: the convenience start
 offered by `setup` is exactly that - a background process that won't

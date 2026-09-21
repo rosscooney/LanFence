@@ -327,7 +327,7 @@ def format_digest_html(digest: Digest) -> str:
 {_html_section_table("Investigating", digest.investigating)}
 {_html_section_table("Missing always-on devices", digest.missing_always_on)}
 <tr><td style="padding:20px 20px 28px;{_EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
-  {branding.FOOTER_HTML}
+  {branding.EMAIL_FOOTER_HTML}
 </td></tr>
 </table>
 </body>

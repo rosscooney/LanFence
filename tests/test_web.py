@@ -166,6 +166,79 @@ def test_stop_server_signals_pidfile_process_when_no_systemd_unit(tmp_path: Path
         assert not pid_file.exists()
 
 
+# --- local firewall detection/handling ------------------------------------
+
+
+def _completed(returncode=0, stdout=""):
+    import subprocess
+
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+
+def test_detect_active_firewall_finds_active_ufw():
+    with patch("lanfence.web.subprocess.run", return_value=_completed(0, "Status: active\n")):
+        assert web.detect_active_firewall() == "ufw"
+
+
+def test_detect_active_firewall_ignores_inactive_ufw_then_checks_firewalld():
+    def fake_run(command, **kwargs):
+        if command[0] == "ufw":
+            return _completed(0, "Status: inactive\n")
+        return _completed(0, "running\n")
+
+    with patch("lanfence.web.subprocess.run", side_effect=fake_run):
+        assert web.detect_active_firewall() == "firewalld"
+
+
+def test_detect_active_firewall_none_when_neither_present():
+    with patch("lanfence.web.subprocess.run", side_effect=FileNotFoundError()):
+        assert web.detect_active_firewall() is None
+
+
+def test_detect_active_firewall_none_when_both_inactive():
+    def fake_run(command, **kwargs):
+        if command[0] == "ufw":
+            return _completed(0, "Status: inactive\n")
+        return _completed(0, "not running\n")
+
+    with patch("lanfence.web.subprocess.run", side_effect=fake_run):
+        assert web.detect_active_firewall() is None
+
+
+def test_allow_port_through_firewall_ufw_success():
+    with patch("lanfence.web.subprocess.run", return_value=_completed(0)) as run_mock:
+        ok, message = web.allow_port_through_firewall("ufw", host="192.168.1.5", port=8080)
+    assert ok is True
+    assert "192.168.1.5" in message
+    args = run_mock.call_args.args[0]
+    assert args[:3] == ["ufw", "allow", "to"]
+    assert "192.168.1.5" in args
+    assert "8080" in args
+
+
+def test_allow_port_through_firewall_firewalld_success_reloads():
+    with patch("lanfence.web.subprocess.run", return_value=_completed(0)) as run_mock:
+        ok, message = web.allow_port_through_firewall("firewalld", host="192.168.1.5", port=8080)
+    assert ok is True
+    assert run_mock.call_count == 2  # --add-port, then --reload
+    reload_call = run_mock.call_args_list[1].args[0]
+    assert reload_call == ["firewall-cmd", "--reload"]
+
+
+def test_allow_port_through_firewall_reports_manual_command_on_failure():
+    with patch("lanfence.web.subprocess.run", return_value=_completed(1)):
+        ok, message = web.allow_port_through_firewall("ufw", host="192.168.1.5", port=8080)
+    assert ok is False
+    assert "sudo ufw allow to 192.168.1.5" in message
+
+
+def test_allow_port_through_firewall_handles_missing_binary():
+    with patch("lanfence.web.subprocess.run", side_effect=FileNotFoundError("no ufw")):
+        ok, message = web.allow_port_through_firewall("ufw", host="192.168.1.5", port=8080)
+    assert ok is False
+    assert "could not run" in message
+
+
 def test_start_background_refuses_when_not_enabled(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("web:\n  enabled: false\n")

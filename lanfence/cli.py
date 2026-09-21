@@ -2464,10 +2464,6 @@ def _channels_save_or_exit(path: Path, loaded, updated_raw: dict) -> None:
             "restricted to owner-only (0o600), since it may hold secrets.",
             fg="yellow",
         )
-    typer.echo(
-        f"`lanfence monitor` reads this file once at startup, not while running - restart it "
-        f"(e.g. `lanfence monitor --config {path}`) for this change to take effect."
-    )
 
 
 def _prompt_secret_field(f, current_value: Optional[str]):

@@ -13,6 +13,35 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Changed
+
+- `lanfence setup` is less chatty: selecting "save" now saves immediately
+  (no diff dump, no "Saving rewrites YAML..." reminder, no "Save these
+  changes?" confirmation beforehand) instead of the previous multi-step
+  review-then-confirm sequence. The overview screen no longer prints a
+  redundant "File: .../Status: Valid/Invalid · Unsaved changes" line.
+  Prompt wording throughout is shorter: the top-level prompt is now
+  "Choose a section [1-9] or q [Exit]" (`q` and `exit` both work), each
+  section's prompt is "Choose a section [1-N] or b [Back]" (`b` and
+  `back` both work), and the Web portal section's password action is now
+  numbered alongside its other settings instead of a separate `p` letter.
+- The digest email's footer is reordered: the MIT License/source line
+  first, the copyright line second (was previously copyright-first,
+  all on one line).
+
+### Added
+
+- `lanfence setup` now checks for an active local firewall (`ufw` or
+  `firewalld`) right after enabling the web portal, and offers to open
+  the configured port for LAN traffic - fixes a real case where the
+  portal was running and the host was reachable (`ping` worked) but a
+  browser on another LAN device got `ERR_ADDRESS_UNREACHABLE` because the
+  host's own firewall was blocking the port. Falls back to printing the
+  exact `sudo` command to run manually if it can't apply the rule itself
+  (most commonly because `lanfence setup` isn't running as root).
+
 ## [0.5.1] - 2026-09-21
 
 ### Added

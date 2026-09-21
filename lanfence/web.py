@@ -381,6 +381,75 @@ def stop_server() -> bool:
     return True
 
 
+# --- local firewall (best-effort) ----------------------------------------
+#
+# Binding only to the LAN address (see resolve_bind_host) keeps the portal
+# unreachable from outside the LAN, but says nothing about whether *this
+# host's own* firewall lets LAN traffic reach the port at all - a fairly
+# common reason "it works from this machine but not from my phone on the
+# same network" (ERR_ADDRESS_UNREACHABLE-style failures from another
+# device, even though the process is up and `ping` to the host works).
+# ufw and firewalld are the two this checks for; anything else (nftables/
+# iptables managed directly, an upstream router ACL) isn't visible here.
+
+def detect_active_firewall() -> str | None:
+    """Which local firewall manager is currently active - ``"ufw"``,
+    ``"firewalld"``, or ``None`` if neither is active (which does not
+    guarantee nothing is blocking the port - see module note above)."""
+
+    try:
+        result = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode == 0 and "Status: active" in result.stdout:
+            return "ufw"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        result = subprocess.run(["firewall-cmd", "--state"], capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode == 0 and result.stdout.strip() == "running":
+            return "firewalld"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _firewall_allow_command(firewall: str, *, host: str, port: int) -> list[str]:
+    if firewall == "ufw":
+        # Scoped to the bound LAN address, not a blanket "allow this port
+        # on every interface" - consistent with never widening exposure
+        # beyond the LAN address this actually binds to.
+        return ["ufw", "allow", "to", host, "port", str(port), "proto", "tcp", "comment", "lanfence web portal"]
+    if firewall == "firewalld":
+        # firewalld's plain --add-port isn't destination-scoped (unlike
+        # the ufw rule above); reasonable in practice here since the
+        # service itself only ever binds the LAN address, never 0.0.0.0.
+        return ["firewall-cmd", "--permanent", f"--add-port={port}/tcp"]
+    raise ValueError(f"unsupported firewall: {firewall}")
+
+
+def allow_port_through_firewall(firewall: str, *, host: str, port: int) -> tuple[bool, str]:
+    """Attempt to open ``port``/tcp (for ``host``, where the firewall
+    supports scoping to it) through ``firewall``. Returns ``(success,
+    message)`` - on failure (most commonly: not running as root, since
+    `lanfence setup` itself normally isn't), the message includes the
+    exact command to run manually with sudo, rather than silently leaving
+    you stuck on the same unreachable-from-the-LAN error.
+    """
+
+    command = _firewall_allow_command(firewall, host=host, port=port)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not run `{' '.join(command)}`: {exc}"
+    if result.returncode != 0:
+        return False, (
+            "could not update the firewall automatically (this usually needs root) - run this yourself:\n"
+            f"  sudo {' '.join(command)}"
+        )
+    if firewall == "firewalld":
+        subprocess.run(["firewall-cmd", "--reload"], capture_output=True, text=True, timeout=10, check=False)
+    return True, f"firewall rule added ({firewall}): port {port}/tcp allowed for {host}"
+
+
 def start_background(config_path: Path) -> str:
     """Spawn `lanfence web` as a detached background process for immediate
     use right after `lanfence setup` enables it - convenience only. Not a

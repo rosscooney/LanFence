@@ -51,7 +51,7 @@ def test_shared_draft_channel_and_scanning(tmp_path):
     path = tmp_path / 'config.yaml'
     result, transport = run_setup(path,
         '2\n3\n2m\nback\n1\nslack\nhttps://hooks.slack.com/SECRET\n\ny\nn\n'
-        'review\nsave\ny\nn\nexit\n')
+        'review\nsave\nn\nexit\n')
     raw = yaml.safe_load(path.read_text())
     assert raw['scan'] == {'scan_interval_seconds': 120}
     assert raw['alerts']['slack']['enabled'] is True
@@ -164,9 +164,18 @@ def test_warnings_and_narrow_layout(tmp_path):
     warnings = warnings_for(Config.model_validate(raw))
     assert len(warnings) == 4
     stream = StringIO()
-    render_overview(Console(file=stream, width=36, color_system=None), tmp_path / 'config', {}, raw)
+    render_overview(Console(file=stream, width=36, color_system=None), raw)
     assert 'LAN Fence setup' in stream.getvalue()
-    assert 'Unsaved changes: Yes' in stream.getvalue()
+    assert 'Warning:' in stream.getvalue()
+
+
+def test_render_overview_never_prints_file_path_or_status():
+    stream = StringIO()
+    render_overview(Console(file=stream, width=80, color_system=None), {})
+    output = stream.getvalue()
+    assert 'File:' not in output
+    assert 'Unsaved changes' not in output
+    assert 'Status:' not in output
 
 
 def test_diff_hides_channel_values_and_unknown_values():
@@ -256,8 +265,8 @@ def test_insecure_permissions_disclosed_before_save(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('{}\n')
     path.chmod(0o644)
-    result, _ = run_setup(path, '2\n1\neth0\nback\nsave\ny\nexit\n')
-    assert result.output.index('restrict this file') < result.output.index('Save these changes?')
+    result, _ = run_setup(path, '2\n1\neth0\nback\nsave\nexit\n')
+    assert 'restrict this file' in result.output
     assert path.stat().st_mode & 0o777 == 0o600
 
 
@@ -284,9 +293,11 @@ def test_channel_test_failure_does_not_echo_remote_error(tmp_path):
 
 def test_web_portal_enable_set_password_offers_and_starts(tmp_path):
     path = tmp_path / 'config.yaml'
-    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/') as start_mock:
+    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/') as start_mock, \
+         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+         patch('lanfence.web.detect_active_firewall', return_value=None):
         result, _ = run_setup(
-            path, '9\n1\ny\np\nhunter22\nhunter22\nback\nsave\ny\ny\nexit\n',
+            path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n',
         )
     assert 'Web portal starting: http://192.168.1.5:8080/' in result.output
     start_mock.assert_called_once_with(path)
@@ -297,25 +308,65 @@ def test_web_portal_enable_set_password_offers_and_starts(tmp_path):
     assert 'hunter22' not in result.output
 
 
+def test_web_portal_enable_offers_to_open_firewall_when_active(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/'), \
+         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+         patch('lanfence.web.detect_active_firewall', return_value='ufw'), \
+         patch('lanfence.web.allow_port_through_firewall', return_value=(True, 'firewall rule added (ufw)')) as allow_mock:
+        result, _ = run_setup(
+            path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\ny\nexit\n',
+        )
+    assert 'ufw firewall is active' in result.output
+    assert 'firewall rule added (ufw)' in result.output
+    allow_mock.assert_called_once_with('ufw', host='192.168.1.5', port=8080)
+
+
+def test_web_portal_enable_declining_firewall_prompt_skips_it(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/'), \
+         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+         patch('lanfence.web.detect_active_firewall', return_value='ufw'), \
+         patch('lanfence.web.allow_port_through_firewall') as allow_mock:
+        result, _ = run_setup(
+            path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\nn\ny\nexit\n',
+        )
+    assert 'ufw firewall is active' in result.output
+    allow_mock.assert_not_called()
+
+
+def test_web_portal_enable_no_firewall_prompt_when_none_detected(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/'), \
+         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+         patch('lanfence.web.detect_active_firewall', return_value=None), \
+         patch('lanfence.web.allow_port_through_firewall') as allow_mock:
+        result, _ = run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n')
+    assert 'firewall is active' not in result.output
+    allow_mock.assert_not_called()
+
+
 def test_web_portal_enable_without_password_does_not_offer_start(tmp_path):
     path = tmp_path / 'config.yaml'
     with patch('lanfence.web.start_background') as start_mock:
-        result, _ = run_setup(path, '9\n1\ny\nback\nsave\ny\nexit\n')
+        result, _ = run_setup(path, '9\n1\ny\nback\nsave\nexit\n')
     assert 'cannot start until you set one' in result.output
     start_mock.assert_not_called()
 
 
 def test_web_portal_declining_start_does_not_call_start_background(tmp_path):
     path = tmp_path / 'config.yaml'
-    with patch('lanfence.web.start_background') as start_mock:
-        result, _ = run_setup(path, '9\n1\ny\np\nhunter22\nhunter22\nback\nsave\ny\nn\nexit\n')
+    with patch('lanfence.web.start_background') as start_mock, \
+         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+         patch('lanfence.web.detect_active_firewall', return_value=None):
+        result, _ = run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\nn\nexit\n')
     start_mock.assert_not_called()
     assert result.exit_code == 0
 
 
 def test_web_portal_password_mismatch_leaves_it_unset(tmp_path):
     path = tmp_path / 'config.yaml'
-    result, _ = run_setup(path, '9\np\nhunter1\nhunter2\nback\nexit\n')
+    result, _ = run_setup(path, '9\n3\nhunter1\nhunter2\nback\nexit\n')
     assert 'did not match' in result.output.lower()
 
 
@@ -325,7 +376,7 @@ def test_web_portal_disable_stops_running_server(tmp_path):
         yaml.safe_dump({'web': {'enabled': True, 'password_hash': 'x' * 64, 'password_salt': 'y' * 32}})
     )
     with patch('lanfence.web.stop_server', return_value=True) as stop_mock:
-        result, _ = run_setup(path, '9\n1\nn\nback\nsave\ny\nexit\n')
+        result, _ = run_setup(path, '9\n1\nn\nback\nsave\nexit\n')
     assert 'Web portal stopped.' in result.output
     stop_mock.assert_called_once()
 
@@ -336,5 +387,5 @@ def test_web_portal_password_change_while_running_notes_restart_needed(tmp_path)
         yaml.safe_dump({'web': {'enabled': True, 'password_hash': 'x' * 64, 'password_salt': 'y' * 32}})
     )
     with patch('lanfence.web.is_server_running', return_value=True):
-        result, _ = run_setup(path, '9\np\nnewpassword\nnewpassword\nback\nsave\ny\nexit\n')
+        result, _ = run_setup(path, '9\n3\nnewpassword\nnewpassword\nback\nsave\nexit\n')
     assert "won't see this change until it's restarted" in result.output

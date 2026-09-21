@@ -30,8 +30,9 @@ from lanfence import web
 
 # Only real model fields appear here; field types/defaults stay in config.py.
 # web.password_hash/password_salt are deliberately excluded - they're set
-# through the dedicated "p  Set/change password" action (edit_web_password
-# below), never edited as plain text like an ordinary field.
+# through the dedicated "Set/change password" action (edit_web_password
+# below, numbered after this section's listed fields), never edited as
+# plain text like an ordinary field.
 SECTIONS = {
     "Scanning": [f"scan.{name}" for name in type(Config().scan).model_fields if not name.startswith("offline_")],
     "Offline detection": ["scan.offline_grace_seconds", "scan.offline_after_missed_scans"],
@@ -227,18 +228,19 @@ def edit_field(raw, path):
 
 
 def edit_web_password(raw):
-    """The Web portal section's "p" action - sets/changes/clears the login
-    password. Kept out of the generic per-field ``edit_field`` flow (unlike
-    ``web.enabled``/``web.port``) since a password needs confirmation and
-    hashing, never a plain-text round trip like an ordinary setting."""
+    """The Web portal section's "Set/change password" action - sets/changes/
+    clears the login password. Kept out of the generic per-field
+    ``edit_field`` flow (unlike ``web.enabled``/``web.port``) since a
+    password needs confirmation and hashing, never a plain-text round trip
+    like an ordinary setting."""
 
     configured = value_at(raw, "web.password_hash") not in (MISSING, None)
     typer.echo("Web portal password: " + ("already configured" if configured else "not set"))
     answer = typer.prompt(
-        "New password (blank keeps it; clear = remove; back = return)",
+        "New password [a-z|A-Z|0-9] or b [Back]",
         default="", show_default=False, hide_input=True,
     )
-    if not answer or answer == "back":
+    if not answer or answer in ("back", "b"):
         return raw
     if answer == "clear":
         raw = patch_value(raw, "web.password_hash")
@@ -343,15 +345,20 @@ def edit_section(raw, section):
             typer.echo(f"{i}  {path}: {safe_value(value_at(cfg, path))} ({origin})")
         if section == "DHCP servers":
             typer.echo("a  Approved DHCP servers")
-        elif section == "Web portal":
+        password_index = None
+        if section == "Web portal":
+            password_index = len(SECTIONS[section]) + 1
             configured = value_at(raw, "web.password_hash") not in (MISSING, None)
-            typer.echo(f"p  Set/change password ({'configured' if configured else 'not set'})")
-        choice = typer.prompt("Setting number, or back", default="back").lower()
-        if choice == "back":
+            typer.echo(f"{password_index}  Set/change password ({'configured' if configured else 'not set'})")
+        max_choice = password_index if password_index is not None else len(SECTIONS[section])
+        choice = typer.prompt(
+            f"Choose a section [1-{max_choice}] or b [Back]", default="b", show_default=False
+        ).lower()
+        if choice in ("back", "b"):
             return raw
         if choice == "a" and section == "DHCP servers":
             raw = edit_approvals(raw)
-        elif choice == "p" and section == "Web portal":
+        elif password_index is not None and choice == str(password_index):
             raw = edit_web_password(raw)
         elif choice.isdigit() and 1 <= int(choice) <= len(SECTIONS[section]):
             raw = edit_field(raw, SECTIONS[section][int(choice) - 1])
@@ -395,7 +402,7 @@ def stage_channel(raw):
     return candidate
 
 
-def render_overview(console, path, original, draft):
+def render_overview(console, draft):
     cfg = Config.model_validate(draft)
     table = Table(expand=True, box=None)
     table.add_column("Choice", no_wrap=True)
@@ -414,7 +421,6 @@ def render_overview(console, path, original, draft):
     for i, (section, summary) in enumerate(zip(["Communications", *SECTIONS], summaries), 1):
         table.add_row(str(i), section, Text(clean_text(summary, max_len=300)))
     console.print(Panel(table, title="LAN Fence setup"))
-    console.print(Text(f"File: {path}\nStatus: {'Invalid' if validation_errors(draft, complete=True) else 'Valid'} · Unsaved changes: {'Yes' if draft != original else 'No'}"))
     for warning in warnings_for(cfg):
         console.print(Text("Warning: " + warning, style="yellow"))
 
@@ -425,9 +431,11 @@ def run_setup(path, loaded, explicit_config):
     draft = deepcopy(loaded.raw)
     sections = ["Communications", *SECTIONS]
     while True:
-        render_overview(console, path, loaded.raw, draft)
-        choice = typer.prompt("Section number / Review / Save / Discard / Exit", default="exit").lower()
-        exiting = choice == "exit"
+        render_overview(console, draft)
+        choice = typer.prompt(
+            f"Choose a section [1-{len(sections)}] or q [Exit]", default="exit", show_default=False
+        ).lower()
+        exiting = choice in ("exit", "q")
         if exiting:
             if draft == loaded.raw:
                 return
@@ -452,18 +460,13 @@ def run_setup(path, loaded, explicit_config):
             if errors:
                 typer.echo("Cannot save:\n" + "\n".join(errors))
                 continue
-            for line in diff_lines(loaded.raw, draft):
-                typer.echo(line)
             for warning in warnings_for(Config.model_validate(draft)):
                 typer.echo("Warning: " + warning)
-            typer.echo("Saving rewrites YAML formatting/comments; values are preserved. Monitor needs restart with this --config path.")
             if path.is_symlink():
                 typer.echo("Refusing to replace a configuration symlink; rerun with its intended target path.")
                 continue
             if check_insecure_permissions(path) is not None:
                 typer.echo("Saving will restrict this file to owner-only permissions (0600).")
-            if not typer.confirm("Save these changes?", default=False):
-                continue
             changed_channels = [n for n in CHANNEL_NAMES if value_at(loaded.raw, f"alerts.{n}") != value_at(draft, f"alerts.{n}")]
             web_before = Config.model_validate(loaded.raw).web
             cli._channels_new_file_notice(path, loaded.existed, explicit_config)
@@ -488,16 +491,33 @@ def run_setup(path, loaded, explicit_config):
             if web_after.enabled and not web_before.enabled:
                 if web_after.password_hash is None:
                     typer.echo("Web portal enabled, but no password is set yet - it cannot start until you set one.")
-                elif typer.confirm("Start the web portal now?", default=False):
+                else:
                     try:
-                        url = web.start_background(path)
-                        typer.echo(f"Web portal starting: {url}")
-                        typer.echo(
-                            "This is a convenience start for right now - it won't survive a reboot or "
-                            "restart automatically after a crash; see README for the packaged systemd unit."
-                        )
-                    except web.WebError as exc:
-                        typer.echo(f"Could not start the web portal: {exc}")
+                        bind_host = web.resolve_bind_host()
+                        firewall = web.detect_active_firewall()
+                        if firewall is not None:
+                            typer.echo(
+                                f"A {firewall} firewall is active - it may block other devices on your "
+                                f"LAN from reaching the portal on port {web_after.port}, even though the "
+                                "portal itself is running (ping/reachability to this host still works)."
+                            )
+                            if typer.confirm(f"Allow port {web_after.port}/tcp through {firewall} now?", default=True):
+                                _, message = web.allow_port_through_firewall(
+                                    firewall, host=bind_host, port=web_after.port
+                                )
+                                typer.echo(message)
+                    except web.WebError:
+                        pass  # bind host not resolvable yet - the start attempt below will surface this clearly
+                    if typer.confirm("Start the web portal now?", default=False):
+                        try:
+                            url = web.start_background(path)
+                            typer.echo(f"Web portal starting: {url}")
+                            typer.echo(
+                                "This is a convenience start for right now - it won't survive a reboot or "
+                                "restart automatically after a crash; see README for the packaged systemd unit."
+                            )
+                        except web.WebError as exc:
+                            typer.echo(f"Could not start the web portal: {exc}")
             elif web_before.enabled and not web_after.enabled:
                 if web.stop_server():
                     typer.echo("Web portal stopped.")

@@ -2427,7 +2427,6 @@ def test_setup_slack_creates_and_saves(config_path: Path):
         )
     assert result.exit_code == 0
     assert "saved" in result.output.lower()
-    assert "restart it" in result.output.lower()
 
     body = config_path.read_text()
     assert "hooks.slack.com/services/T000/B000/xxxx" in body
