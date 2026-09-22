@@ -29,14 +29,13 @@ Each release is also published to
 ### Changed
 
 - Every timestamp shown in the CLI, reports, and emails (digest and finding
-  alerts) is now human-readable - `2026-09-21 13:05:53 UTC` instead of
-  `datetime.isoformat()`'s `2026-09-21T13:05:53+00:00` - via a new shared
-  `lanfence.models.format_datetime`. Deliberately still UTC, spelled out
-  rather than converted to a local timezone, since a digest email or CLI
-  output may be read on a different machine than the one that generated
-  it. Machine-readable output (`--format json`) is unchanged, still real
-  ISO 8601. `lanfence monitor`'s live dashboard is unaffected - it already
-  intentionally shows genuine local time.
+  alerts) is now human-readable and shown in the generating machine's own
+  local timezone, zone abbreviation included - `2026-09-21 09:05:53 EDT`
+  instead of `datetime.isoformat()`'s `2026-09-21T13:05:53+00:00` - via a
+  new shared `lanfence.models.format_datetime`, the same conversion
+  `lanfence monitor`'s live dashboard already did on its own
+  (`lanfence.monitor_ui.local_now`). Machine-readable output (`--format
+  json`) is unchanged, still real UTC ISO 8601.
 
 - Every email LAN Fence sends - a finding alert (`alerts.email`), not just
   the digest, and `lanfence setup`'s post-save test message - now uses the

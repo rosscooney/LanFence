@@ -583,7 +583,10 @@ Older versions of LAN Fence only ever showed a device's *latest* IP and
 hostname. Every address and name a device has ever presented is now
 retained as durable evidence, each entry tagged with **where it came
 from**, **when** it was first and most recently observed, and **which
-interface** it was seen on:
+interface** it was seen on. (Every timestamp shown anywhere in the CLI or
+emails - including these - is this machine's own local time, zone
+abbreviation included, e.g. `2026-01-01 09:00:00 UTC` on a host configured
+for UTC, or `2026-01-01 04:00:00 EST` on one configured for US Eastern.)
 
 ```text
 $ lanfence device aa:bb:cc:dd:ee:ff
