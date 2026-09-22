@@ -951,6 +951,13 @@ def test_monitor_append_only_prints_scanning_notice_immediately(config_path: Pat
     must print something before the (potentially multi-second) blocking
     sweep starts, so the process doesn't look hung."""
 
+    # Force the very first loop tick to be due for a sweep regardless of
+    # this machine/container's real monotonic clock value (e.g. a freshly
+    # booted CI runner can have very little uptime yet) - the loop compares
+    # against `scan_interval_seconds` (default 60s) starting from a `0.0`
+    # sentinel, so a low enough real monotonic reading would otherwise skip
+    # the sweep (and this notice) on this one and only iteration.
+    monkeypatch.setattr("lanfence.cli.time.monotonic", lambda: 10_000.0)
     monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
     result = runner.invoke(app, ["monitor", "--no-live", "--config", str(config_path)])
     assert result.exit_code == 0
