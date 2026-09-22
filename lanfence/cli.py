@@ -73,7 +73,7 @@ from lanfence.engine import (
 from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import setup_logging
-from lanfence.models import Finding
+from lanfence.models import Finding, format_datetime
 from lanfence.netutil import normalize_mac
 from lanfence.safe_errors import summarize_error
 from lanfence.report import (
@@ -1064,7 +1064,7 @@ def digest(
         render_digest(digest_obj)
         if verbose:
             typer.echo("")
-            typer.secho(f"Detailed activity - since {since_dt.isoformat()}", fg="cyan", bold=True)
+            typer.secho(f"Detailed activity - since {format_datetime(since_dt)}", fg="cyan", bold=True)
             render_events(events)
             typer.echo("")
             render_findings(findings)
@@ -1164,8 +1164,8 @@ def dhcp_servers_cmd(
         approval = f"approved ({r.name})" if r.approved and r.name else ("approved" if r.approved else "NOT approved")
         typer.echo(
             f"  {r.interface:<10} {r.server_id:<16} {approval:<20} "
-            f"seen {r.observation_count}x, {r.first_seen.isoformat(timespec='seconds')} - "
-            f"{r.last_seen.isoformat(timespec='seconds')}"
+            f"seen {r.observation_count}x, {format_datetime(r.first_seen)} - "
+            f"{format_datetime(r.last_seen)}"
         )
         detail = f"    last: {r.last_message_type or '?'}"
         if r.last_source_ip:
@@ -1978,7 +1978,7 @@ def _run_interactive_review(cfg: Config) -> None:
                 action_now = utcnow()
                 until = action_now + timedelta(seconds=seconds)
                 store.set_snoozed(dev.mac, until=until, updated_at=action_now)
-                typer.secho(f"  snoozed until {until.isoformat(timespec='seconds')}", fg="green")
+                typer.secho(f"  snoozed until {format_datetime(until)}", fg="green")
             elif action in ("i", "investigate"):
                 notes = typer.prompt("  notes", default="")
                 store.set_investigating(dev.mac, notes=notes, updated_at=utcnow())
@@ -2074,7 +2074,7 @@ def review(
             duration = _parse_snooze_duration(snooze)
             until = now + duration
             store.set_snoozed(norm_mac, until=until, updated_at=now)
-            typer.secho(f"snoozed {norm_mac} until {until.isoformat(timespec='seconds')}", fg="green")
+            typer.secho(f"snoozed {norm_mac} until {format_datetime(until)}", fg="green")
         elif investigate:
             store.set_investigating(norm_mac, notes=notes, updated_at=now)
             typer.secho(f"flagged {norm_mac} for investigation", fg="green")

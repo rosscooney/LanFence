@@ -43,7 +43,7 @@ from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.engine import build_inventory, enrich_missing_hostnames, is_review_needed
 from lanfence.logging_config import get_logger
-from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, DigestSection
+from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, DigestSection, format_datetime
 from lanfence.safe_errors import summarize_error
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 from lanfence.web import PORTAL_NOT_RUNNING_NOTE
@@ -228,8 +228,8 @@ def format_digest_text(digest: Digest) -> str:
     """Readable plain-text body shared by email and every text-based channel."""
 
     lines = [
-        f"LAN Fence digest - {digest.window_start.isoformat()} to {digest.window_end.isoformat()}",
-        f"Generated: {digest.generated_at.isoformat()}"
+        f"LAN Fence digest - {format_datetime(digest.window_start)} to {format_datetime(digest.window_end)}",
+        f"Generated: {format_datetime(digest.generated_at)}"
         + (f"  ·  Host: {digest.generated_by_host}" if digest.generated_by_host else ""),
         "",
         f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}",
@@ -342,9 +342,9 @@ def format_digest_html(digest: Digest) -> str:
     <td style="font-size:18px;font-weight:700;">LAN Fence digest</td>
   </tr></table>
   <p style="{_EMAIL_MUTED_STYLE}font-size:13px;margin:8px 0 0;">
-    {html.escape(digest.window_start.isoformat(timespec="seconds"))} to
-    {html.escape(digest.window_end.isoformat(timespec="seconds"))}
-    &middot; generated {html.escape(digest.generated_at.isoformat(timespec="seconds"))}
+    {html.escape(format_datetime(digest.window_start))} to
+    {html.escape(format_datetime(digest.window_end))}
+    &middot; generated {html.escape(format_datetime(digest.generated_at))}
     {f'&middot; host {html.escape(digest.generated_by_host)}' if digest.generated_by_host else ''}
   </p>
 </td></tr>

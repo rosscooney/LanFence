@@ -18,6 +18,7 @@ from lanfence.models import (
     InspectionResult,
     NameEvidence,
     ScanResult,
+    format_datetime,
 )
 from lanfence.report import (
     exit_code_for,
@@ -477,6 +478,16 @@ def test_render_dossier_compact_shows_classification_and_first_last_seen_and_sta
     assert "First seen:" in text
     assert "Last seen:" in text
     assert "Status:     Online" in text
+
+
+def test_render_dossier_compact_shows_human_readable_dates_not_raw_isoformat():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now())
+    dossier = _dossier_for_report(device=device)
+    text = render_dossier_compact(dossier)
+    assert format_datetime(device.first_seen) in text
+    assert format_datetime(device.last_seen) in text
+    assert "T" + device.first_seen.strftime("%H:%M:%S") not in text  # no raw isoformat "T..." separator
+    assert "+00:00" not in text
 
 
 def test_render_dossier_compact_shows_observed_services():

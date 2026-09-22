@@ -44,6 +44,30 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def format_datetime(dt: datetime) -> str:
+    """A human-readable rendering of a timestamp, used by every CLI/report/
+    email display - "2026-09-21 13:05:53 UTC" instead of
+    ``datetime.isoformat()``'s "2026-09-21T13:05:53+00:00" (a literal "T"
+    separator and a numeric "+00:00" offset instead of a named zone).
+
+    Deliberately normalized to UTC and spelled out rather than converted to
+    any local timezone - a digest email or `lanfence device` output may be
+    read on a different machine/timezone than the one that generated it,
+    so an unlabeled "local" time would be ambiguous; explicit UTC is not.
+    Contrast `lanfence monitor`'s live dashboard, which intentionally shows
+    genuine local time (see ``lanfence.monitor_ui.local_now``'s docstring)
+    since it's read interactively on the very machine it runs on - this
+    function is for everything else.
+
+    Always second precision (sub-second precision has no display value
+    here) - a naive ``dt`` is assumed to already be UTC, matching every
+    timestamp this codebase stores (see ``lanfence.db._parse_dt``).
+    """
+
+    aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 #: How a piece of address/name evidence was obtained. Carried through
 #: explicitly from the observation pipeline rather than inferred later -
 #: see :class:`lanfence.scanner.ArpSighting.source` and

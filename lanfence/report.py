@@ -21,6 +21,7 @@ from lanfence.models import (
     InspectionResult,
     NameEvidence,
     ScanResult,
+    format_datetime,
 )
 from lanfence.digest import monitor_status_line
 from lanfence.web import PORTAL_NOT_RUNNING_NOTE
@@ -157,8 +158,8 @@ def _plain_summary(result: ScanResult) -> list[str]:
         "LAN Fence scan result",
         f"  interface: {result.interface or '?'}",
         f"  subnet:    {result.subnet or '?'}",
-        f"  started:   {result.started_at.isoformat()}",
-        f"  ended:     {result.ended_at.isoformat()}",
+        f"  started:   {format_datetime(result.started_at)}",
+        f"  ended:     {format_datetime(result.ended_at)}",
     ]
     for err in result.errors:
         lines.append(f"  error:     {err}")
@@ -270,7 +271,7 @@ def render_inspection_result(result: InspectionResult, *, now: datetime) -> str:
     stale = (now - result.observed_at) > INSPECTION_STALE_AFTER
     lines = [
         f"Active inspection of {result.mac} ({result.ip})",
-        f"Method: {result.method}  ·  Observed: {result.observed_at.strftime('%d %b %Y %H:%M')} ({age})"
+        f"Method: {result.method}  ·  Observed: {format_datetime(result.observed_at)} ({age})"
         + ("  [STALE - re-run for current data]" if stale else ""),
         "",
     ]
@@ -306,7 +307,7 @@ def render_events(events: list[DeviceEvent], *, plain: bool = False) -> str:
     lines = [f"Events: {len(events)}"]
     for event in events:
         lines.append(
-            f"  {event.timestamp.isoformat()}  {event.event_type:<12}  {event.mac}  "
+            f"  {format_datetime(event.timestamp)}  {event.event_type:<12}  {event.mac}  "
             f"{event.ip or '-':<15}  {event.hostname or '[unknown]'}"
         )
     text = "\n".join(lines)
@@ -323,7 +324,7 @@ def render_events(events: list[DeviceEvent], *, plain: bool = False) -> str:
     table.add_column("Hostname", overflow="fold")
     for event in events:
         table.add_row(
-            event.timestamp.isoformat(timespec="seconds"),
+            format_datetime(event.timestamp),
             event.event_type,
             event.mac,
             event.ip or "-",
@@ -347,7 +348,7 @@ def review_status_label(device: Device, *, now: datetime) -> str:
     if device.review_state == "investigating":
         return "investigating"
     if device.review_state == "snoozed" and device.snoozed_until is not None and device.snoozed_until > now:
-        return f"snoozed until {device.snoozed_until.isoformat(timespec='seconds')}"
+        return f"snoozed until {format_datetime(device.snoozed_until)}"
     return "pending"
 
 
@@ -414,7 +415,7 @@ def render_device_inventory(
             f"  - {d.mac}  {_ip_display(d):<15}  {d.hostname or '[unknown]':<24}  "
             f"{d.vendor or '[unknown]':<20}  {d.status:<8}  {trust:<20}  "
             f"{review_status_label(d, now=now):<28}  {presence:<28}  "
-            f"{d.last_seen.isoformat(timespec='seconds')}"
+            f"{format_datetime(d.last_seen)}"
         )
         if show_metadata:
             m = d.metadata or DeviceMetadata(mac=d.mac)
@@ -469,7 +470,7 @@ def render_device_inventory(
                     _rich_escape(m.location or "-"),
                 ]
             )
-        row.append(d.last_seen.isoformat(timespec="seconds"))
+        row.append(format_datetime(d.last_seen))
         table.add_row(*row)
     console.print(table)
     return text
@@ -553,8 +554,8 @@ def render_dossier_compact(
     lines.extend(_classification_lines(dossier.classification))
 
     lines.append("")
-    lines.append(f"First seen: {dossier.device.first_seen.strftime('%d %b %Y %H:%M')}")
-    lines.append(f"Last seen:  {dossier.device.last_seen.strftime('%d %b %Y %H:%M')}")
+    lines.append(f"First seen: {format_datetime(dossier.device.first_seen)}")
+    lines.append(f"Last seen:  {format_datetime(dossier.device.last_seen)}")
     lines.append(f"Status:     {dossier.device.status.capitalize()}")
 
     services = dossier.observed_services_summary
@@ -591,8 +592,8 @@ def _address_evidence_lines(addresses: list[AddressEvidence]) -> list[str]:
         lines.append(f"    Source: {label}{iface}")
         if a.kind == "lease_reported":
             lines.append("    (DHCP-server-reported lease - not itself proof of use)")
-        lines.append(f"    First observed: {a.first_seen.isoformat(timespec='seconds')}")
-        lines.append(f"    Last observed:  {a.last_seen.isoformat(timespec='seconds')}")
+        lines.append(f"    First observed: {format_datetime(a.first_seen)}")
+        lines.append(f"    Last observed:  {format_datetime(a.last_seen)}")
     return lines
 
 
@@ -606,8 +607,8 @@ def _name_evidence_lines(names: list[NameEvidence]) -> list[str]:
             label = f"{label} for {n.ip}"
         lines.append(f"  {n.name}")
         lines.append(f"    Source: {label}")
-        lines.append(f"    First observed: {n.first_seen.isoformat(timespec='seconds')}")
-        lines.append(f"    Last observed:  {n.last_seen.isoformat(timespec='seconds')}")
+        lines.append(f"    First observed: {format_datetime(n.first_seen)}")
+        lines.append(f"    Last observed:  {format_datetime(n.last_seen)}")
     return lines
 
 
@@ -658,13 +659,13 @@ def _advertised_service_lines(services: list[AdvertisedService]) -> list[str]:
             lines.append(f"    Attributes (advertised claims, unverified): {attrs}")
         iface = f" · Interface: {s.interface}" if s.interface else ""
         lines.append(f"    Source: {_DISCOVERY_PROTOCOL_LABELS[s.protocol]}{iface}")
-        lines.append(f"    Last observed: {s.last_seen.isoformat(timespec='seconds')}")
+        lines.append(f"    Last observed: {format_datetime(s.last_seen)}")
         if s.status == "withdrawn":
             lines.append("    Status: withdrawn (the advertiser explicitly announced it's gone)")
         elif s.status == "expired":
             lines.append("    Status: expired (no refresh before its advertised lifetime lapsed)")
         elif s.expires_at:
-            lines.append(f"    Advertisement expires: {s.expires_at.isoformat(timespec='seconds')}")
+            lines.append(f"    Advertisement expires: {format_datetime(s.expires_at)}")
         lines.append(f"    Association: {_association_label(s)}")
     return lines
 
@@ -735,7 +736,7 @@ def render_advertised_services(
         assoc = s.mac or "unassociated"
         lines.append(
             f"  - [{s.protocol}] {label:<14} {type_display:<20} {(s.instance_name or '-'):<24} "
-            f"{assoc:<20} {s.status:<10} {s.last_seen.isoformat(timespec='seconds')}"
+            f"{assoc:<20} {s.status:<10} {format_datetime(s.last_seen)}"
         )
     text = "\n".join(lines)
     if plain or not _RICH:
@@ -764,7 +765,7 @@ def render_advertised_services(
             _rich_escape(s.instance_name or "-"),
             s.mac or "[dim]unassociated[/dim]",
             s.status,
-            s.last_seen.isoformat(timespec="seconds"),
+            format_datetime(s.last_seen),
         )
     console.print(table)
     return text
@@ -775,7 +776,7 @@ def _inspection_summary_lines(inspection: InspectionResult, *, now: datetime) ->
     stale = (now - inspection.observed_at) > INSPECTION_STALE_AFTER
     lines = [
         "Active inspection (see `lanfence inspect` for a probe-by-probe breakdown):",
-        f"  Observed: {inspection.observed_at.strftime('%d %b %Y %H:%M')} ({age})"
+        f"  Observed: {format_datetime(inspection.observed_at)} ({age})"
         + ("  [STALE - re-run for current data]" if stale else ""),
     ]
     if inspection.open_ports:
@@ -823,8 +824,8 @@ def render_device_detail(
         f"  Hostname:   {device.hostname or '[unknown]'}",
         f"  Vendor:     {device.vendor or '[unknown]'}",
         f"  Status:     {device.status}",
-        f"  First seen: {device.first_seen.isoformat(timespec='seconds')}",
-        f"  Last seen:  {device.last_seen.isoformat(timespec='seconds')}",
+        f"  First seen: {format_datetime(device.first_seen)}",
+        f"  Last seen:  {format_datetime(device.last_seen)}",
         f"  Trust:      {trust}",
         f"  Review:     {review_status_label(device, now=now)}",
         f"  {presence_label(device, default_offline_after_seconds=default_offline_after_seconds)}",
@@ -848,7 +849,7 @@ def render_device_detail(
 
     lines.append("")
     lines.append(
-        f"Lifecycle timeline since {since.isoformat(timespec='seconds')} ({len(events)} event(s)):"
+        f"Lifecycle timeline since {format_datetime(since)} ({len(events)} event(s)):"
     )
     lines.append(
         "  Only connect/reappear/disconnect transitions are logged here - a device that stayed "
@@ -857,7 +858,7 @@ def render_device_detail(
     )
     for event in events:
         lines.append(
-            f"  {event.timestamp.isoformat(timespec='seconds')}  {event.event_type:<12}  "
+            f"  {format_datetime(event.timestamp)}  {event.event_type:<12}  "
             f"{event.ip or '-':<15}  {event.hostname or '[unknown]'}"
         )
 
@@ -889,8 +890,8 @@ def render_device_detail(
         f"Hostname:   {_rich_escape(device.hostname or '[unknown]')}",
         f"Vendor:     {_rich_escape(device.vendor or '[unknown]')}",
         f"Status:     {device.status}",
-        f"First seen: {device.first_seen.isoformat(timespec='seconds')}",
-        f"Last seen:  {device.last_seen.isoformat(timespec='seconds')}",
+        f"First seen: {format_datetime(device.first_seen)}",
+        f"Last seen:  {format_datetime(device.last_seen)}",
         f"Trust:      {_rich_escape(trust)}",
         f"Review:     {_rich_escape(review_status_label(device, now=now))}",
         _rich_escape(presence_label(device, default_offline_after_seconds=default_offline_after_seconds)),
@@ -922,7 +923,7 @@ def render_device_detail(
         console.print(Panel("\n".join(_inspection_summary_lines(inspection, now=now)), title="Active inspection"))
 
     console.print(
-        f"\n[bold]Lifecycle timeline[/bold] since {since.isoformat(timespec='seconds')} "
+        f"\n[bold]Lifecycle timeline[/bold] since {format_datetime(since)} "
         f"({len(events)} event(s))"
     )
     console.print(
@@ -938,7 +939,7 @@ def render_device_detail(
         table.add_column("Hostname", overflow="fold")
         for event in events:
             table.add_row(
-                event.timestamp.isoformat(timespec="seconds"),
+                format_datetime(event.timestamp),
                 event.event_type,
                 event.ip or "-",
                 _rich_escape(event.hostname or "[unknown]"),
@@ -958,8 +959,8 @@ def render_device_detail(
             console.print(f"  [bold]{_rich_escape(a.ip)}[/bold]")
             console.print(f"    Source: {label}{iface}{lease_note}")
             console.print(
-                f"    First observed: {a.first_seen.isoformat(timespec='seconds')}   "
-                f"Last observed: {a.last_seen.isoformat(timespec='seconds')}"
+                f"    First observed: {format_datetime(a.first_seen)}   "
+                f"Last observed: {format_datetime(a.last_seen)}"
             )
 
     if names is not None:
@@ -973,8 +974,8 @@ def render_device_detail(
             console.print(f"  [bold]{_rich_escape(n.name)}[/bold]")
             console.print(f"    Source: {label}")
             console.print(
-                f"    First observed: {n.first_seen.isoformat(timespec='seconds')}   "
-                f"Last observed: {n.last_seen.isoformat(timespec='seconds')}"
+                f"    First observed: {format_datetime(n.first_seen)}   "
+                f"Last observed: {format_datetime(n.last_seen)}"
             )
 
     if services is not None:
@@ -1000,13 +1001,13 @@ def render_device_detail(
                 console.print(f"    Attributes (advertised claims, unverified): {_rich_escape(attrs)}")
             iface = f" · Interface: {_rich_escape(s.interface)}" if s.interface else ""
             console.print(f"    Source: {_DISCOVERY_PROTOCOL_LABELS[s.protocol]}{iface}")
-            console.print(f"    Last observed: {s.last_seen.isoformat(timespec='seconds')}")
+            console.print(f"    Last observed: {format_datetime(s.last_seen)}")
             if s.status == "withdrawn":
                 console.print("    Status: [yellow]withdrawn[/yellow] (the advertiser announced it's gone)")
             elif s.status == "expired":
                 console.print("    Status: [yellow]expired[/yellow] (no refresh before its lifetime lapsed)")
             elif s.expires_at:
-                console.print(f"    Advertisement expires: {s.expires_at.isoformat(timespec='seconds')}")
+                console.print(f"    Advertisement expires: {format_datetime(s.expires_at)}")
             console.print(f"    Association: {_rich_escape(_association_label(s))}")
 
     return text
@@ -1037,9 +1038,9 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
     :class:`~lanfence.models.Digest`."""
 
     lines = [
-        f"LAN Fence digest - {digest.window_start.isoformat(timespec='seconds')} "
-        f"to {digest.window_end.isoformat(timespec='seconds')}",
-        f"Generated: {digest.generated_at.isoformat(timespec='seconds')}"
+        f"LAN Fence digest - {format_datetime(digest.window_start)} "
+        f"to {format_datetime(digest.window_end)}",
+        f"Generated: {format_datetime(digest.generated_at)}"
         + (f"  ·  Host: {digest.generated_by_host}" if digest.generated_by_host else ""),
         "",
         f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}",
@@ -1069,10 +1070,10 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         return text
 
     console = Console()
-    console.print(f"[bold]LAN Fence digest[/bold] - {digest.window_start.isoformat(timespec='seconds')} "
-                  f"to {digest.window_end.isoformat(timespec='seconds')}")
+    console.print(f"[bold]LAN Fence digest[/bold] - {format_datetime(digest.window_start)} "
+                  f"to {format_datetime(digest.window_end)}")
     host_suffix = f"  ·  Host: {_rich_escape(digest.generated_by_host)}" if digest.generated_by_host else ""
-    console.print(f"[dim]Generated: {digest.generated_at.isoformat(timespec='seconds')}{host_suffix}[/dim]")
+    console.print(f"[dim]Generated: {format_datetime(digest.generated_at)}{host_suffix}[/dim]")
     console.print(f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}")
     console.print(
         f"New: {digest.activity.new_device_count}   Reappeared: {digest.activity.reappeared_device_count}   "

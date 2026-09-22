@@ -592,18 +592,18 @@ $ lanfence device aa:bb:cc:dd:ee:ff
 Addresses (2 retained)
   10.0.0.5
     Source: ARP · Interface: eth0
-    First observed: 2026-01-01T09:00:00+00:00   Last observed: 2026-01-05T08:00:00+00:00
+    First observed: 2026-01-01 09:00:00 UTC   Last observed: 2026-01-05 08:00:00 UTC
   fe80::1234
     Source: IPv6 ND · Interface: eth0
-    First observed: 2026-01-02T10:00:00+00:00   Last observed: 2026-01-02T10:00:00+00:00
+    First observed: 2026-01-02 10:00:00 UTC   Last observed: 2026-01-02 10:00:00 UTC
 
 Names (2 retained)
   office-laptop
     Source: DHCP option 12
-    First observed: 2026-01-01T09:00:00+00:00   Last observed: 2026-01-05T08:00:00+00:00
+    First observed: 2026-01-01 09:00:00 UTC   Last observed: 2026-01-05 08:00:00 UTC
   office-laptop.lan
     Source: reverse DNS for 10.0.0.5
-    First observed: 2026-01-03T09:00:00+00:00   Last observed: 2026-01-03T09:00:00+00:00
+    First observed: 2026-01-03 09:00:00 UTC   Last observed: 2026-01-03 09:00:00 UTC
 ```
 
 The plain `IP:`/`Hostname:` fields in "Current details" (and `Device.ip`/
@@ -1284,8 +1284,8 @@ Advertised services (1 known)
     Instance: Office Printer
     Target: printer.local:631
     Source: mDNS/DNS-SD · Interface: eth0
-    Last observed: 2026-01-05T08:00:00+00:00
-    Advertisement expires: 2026-01-05T08:02:00+00:00
+    Last observed: 2026-01-05 08:00:00 UTC
+    Advertisement expires: 2026-01-05 08:02:00 UTC
     Association: target IP matched observed device address
 
 $ lanfence services
