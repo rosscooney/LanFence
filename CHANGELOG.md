@@ -25,6 +25,16 @@ Each release is also published to
   even while the main loop is blocked inside the sweep itself, and plain/
   append-only mode prints an immediate `scanning...` line before each
   sweep starts.
+- A device about to be marked offline now gets one last direct unicast
+  ARP retry (`scan.offline_retry_probe`, default on) before that verdict
+  is accepted - a same-kind, isolated repeat of the broadcast sweep's own
+  ARP request, which some switches/APs answer unreliably under the
+  contention of a subnet-wide broadcast burst but respond to individually
+  just fine. Reduces false disconnect/reconnect flapping for such devices
+  without changing the underlying grace-period/missed-scan behavior for
+  anything that doesn't answer. IPv4 only. New `DeviceStore
+  .devices_due_for_offline` (read-only preview of what `mark_offline`
+  would do) and `scanner.arp_probe` (one unicast ARP request).
 
 ### Changed
 

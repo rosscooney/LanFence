@@ -184,6 +184,34 @@ def local_mac(interface: str | None = None) -> str | None:
         return None
 
 
+def _arp_who_has(scapy_module, pdst: str, *, interface: str | None, timeout: float) -> list[ArpSighting]:
+    """Send ARP "who-has" request(s) for ``pdst`` (a single IP, or a whole
+    subnet - scapy expands a CIDR into one request per host automatically)
+    and return every reply received within ``timeout``. Shared by
+    :func:`active_scan` (subnet-wide) and :func:`arp_probe` (one address,
+    a targeted retry - see its docstring)."""
+
+    kwargs = {"timeout": timeout, "verbose": False}
+    if interface:
+        kwargs["iface"] = interface
+
+    request = scapy_module.Ether(dst="ff:ff:ff:ff:ff:ff") / scapy_module.ARP(pdst=pdst)
+    try:
+        answered, _unanswered = scapy_module.srp(request, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - scapy's socket-open errors vary by
+        # platform/backend (PermissionError, OSError, or its own Scapy_Exception
+        # on the BPF/libpcap backends) - normalize all of them to one message.
+        if _looks_like_permission_error(exc):
+            raise ScannerUnavailable(
+                "permission denied opening a raw socket - active scanning needs "
+                "root (or CAP_NET_RAW). Re-run with sudo."
+            ) from exc
+        raise ScannerUnavailable(f"could not send ARP requests: {exc}") from exc
+
+    now = datetime.now(timezone.utc)
+    return [ArpSighting(mac=received.hwsrc, ip=received.psrc, seen_at=now, source="arp") for _sent, received in answered]
+
+
 def active_scan(
     *,
     subnet: str,
@@ -202,29 +230,30 @@ def active_scan(
         ipaddress.ip_network(subnet, strict=False)
     except ValueError as exc:
         raise ValueError(f"not a valid subnet: {subnet!r}") from exc
+    return _arp_who_has(scapy_module, subnet, interface=interface, timeout=timeout)
 
-    kwargs = {"timeout": timeout, "verbose": False}
-    if interface:
-        kwargs["iface"] = interface
 
-    request = scapy_module.Ether(dst="ff:ff:ff:ff:ff:ff") / scapy_module.ARP(pdst=subnet)
+def arp_probe(ip: str, *, interface: str | None = None, timeout: float = 1.0) -> ArpSighting | None:
+    """Send one unicast ARP "who-has" directly to ``ip`` and return the
+    resulting sighting if it answers, else ``None``.
+
+    Used only as a last-chance retry for a device :meth:`lanfence.db.DeviceStore.mark_offline`
+    is about to transition offline (see :func:`lanfence.engine.run_active_sweep`)
+    - the exact same kind of request :func:`active_scan` already sent as
+    part of a much larger, simultaneous subnet-wide broadcast burst, which
+    some devices (a busy switch/AP, an oversubscribed CPU) answer
+    unreliably under that kind of contention but respond to individually,
+    on a clean retry, just fine. Not a new probing mechanism and no new
+    permission requirements beyond :func:`active_scan`'s.
+    """
+
+    scapy_module = _require_scapy()
     try:
-        answered, _unanswered = scapy_module.srp(request, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - scapy's socket-open errors vary by
-        # platform/backend (PermissionError, OSError, or its own Scapy_Exception
-        # on the BPF/libpcap backends) - normalize all of them to one message.
-        if _looks_like_permission_error(exc):
-            raise ScannerUnavailable(
-                "permission denied opening a raw socket - active scanning needs "
-                "root (or CAP_NET_RAW). Re-run with sudo."
-            ) from exc
-        raise ScannerUnavailable(f"could not send ARP requests: {exc}") from exc
-
-    now = datetime.now(timezone.utc)
-    sightings: list[ArpSighting] = []
-    for _sent, received in answered:
-        sightings.append(ArpSighting(mac=received.hwsrc, ip=received.psrc, seen_at=now, source="arp"))
-    return sightings
+        ipaddress.IPv4Address(ip)
+    except ValueError as exc:
+        raise ValueError(f"not a valid IPv4 address: {ip!r}") from exc
+    sightings = _arp_who_has(scapy_module, ip, interface=interface, timeout=timeout)
+    return sightings[0] if sightings else None
 
 
 #: Ethernet multicast MAC for the IPv6 all-nodes link-local multicast address

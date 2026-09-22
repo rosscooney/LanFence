@@ -196,6 +196,55 @@ def test_active_scan_tags_source_as_arp(monkeypatch):
     assert sightings[0].source == "arp"
 
 
+def test_arp_probe_rejects_bad_ip():
+    with pytest.raises(ValueError):
+        scanner.arp_probe("not-an-ip")
+
+
+def test_arp_probe_rejects_ipv6():
+    with pytest.raises(ValueError):
+        scanner.arp_probe("fe80::1")
+
+
+def test_arp_probe_returns_none_when_no_reply(monkeypatch):
+    import scapy.all as scapy_module
+
+    def fake_srp(pkt, **kwargs):
+        return [], [pkt]
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    assert scanner.arp_probe("10.0.0.5", interface="eth0", timeout=1) is None
+
+
+def test_arp_probe_returns_sighting_when_answered(monkeypatch):
+    import scapy.all as scapy_module
+
+    received = scapy_module.ARP(hwsrc="aa:bb:cc:dd:ee:ff", psrc="10.0.0.5")
+
+    def fake_srp(pkt, **kwargs):
+        assert kwargs.get("timeout") == 1
+        assert kwargs.get("iface") == "eth0"
+        return [(pkt, received)], []
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    sighting = scanner.arp_probe("10.0.0.5", interface="eth0", timeout=1)
+    assert sighting is not None
+    assert sighting.mac == "aa:bb:cc:dd:ee:ff"
+    assert sighting.ip == "10.0.0.5"
+    assert sighting.source == "arp"
+
+
+def test_arp_probe_permission_denied(monkeypatch):
+    import scapy.all as scapy_module
+
+    def fake_srp(*_args, **_kwargs):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    with pytest.raises(scanner.ScannerUnavailable, match="permission denied"):
+        scanner.arp_probe("10.0.0.5", interface="eth0", timeout=1)
+
+
 def test_passive_sniff_uses_combined_arp_and_icmp6_filter(monkeypatch):
     import scapy.all as scapy_module
 

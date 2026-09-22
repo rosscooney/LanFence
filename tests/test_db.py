@@ -465,6 +465,54 @@ def test_mark_offline_compat_zero_seconds_one_miss_disconnects_immediately(tmp_p
         assert store.get_device("aa:bb:cc:dd:ee:ff").status == "offline"
 
 
+def test_devices_due_for_offline_matches_what_mark_offline_would_do(tmp_path: Path):
+    """The read-only preview and the real transition must agree - a device
+    devices_due_for_offline reports is exactly the set mark_offline would
+    actually disconnect, and calling the preview must not itself have
+    changed anything (missed_scans untouched, still online)."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _observe_ipv4(store, "aa:bb:cc:dd:ee:ff", seen_at=t0)
+        kwargs = dict(
+            as_of=t0, grace_seconds=0, missed_after=1,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+
+        due = store.devices_due_for_offline(set(), **kwargs)
+        assert [d.mac for d in due] == ["aa:bb:cc:dd:ee:ff"]
+        # Read-only: still online, nothing committed by the preview itself.
+        assert store.get_device("aa:bb:cc:dd:ee:ff").status == "online"
+
+        events = store.mark_offline(set(), **kwargs)
+        assert [e.mac for e in events] == ["aa:bb:cc:dd:ee:ff"]
+        assert store.get_device("aa:bb:cc:dd:ee:ff").status == "offline"
+
+
+def test_devices_due_for_offline_excludes_still_online_macs(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _observe_ipv4(store, "aa:bb:cc:dd:ee:ff", seen_at=t0)
+
+        due = store.devices_due_for_offline(
+            {"aa:bb:cc:dd:ee:ff"}, as_of=t0, grace_seconds=0, missed_after=1,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        assert due == []
+
+
+def test_devices_due_for_offline_empty_before_threshold_reached(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _observe_ipv4(store, "aa:bb:cc:dd:ee:ff", seen_at=t0)
+
+        due = store.devices_due_for_offline(
+            set(), as_of=t0, grace_seconds=180, missed_after=3,
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0",
+        )
+        assert due == []
+
+
 def test_active_sighting_resets_missed_scan_count(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()

@@ -1614,6 +1614,57 @@ class DeviceStore:
         self._conn.commit()
         return True
 
+    def devices_due_for_offline(
+        self,
+        still_online_macs: set[str],
+        *,
+        as_of: datetime,
+        grace_seconds: float = 0.0,
+        missed_after: int = 1,
+        ipv4_covered: bool = True,
+        ipv4_subnet: str | None = None,
+        ipv6_covered: bool = True,
+        interface: str | None = None,
+    ) -> list[Device]:
+        """Every currently-online device that :meth:`mark_offline` would
+        transition to offline right now, given the exact same arguments -
+        read-only (never touches ``missed_scans``, never emits an event or
+        commits anything), mirroring its per-row eligibility (see
+        :func:`_path_covered`) and threshold (missed-scan count + grace
+        period) check.
+
+        For a caller that wants one last direct check before accepting an
+        offline verdict - see :func:`lanfence.engine.run_active_sweep`,
+        which probes each of these with :func:`lanfence.scanner.arp_probe`
+        and folds an answering device back in as a real sighting instead
+        of calling :meth:`mark_offline` on it. Keep this in sync with
+        :meth:`mark_offline` if its eligibility/threshold logic ever
+        changes.
+        """
+
+        rows = self._conn.execute(
+            "SELECT mac, ip, hostname, last_seen, missed_scans, seen_via_ipv4, seen_via_ipv6, "
+            "last_interface, ipv4_subnet FROM devices WHERE status = 'online'"
+        ).fetchall()
+
+        due: list[Device] = []
+        for row in rows:
+            mac = row["mac"]
+            if mac in still_online_macs:
+                continue
+            if not _path_covered(
+                row, ipv4_covered=ipv4_covered, ipv4_subnet=ipv4_subnet,
+                ipv6_covered=ipv6_covered, interface=interface,
+            ):
+                continue
+            missed = row["missed_scans"] + 1
+            elapsed = (as_of - _parse_dt(row["last_seen"])).total_seconds()
+            if missed >= missed_after and elapsed >= grace_seconds:
+                device = self.get_device(mac)
+                if device is not None:
+                    due.append(device)
+        return due
+
     def mark_offline(
         self,
         still_online_macs: set[str],

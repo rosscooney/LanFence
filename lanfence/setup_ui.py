@@ -35,7 +35,10 @@ from lanfence import scanner, web
 # plain text like an ordinary field.
 SECTIONS = {
     "Scanning": [f"scan.{name}" for name in type(Config().scan).model_fields if not name.startswith("offline_")],
-    "Offline detection": ["scan.offline_grace_seconds", "scan.offline_after_missed_scans"],
+    "Offline detection": [
+        "scan.offline_grace_seconds", "scan.offline_after_missed_scans",
+        "scan.offline_retry_probe", "scan.offline_retry_timeout_seconds",
+    ],
     "DHCP servers": ["dhcp_servers.enabled", "dhcp_servers.alert_cooldown_seconds"],
     "Service discovery": ["discovery.mdns", "discovery.ssdp"],
     "Daily digest": ["digest.channels", "digest.send_when_empty"],

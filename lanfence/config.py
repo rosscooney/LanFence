@@ -73,6 +73,23 @@ class ScanConfig(BaseModel):
     #: sighting (active or passive) resets the count to zero. ``1`` restores
     #: the old immediate-disconnect-on-first-miss behavior.
     offline_after_missed_scans: int = 3
+    #: Before actually transitioning a device to offline (see
+    #: ``offline_grace_seconds``/``offline_after_missed_scans`` above), send
+    #: it one direct unicast ARP "who-has" (:func:`lanfence.scanner.arp_probe`)
+    #: and count an answer as a fresh sighting instead. A subnet-wide
+    #: broadcast sweep is a lot of simultaneous requests/replies at once,
+    #: which a busy switch/AP or an oversubscribed device can answer
+    #: unreliably under that contention even though it's genuinely still
+    #: on the network - an isolated, individually-addressed retry often
+    #: succeeds where the broadcast sweep's reply was lost or rate-limited.
+    #: IPv4 only (ARP has no IPv6 equivalent - IPv6 devices are unaffected
+    #: either way). Only ever probes a device already about to be marked
+    #: offline this sweep, never every absent device on every sweep.
+    offline_retry_probe: bool = True
+    #: Timeout for one such probe - deliberately short (one host, not a
+    #: whole subnet) so a handful of unresponsive candidates can't
+    #: meaningfully delay the sweep.
+    offline_retry_timeout_seconds: float = 1.0
     #: Max items buffered per passive processing queue (sightings, DHCP
     #: server observations, mDNS records, SSDP advertisements) between
     #: `monitor` drain ticks - bounds memory against a packet flood that
@@ -87,7 +104,10 @@ class ScanConfig(BaseModel):
             raise ValueError("passive_queue_maxsize must be at least 1")
         return value
 
-    @field_validator("scan_interval_seconds", "active_scan_timeout_seconds", "dns_timeout_seconds")
+    @field_validator(
+        "scan_interval_seconds", "active_scan_timeout_seconds", "dns_timeout_seconds",
+        "offline_retry_timeout_seconds",
+    )
     @classmethod
     def _positive(cls, value: float) -> float:
         if value <= 0:

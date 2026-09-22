@@ -766,6 +766,27 @@ grace-period rules apply. The database schema itself is upgraded
 automatically and idempotently the next time it's opened - no data is lost
 or reset.
 
+**Retry probe before disconnecting**: even with grace periods, a device can
+still flap offline-then-online within minutes if it just answers *broadcast*
+ARP unreliably - some switches/APs deprioritize or rate-limit replying to a
+subnet-wide broadcast sweep under load, even though they're genuinely still
+on the network and would answer a *direct* query fine. By default
+(`scan.offline_retry_probe: true`), the moment a device is actually about to
+be marked offline (both conditions above already satisfied), it gets one
+last, individually-addressed unicast ARP "who-has" straight to its own
+IP - `scan.offline_retry_timeout_seconds` (default `1`) controls how long
+that one probe waits for a reply. This is not a new probing mechanism or a
+new permission requirement - it's the same kind of ARP request
+`scan_interval_seconds`'s broadcast sweep already sends, just isolated from
+that sweep's simultaneous burst of hundreds of other requests/replies. An
+answer counts as a real, fresh sighting (the device stays online, exactly as
+if the broadcast sweep itself had seen it); no answer means the device is
+disconnected exactly as it would have been without this feature - nothing
+about the underlying grace-period/missed-scan math changes. IPv4 only (ARP
+has no IPv6 equivalent); an IPv6-only device is unaffected either way. Set
+`scan.offline_retry_probe: false` to disable and go back to trusting the
+broadcast sweep alone.
+
 ## Presence policies
 
 Laptops, phones, and tablets routinely leave and rejoin the network - that's

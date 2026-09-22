@@ -407,10 +407,14 @@ def run_active_sweep(
             )
         findings.extend(dev_findings)
 
-    devices = list(devices_by_mac.values())
-
     if ipv4_covered or ipv6_covered:
         as_of = utcnow()
+        if ipv4_covered and net is not None and cfg.scan.offline_retry_probe:
+            _retry_devices_due_for_offline(
+                store, still_online, devices_by_mac, events, findings,
+                as_of=as_of, cfg=cfg, allowlist=allowlist, signatures=signatures,
+                interface=iface, subnet=net, ipv6_covered=ipv6_covered,
+            )
         events.extend(
             store.mark_offline(
                 still_online, as_of=as_of,
@@ -430,8 +434,83 @@ def run_active_sweep(
 
     return ScanResult(
         started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,
-        mode="active", devices=devices, events=events, findings=findings, errors=errors,
+        mode="active", devices=list(devices_by_mac.values()), events=events, findings=findings, errors=errors,
     )
+
+
+def _retry_devices_due_for_offline(
+    store: DeviceStore,
+    still_online: set[str],
+    devices_by_mac: dict[str, Device],
+    events: list[DeviceEvent],
+    findings: list[Finding],
+    *,
+    as_of: datetime,
+    cfg: Config,
+    allowlist: Allowlist,
+    signatures: SignatureSet,
+    interface: str | None,
+    subnet: str,
+    ipv6_covered: bool,
+) -> None:
+    """Give every device :meth:`lanfence.db.DeviceStore.mark_offline` is
+    about to transition offline one last direct unicast ARP probe (see
+    :func:`lanfence.scanner.arp_probe`) before accepting that verdict -
+    see ``scan.offline_retry_probe``'s docstring in :mod:`lanfence.config`
+    for why. An answering device is folded back in exactly like a real
+    sighting (via :func:`process_sighting`) - ``still_online``/
+    ``devices_by_mac``/``events``/``findings`` are updated in place so it
+    reaches :func:`run_active_sweep`'s return value and is naturally
+    excluded from the ``mark_offline`` call that follows this. IPv4 only -
+    ARP has no IPv6 equivalent.
+
+    The first permission/availability failure (:class:`~lanfence.scanner.ScannerUnavailable`)
+    stops the retry pass early rather than retrying every remaining
+    candidate the same losing way - the main sweep already ran
+    successfully (that's how any candidate got here at all), so this is a
+    non-fatal, silent skip of the retry step, not a sweep-wide error.
+    """
+
+    due = store.devices_due_for_offline(
+        still_online, as_of=as_of,
+        grace_seconds=cfg.scan.offline_grace_seconds,
+        missed_after=cfg.scan.offline_after_missed_scans,
+        ipv4_covered=True, ipv4_subnet=subnet,
+        ipv6_covered=ipv6_covered, interface=interface,
+    )
+    if not due:
+        return
+    # `Device.ip` (from `get_device`) is only ever one preferred address,
+    # possibly IPv6 even for a dual-stack device - the per-family lookup
+    # (same one `build_inventory` uses for dual-stack display) is the only
+    # reliable way to get a device's actual IPv4 address here.
+    addresses_by_family = store.preferred_addresses_by_family_for_macs([d.mac for d in due])
+    for candidate in due:
+        ipv4 = addresses_by_family.get(candidate.mac, {}).get("ipv4")
+        if not ipv4:
+            continue
+        try:
+            reply = scanner.arp_probe(
+                ipv4, interface=interface, timeout=cfg.scan.offline_retry_timeout_seconds,
+            )
+        except scanner.ScannerUnavailable as exc:
+            log.warning("offline-retry ARP probe unavailable, skipping remaining candidates: %s", exc)
+            return
+        if reply is None:
+            continue
+        device, event_type, dev_findings = process_sighting(
+            mac=candidate.mac, ip=reply.ip, seen_at=reply.seen_at,
+            store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
+            interface=interface, subnet=subnet, source=reply.source,
+        )
+        still_online.add(candidate.mac)
+        devices_by_mac[candidate.mac] = device
+        if event_type is not None:
+            events.append(
+                DeviceEvent(mac=candidate.mac, event_type=event_type, timestamp=reply.seen_at,
+                            ip=reply.ip, hostname=device.hostname)
+            )
+        findings.extend(dev_findings)
 
 
 def _alert_cooldown_key(finding: Finding) -> str:

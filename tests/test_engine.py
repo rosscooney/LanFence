@@ -464,6 +464,7 @@ def _cfg_immediate_offline() -> Config:
     cfg = Config()
     cfg.scan.offline_grace_seconds = 0
     cfg.scan.offline_after_missed_scans = 1
+    cfg.scan.offline_retry_probe = False  # not under test here - see test_offline_retry_* below
     return cfg
 
 
@@ -495,6 +496,156 @@ def test_run_active_sweep_partial_success_still_marks_offline(tmp_path: Path):
     assert any(e.event_type == "disconnected" for e in result.events)
 
 
+# --- offline retry probe (scan.offline_retry_probe) -------------------------
+
+
+def _cfg_immediate_offline_with_retry() -> Config:
+    cfg = Config()
+    cfg.scan.ipv6 = False
+    cfg.scan.offline_grace_seconds = 0
+    cfg.scan.offline_after_missed_scans = 1
+    cfg.scan.offline_retry_probe = True
+    cfg.scan.offline_retry_timeout_seconds = 1.0
+    return cfg
+
+
+def _seed_one_online_device(db_path: Path, cfg: Config) -> None:
+    v4 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[v4]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]):
+        store = DeviceStore(db_path)
+        run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                          interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+
+
+def test_offline_retry_probe_answering_device_stays_online(tmp_path: Path):
+    """A device missed by the broadcast sweep, but that answers the
+    unicast retry probe, must not be disconnected - it's folded back in
+    as a real sighting instead, exactly like any other positive sighting."""
+
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    _seed_one_online_device(db_path, cfg)
+
+    reply = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]), \
+         patch.object(scanner, "arp_probe", return_value=reply) as probe_mock:
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        status = store.get_device("aa:bb:cc:dd:ee:ff").status
+        store.close()
+
+    probe_mock.assert_called_once_with("192.168.1.5", interface="eth0", timeout=1.0)
+    assert status == "online"
+    assert not any(e.event_type == "disconnected" for e in result.events)
+    assert "aa:bb:cc:dd:ee:ff" in {d.mac for d in result.devices}
+
+
+def test_offline_retry_probe_no_answer_still_disconnects(tmp_path: Path):
+    """The retry is only a rescue - a device that also fails to answer the
+    direct probe is disconnected exactly as it would have been without
+    this feature."""
+
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    _seed_one_online_device(db_path, cfg)
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]), \
+         patch.object(scanner, "arp_probe", return_value=None) as probe_mock:
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        status = store.get_device("aa:bb:cc:dd:ee:ff").status
+        store.close()
+
+    probe_mock.assert_called_once()
+    assert status == "offline"
+    assert any(e.event_type == "disconnected" for e in result.events)
+
+
+def test_offline_retry_probe_disabled_never_calls_arp_probe(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    cfg.scan.offline_retry_probe = False
+    _seed_one_online_device(db_path, cfg)
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]), \
+         patch.object(scanner, "arp_probe") as probe_mock:
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        status = store.get_device("aa:bb:cc:dd:ee:ff").status
+        store.close()
+
+    probe_mock.assert_not_called()
+    assert status == "offline"
+    assert any(e.event_type == "disconnected" for e in result.events)
+
+
+def test_offline_retry_probe_unavailable_does_not_crash_sweep(tmp_path: Path):
+    """A ScannerUnavailable from the retry probe (e.g. lost root mid-run)
+    must not crash the sweep or block the normal offline transition for
+    the device that couldn't be retried."""
+
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    _seed_one_online_device(db_path, cfg)
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]), \
+         patch.object(scanner, "arp_probe", side_effect=scanner.ScannerUnavailable("no root")):
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        status = store.get_device("aa:bb:cc:dd:ee:ff").status
+        store.close()
+
+    assert status == "offline"
+    assert any(e.event_type == "disconnected" for e in result.events)
+    assert result.errors == []  # a retry-probe failure isn't a sweep-wide error
+
+
+def test_offline_retry_probe_skips_device_with_no_ipv4_address(tmp_path: Path):
+    """An IPv6-only device has nothing for a unicast ARP probe to target -
+    skipped, not probed, and disconnects normally if actually missed."""
+
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    cfg.scan.ipv6 = True
+    v6 = scanner.ArpSighting(mac="11:22:33:44:55:66", ip="fe80::1", seen_at=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[v6]):
+        store = DeviceStore(db_path)
+        run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                          interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]), \
+         patch.object(scanner, "arp_probe") as probe_mock:
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        status = store.get_device("11:22:33:44:55:66").status
+        store.close()
+
+    probe_mock.assert_not_called()
+    assert status == "offline"
+    assert any(e.event_type == "disconnected" for e in result.events)
+
+
 def test_run_active_sweep_respects_grace_period_across_multiple_sweeps(tmp_path: Path):
     """Integration test: with the default-shaped grace config, a device
     misses two sweeps and stays online, then a third eligible miss (with the
@@ -506,6 +657,7 @@ def test_run_active_sweep_respects_grace_period_across_multiple_sweeps(tmp_path:
     cfg.scan.ipv6 = False
     cfg.scan.offline_grace_seconds = 0
     cfg.scan.offline_after_missed_scans = 3
+    cfg.scan.offline_retry_probe = False  # not under test here - see test_offline_retry_* below
 
     with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
          patch.object(scanner, "active_scan", return_value=[v4]):
@@ -541,6 +693,7 @@ def test_run_active_sweep_records_ipv4_and_ipv6_coverage_independently(tmp_path:
     cfg = Config()
     cfg.scan.offline_grace_seconds = 0
     cfg.scan.offline_after_missed_scans = 1
+    cfg.scan.offline_retry_probe = False  # not under test here - see test_offline_retry_* below
 
     with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
          patch.object(scanner, "active_scan", return_value=[v4]), \
@@ -573,6 +726,7 @@ def test_run_active_sweep_availability_finding_after_delay_elapses(tmp_path: Pat
     cfg.scan.ipv6 = False
     cfg.scan.offline_grace_seconds = 0
     cfg.scan.offline_after_missed_scans = 1
+    cfg.scan.offline_retry_probe = False  # not under test here - see test_offline_retry_* below
 
     with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
          patch.object(scanner, "active_scan", return_value=[v4]):
