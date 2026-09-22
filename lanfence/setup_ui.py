@@ -460,7 +460,7 @@ def render_overview(console, draft):
         console.print(Text("Warning: " + warning, style="yellow"))
 
 
-def run_setup(path, loaded, explicit_config):
+def run_setup(path, loaded):
     from lanfence import cli
     console = Console()
     draft = deepcopy(loaded.raw)
@@ -504,7 +504,6 @@ def run_setup(path, loaded, explicit_config):
                 typer.echo("Saving will restrict this file to owner-only permissions (0600).")
             changed_channels = [n for n in CHANNEL_NAMES if value_at(loaded.raw, f"alerts.{n}") != value_at(draft, f"alerts.{n}")]
             web_before = Config.model_validate(loaded.raw).web
-            cli._channels_new_file_notice(path, loaded.existed, explicit_config)
             try:
                 cli._channels_save_or_exit(path, loaded, draft)
             except OSError:

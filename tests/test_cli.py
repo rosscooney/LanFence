@@ -2680,10 +2680,9 @@ def test_setup_slack_creates_and_saves(config_path: Path):
     assert "hooks.slack.com/services/T000/B000/xxxx" in body
 
 
-def test_setup_no_config_flag_uses_default_path_and_says_so(tmp_path: Path, monkeypatch):
+def test_setup_no_config_flag_uses_default_path(tmp_path: Path, monkeypatch):
     default_path = tmp_path / "default-config.yaml"
     monkeypatch.setattr("lanfence.channels.DEFAULT_CONFIG_PATH", default_path)
-    monkeypatch.setattr("lanfence.cli.DEFAULT_CONFIG_PATH", default_path)
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
             app, ["setup", "slack"],
@@ -2692,6 +2691,7 @@ def test_setup_no_config_flag_uses_default_path_and_says_so(tmp_path: Path, monk
     assert result.exit_code == 0
     assert str(default_path) in result.output
     assert default_path.is_file()
+    assert "No configuration file exists yet" not in result.output
 
 
 def test_setup_keeps_existing_secret_on_blank(config_path: Path):

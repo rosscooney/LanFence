@@ -32,7 +32,6 @@ from lanfence.channels import (
     CHANNEL_FIELDS,
     CHANNEL_NAMES,
     CLEAR,
-    DEFAULT_CONFIG_PATH,
     KEEP,
     ConcurrentModificationError,
     ConfigFileError,
@@ -2575,19 +2574,6 @@ def _channels_load_or_exit(config: Optional[Path]):
         raise typer.Exit(code=2) from exc
 
 
-def _channels_new_file_notice(path: Path, existed: bool, explicit_config: Optional[Path]) -> None:
-    if existed:
-        return
-    typer.echo(f"No configuration file exists yet - one will be created at {path}.")
-    if explicit_config is None:
-        typer.echo(
-            "No --config was given, so this uses LAN Fence's default per-user configuration "
-            f"location ({DEFAULT_CONFIG_PATH}), which every command reads automatically when "
-            "present. If you plan to always pass --config elsewhere instead, pass it here too "
-            f"so this file is created at {path} to begin with."
-        )
-
-
 def _channels_save_or_exit(path: Path, loaded, updated_raw: dict) -> None:
     if path.is_symlink():
         typer.echo(f"note: {path} is a symlink - the link itself will be replaced, its target left alone.")
@@ -2673,7 +2659,7 @@ def _wizard_webhook_scheme_note(channel: str, values: dict) -> None:
         )
 
 
-def _run_channel_wizard(channel: str, path: Path, loaded, *, explicit_config: Optional[Path]) -> None:
+def _run_channel_wizard(channel: str, path: Path, loaded) -> None:
     typer.secho(f"\n{channel}", fg="cyan", bold=True)
     while True:
         current_cfg = getattr(loaded.cfg.alerts, channel)
@@ -2718,7 +2704,6 @@ def _run_channel_wizard(channel: str, path: Path, loaded, *, explicit_config: Op
         if digest_choice is not None:
             updated_raw = apply_digest_selection(updated_raw, channel, selected=digest_choice)
 
-        _channels_new_file_notice(path, loaded.existed, explicit_config)
         _channels_save_or_exit(path, loaded, updated_raw)
 
         # Re-load so a follow-up test message (or configuring another
@@ -2780,7 +2765,7 @@ def setup_cmd(
     try:
         if channel is None:
             from lanfence.setup_ui import run_setup
-            run_setup(path, loaded, config)
+            run_setup(path, loaded)
             return
         while True:
             if channel is None:
@@ -2795,7 +2780,7 @@ def setup_cmd(
                 choice = channel
                 channel = None  # only auto-select once, when given as an argument
 
-            _run_channel_wizard(choice, path, loaded, explicit_config=config)
+            _run_channel_wizard(choice, path, loaded)
 
             if not typer.confirm("\nConfigure another channel?", default=False):
                 break

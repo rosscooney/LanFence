@@ -26,6 +26,13 @@ Each release is also published to
   rationale/recommendation) is HTML-escaped the same way the digest
   already escapes a hostile hostname.
 
+### Removed
+
+- `lanfence setup`'s save flow no longer prints an explanatory note about
+  the default per-user config path the first time it creates
+  `~/.config/lanfence/config.yaml` - it just saves it, same as any other
+  save.
+
 ## [0.5.4] - 2026-09-22
 
 ### Added
