@@ -13,7 +13,7 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
-## [Unreleased]
+## [0.5.5] - 2026-09-22
 
 ### Added
 
@@ -32,9 +32,10 @@ Each release is also published to
   contention of a subnet-wide broadcast burst but respond to individually
   just fine. Reduces false disconnect/reconnect flapping for such devices
   without changing the underlying grace-period/missed-scan behavior for
-  anything that doesn't answer. IPv4 only. New `DeviceStore
-  .devices_due_for_offline` (read-only preview of what `mark_offline`
-  would do) and `scanner.arp_probe` (one unicast ARP request).
+  anything that doesn't answer. IPv4 only. New
+  `DeviceStore.devices_due_for_offline` (read-only preview of what
+  `mark_offline` would do) and `scanner.arp_probe` (one unicast ARP
+  request).
 
 ### Changed
 
