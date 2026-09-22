@@ -53,6 +53,54 @@ def test_mark_offline_then_reappear(tmp_path: Path):
         assert device.status == "online"
 
 
+def test_hostname_survives_offline_then_refreshes_on_reappear(tmp_path: Path):
+    """A device's hostname is looked up and saved the first time it's seen,
+    stays put (isn't blanked) while the device is offline, and is
+    re-checked - not just trusted forever - the next time it reappears, so
+    a renamed device doesn't keep showing its old name indefinitely."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="1.2.3.4", hostname="printer-old", vendor=None,
+            seen_at=t0, source="arp", hostname_source="reverse_dns",
+        )
+        assert store.get_device("aa:bb:cc:dd:ee:ff").hostname == "printer-old"
+
+        store.mark_offline(still_online_macs=set(), as_of=t0 + timedelta(minutes=1))
+        offline_device = store.get_device("aa:bb:cc:dd:ee:ff")
+        assert offline_device.status == "offline"
+        assert offline_device.hostname == "printer-old"
+
+        device, event_type = store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="1.2.3.4", hostname="printer-new", vendor=None,
+            seen_at=t0 + timedelta(minutes=2), source="arp", hostname_source="reverse_dns",
+        )
+        assert event_type == "reappeared"
+        assert device.hostname == "printer-new"
+
+
+def test_hostname_kept_when_reappear_lookup_fails(tmp_path: Path):
+    """A transient lookup failure on reappearance (``hostname=None``) must
+    not erase a previously-known name - only a successful new lookup
+    replaces it."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="1.2.3.4", hostname="printer-old", vendor=None,
+            seen_at=t0, source="arp", hostname_source="reverse_dns",
+        )
+        store.mark_offline(still_online_macs=set(), as_of=t0 + timedelta(minutes=1))
+
+        device, event_type = store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="1.2.3.4", hostname=None, vendor=None,
+            seen_at=t0 + timedelta(minutes=2), source="arp", hostname_source=None,
+        )
+        assert event_type == "reappeared"
+        assert device.hostname == "printer-old"
+
+
 def test_mark_offline_leaves_still_online_devices_alone(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()
