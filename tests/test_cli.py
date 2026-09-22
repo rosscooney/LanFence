@@ -669,6 +669,55 @@ def test_scan_json_output_omits_short_scan_banner(config_path: Path, monkeypatch
     result = _scan_with_sightings(config_path, monkeypatch, sightings, extra_args=["--format", "json"])
     assert result.exit_code == 0, result.output
     assert "mobile/WiFi device" not in result.output
+    assert "scanning..." not in result.output
+
+
+def test_scan_short_scan_banner_appears_before_the_scan_runs(config_path: Path, monkeypatch):
+    """The note must be printed before the (potentially multi-second)
+    blocking sweep starts, not after results come back - CliRunner's
+    captured stdout isn't a real terminal, so this exercises the plain
+    "scanning..." fallback, which should appear right after the note."""
+
+    from lanfence import scanner as scanner_module
+
+    sightings = [scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())]
+    result = _scan_with_sightings(config_path, monkeypatch, sightings)
+    assert result.exit_code == 0, result.output
+    note_index = result.output.index("mobile/WiFi device")
+    scanning_index = result.output.index("scanning...")
+    devices_index = result.output.index("Devices seen")
+    assert note_index < scanning_index < devices_index
+
+
+def test_scan_uses_live_progress_bar_at_a_real_terminal(config_path: Path, monkeypatch):
+    """At a real interactive terminal, the sweep runs through
+    monitor_ui.run_with_scan_progress instead of the plain "scanning..."
+    fallback - verified by patching should_use_live to simulate one,
+    since CliRunner's own captured stdout never is."""
+
+    from lanfence import scanner as scanner_module
+
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: [
+        scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())
+    ])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.scanner.local_mac", lambda iface=None: None)
+    monkeypatch.setattr("lanfence.monitor_ui.should_use_live", lambda explicit, console: (True, None))
+
+    calls = {}
+
+    def fake_run_with_scan_progress(fn, *, expected_seconds, console):
+        calls["expected_seconds"] = expected_seconds
+        return fn()
+
+    monkeypatch.setattr("lanfence.cli.monitor_ui.run_with_scan_progress", fake_run_with_scan_progress)
+
+    result = runner.invoke(app, ["scan", "--no-ipv6", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert calls["expected_seconds"] > 0
+    assert "scanning..." not in result.output  # the live bar replaces the plain fallback line
+    assert "Devices seen" in result.output
 
 
 def test_scan_json_output_omits_triage_summary_and_stays_stable(config_path: Path, monkeypatch):

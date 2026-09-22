@@ -182,14 +182,20 @@ respectively - not shown in `--help` (to keep the command list short), but
 fully supported for anyone who reaches for those names instead.
 
 `lanfence scan` (table output only - not `--format json`) shows a standing
-note that it's a single, short active sweep: a mobile/WiFi device that's
-asleep or power-saving may simply not respond within its fixed timeout
+note, printed immediately before the scan starts, that it's a single,
+short active sweep: a mobile/WiFi device that's asleep or power-saving
+may simply not respond within its fixed timeout
 (`scan.active_scan_timeout_seconds`, default 3s) and won't appear in that
 one run, even though it's genuinely on the network - this is expected
 behavior, not a bug, and is exactly why `lanfence monitor` exists: it
 repeats the sweep periodically *and* passively listens in between, so a
 device only has to be caught once, ever, to be permanently in the
-database from then on.
+database from then on. At a real interactive terminal, the sweep itself
+then shows a progress bar (`scanning... [████░░░░] 61%`, an elapsed-time
+estimate against the expected sweep duration, same as `lanfence
+monitor`'s own in-progress indicator) instead of going quiet until it
+finishes; redirected/non-interactive output instead gets one plain
+`scanning...` line.
 
 `scan`/`monitor` warn (and show copy-pasteable fixes) if not run as root, since
 ARP scanning needs raw-socket access. A pipx / `pip install --user` install

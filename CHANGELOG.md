@@ -13,6 +13,18 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Changed
+
+- `lanfence scan` now prints its "single, short active sweep" note
+  immediately, before the scan starts, instead of after it finishes - and
+  shows a live progress bar during the sweep at a real interactive
+  terminal (`scanning... [████░░░░] 61%`, an elapsed-time estimate, the
+  same indicator `lanfence monitor`'s live dashboard already shows for an
+  in-progress sweep), or one plain `scanning...` line otherwise. Table
+  output only, not `--format json`.
+
 ## [0.5.5] - 2026-09-22
 
 ### Added

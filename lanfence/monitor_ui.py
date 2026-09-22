@@ -37,7 +37,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Deque, Literal, Optional
+from typing import Callable, Deque, Literal, Optional, TypeVar
 
 from rich.console import Console, ConsoleDimensions, Group
 from rich.panel import Panel
@@ -281,7 +281,12 @@ def scan_progress_fraction(snap: MonitorSnapshot, *, now_monotonic: float) -> Op
     return min(1.0, elapsed / snap.expected_sweep_seconds)
 
 
-def _progress_bar(fraction: float, *, width: int) -> str:
+def progress_bar(fraction: float, *, width: int) -> str:
+    """A block-character bar (``"████░░░░"``) for ``fraction`` (0.0-1.0) of
+    ``width`` characters - shared by the live dashboard's in-progress-sweep
+    footer and `lanfence scan`'s own progress display (see
+    :func:`run_with_scan_progress`)."""
+
     width = max(4, width)
     filled = round(fraction * width)
     return "█" * filled + "░" * (width - filled)
@@ -391,7 +396,7 @@ def render_footer(snap: MonitorSnapshot, *, width: int, now_monotonic: float) ->
     if snap.scanning:
         fraction = scan_progress_fraction(snap, now_monotonic=now_monotonic)
         if fraction is not None:
-            scan_field = f"Scan: [{_progress_bar(fraction, width=12)}] {round(fraction * 100)}%"
+            scan_field = f"Scan: [{progress_bar(fraction, width=12)}] {round(fraction * 100)}%"
         else:
             scan_field = "Scan: scanning"
     elif snap.next_sweep_seconds is not None:
@@ -641,3 +646,43 @@ class MonitorDisplay:
             if self._saved_handlers is not None:
                 logging.getLogger().handlers = self._saved_handlers
                 self._saved_handlers = None
+
+
+_T = TypeVar("_T")
+
+
+def run_with_scan_progress(
+    fn: Callable[[], _T], *, expected_seconds: float, console: Console, label: str = "scanning",
+) -> _T:
+    """Run zero-argument ``fn`` (a blocking active sweep) while showing a
+    ticking, elapsed-time-estimated progress bar - the same trick
+    :class:`MonitorDisplay` uses for the live dashboard's in-progress-sweep
+    bar: Rich's own ``Live(auto_refresh=True)`` repaints on its own
+    background thread by calling ``get_renderable`` fresh each tick, so the
+    bar keeps advancing even while ``fn`` blocks the calling thread for the
+    whole sweep. ``fn`` itself runs entirely on the calling thread with no
+    concurrency of its own - unlike actually threading the sweep, this is
+    safe for an ``fn`` that touches a database connection (see
+    `lanfence.cli.scan`, which passes one that does).
+
+    Used only when the caller has already confirmed stdout is a real
+    interactive terminal (see :func:`should_use_live`) - a percentage
+    estimate, not a report of how many hosts have actually responded (a
+    real sweep can finish faster or slower than ``expected_seconds``
+    implies), clamped so it never claims to be over 100% while still
+    running.
+    """
+
+    from rich.live import Live
+    from rich.text import Text
+
+    start = time.monotonic()
+
+    def _render() -> Text:
+        elapsed = max(0.0, time.monotonic() - start)
+        fraction = min(1.0, elapsed / expected_seconds) if expected_seconds > 0 else 0.0
+        bar = progress_bar(fraction, width=30)
+        return Text(f"{label}... [{bar}] {round(fraction * 100)}%", style="cyan")
+
+    with Live(console=console, get_renderable=_render, auto_refresh=True, refresh_per_second=4, transient=True):
+        return fn()

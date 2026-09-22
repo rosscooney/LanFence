@@ -73,7 +73,7 @@ from lanfence.engine import (
 from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import setup_logging
-from lanfence.models import Finding, format_datetime
+from lanfence.models import Finding, ScanResult, format_datetime
 from lanfence.netutil import normalize_mac
 from lanfence.safe_errors import summarize_error
 from lanfence.report import (
@@ -412,9 +412,34 @@ def scan(
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=interface or cfg.scan.interface)
 
+    if output_format != "json":
+        typer.secho(
+            "note: this is a single, short active scan - a mobile/WiFi device that's asleep or "
+            "power-saving may not respond in time and won't appear here, even though it's on the "
+            "network. Run `lanfence monitor` for a complete picture: it repeats this sweep over time "
+            "and passively listens in between, so a device only needs to be caught once.",
+            fg="yellow",
+        )
+        typer.echo("")
+
     triage: Optional[TriageSummary] = None
     with _open_store(cfg.resolved_db_path()) as store:
-        result = run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
+        def _do_sweep() -> ScanResult:
+            return run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
+
+        if output_format == "json":
+            result = _do_sweep()
+        else:
+            console = monitor_ui.make_console()
+            use_progress, _fallback_reason = monitor_ui.should_use_live(None, console)
+            if use_progress:
+                expected_seconds = cfg.scan.active_scan_timeout_seconds * (2 if cfg.scan.ipv6 else 1)
+                result = monitor_ui.run_with_scan_progress(
+                    _do_sweep, expected_seconds=expected_seconds, console=console,
+                )
+            else:
+                typer.echo("scanning...")
+                result = _do_sweep()
         if alert:
             not_snoozed = filter_snoozed(result.findings, store, now=utcnow())
             to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
@@ -440,14 +465,6 @@ def scan(
     if output_format == "json":
         typer.echo(result.to_json())
     else:
-        typer.secho(
-            "note: this is a single, short active scan - a mobile/WiFi device that's asleep or "
-            "power-saving may not respond in time and won't appear here, even though it's on the "
-            "network. Run `lanfence monitor` for a complete picture: it repeats this sweep over time "
-            "and passively listens in between, so a device only needs to be caught once.",
-            fg="yellow",
-        )
-        typer.echo("")
         render_scan_result(result)
         summary_text = render_triage_summary(triage) if triage is not None else ""
         if summary_text:
