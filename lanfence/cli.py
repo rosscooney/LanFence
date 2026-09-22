@@ -2227,7 +2227,8 @@ def check(
     else:
         typer.echo(
             "  optional nmap is not installed - `lanfence inspect` still works via its "
-            "built-in scan; installing nmap improves service identification"
+            "built-in scan; installing nmap improves service identification - "
+            "on Debian/Ubuntu/Raspberry Pi OS: sudo apt-get install nmap"
         )
 
     iface = cfg.scan.interface or scanner.default_interface()

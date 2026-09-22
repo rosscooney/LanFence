@@ -124,8 +124,8 @@ pipx install "lanfence[scan]"     # isolated, recommended - includes scapy for s
 ```
 
 `scan`/`monitor` need the `scan` extra (`scapy`) to actually send/receive ARP
-packets; `allow`, `report` and `check` work without it. Already installed
-without the extra? Add it in place:
+packets; `allow`, `device`/`digest` and `check` work without it. Already
+installed without the extra? Add it in place:
 
 ```bash
 pipx inject lanfence scapy

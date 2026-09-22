@@ -45,6 +45,9 @@ Each release is also published to
   wizard instead of typed full words (`Add`/`Edit`/`Remove`/`Observed`/
   `Reset` are now `a`/`e`/`d`/`o`/`c`, chosen to avoid the `Remove`/
   `Reset` letter clash).
+- `lanfence check`'s "nmap is not installed" message now includes the
+  concrete install command (`sudo apt-get install nmap` on Debian/Ubuntu/
+  Raspberry Pi OS).
 
 ### Fixed
 

@@ -259,6 +259,7 @@ def test_check_reports_nmap_missing_as_optional_not_a_failure(config_path: Path)
         result = runner.invoke(app, ["check", "--config", str(config_path)])
     assert "nmap is not installed" in result.output
     assert "still works via its built-in scan" in result.output
+    assert "sudo apt-get install nmap" in result.output
     assert result.exit_code in (0, 1)
 
 
