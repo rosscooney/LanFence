@@ -952,13 +952,18 @@ as `5m`. Enumerations show their choices; digest destinations are a
 comma-separated list. Cross-setting warnings identify inactive discovery and
 disabled digest destinations. Save does not rewrite a file when nothing changed.
 
-The DHCP server section includes **a — Approved DHCP servers**, with Add,
-Edit, Remove, Observed, Reset, and Back actions. Observed opens a read-only
-inventory: select a server, review its identifier/interface and explicitly
-confirm approval. Its `server_ip` is option 54, not necessarily the source or
-relay IP. VLAN interfaces such as `eth0.20` have separate approval scope.
-Approving a DHCP role does not trust a device. An unavailable inventory never
-prevents manual entry.
+The DHCP server section includes a numbered **Approved DHCP servers** entry
+(after its own listed settings, same convention as every other numbered
+section), with Add, Observed, Reset, and Back actions always offered - Edit
+and Remove only appear once at least one server is approved. Observed opens
+a read-only inventory: select a server, review its identifier/interface and
+explicitly confirm approval. Its `server_ip` is option 54, not necessarily
+the source or relay IP. VLAN interfaces such as `eth0.20` have separate
+approval scope. Adding or editing an entry lists this host's detected
+network interfaces as a suggestion for the Interface field (informational
+only - an interface that isn't listed, e.g. one that appears later, can
+still be entered by hand). Approving a DHCP role does not trust a device. An
+unavailable inventory never prevents manual entry.
 
 Storage edits change paths only: existing databases are not migrated, moved,
 or deleted. Retention periods are currently fixed in code and change-notification

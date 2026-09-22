@@ -56,6 +56,21 @@ def test_local_subnet_returns_none_when_scanner_unavailable(monkeypatch):
     assert scanner.default_interface() is None
 
 
+def test_available_interfaces_excludes_loopback_and_sorts(monkeypatch):
+    monkeypatch.setattr(
+        scanner.socket, "if_nameindex", lambda: [(1, "lo"), (3, "wlan0"), (2, "eth0")]
+    )
+    assert scanner.available_interfaces() == ["eth0", "wlan0"]
+
+
+def test_available_interfaces_empty_when_unsupported(monkeypatch):
+    def _boom():
+        raise OSError("not supported")
+
+    monkeypatch.setattr(scanner.socket, "if_nameindex", _boom)
+    assert scanner.available_interfaces() == []
+
+
 def test_local_mac_returns_none_when_scanner_unavailable(monkeypatch):
     def _boom():
         raise scanner.ScannerUnavailable("no scapy")

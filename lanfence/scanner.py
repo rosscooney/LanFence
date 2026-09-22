@@ -103,6 +103,20 @@ def _require_scapy():
     return scapy_module
 
 
+def available_interfaces() -> list[str]:
+    """Every network interface name this host currently reports (loopback
+    excluded), best-effort and alphabetically sorted - stdlib only (no
+    scapy/root needed), used to *suggest* a value in `lanfence setup`'s
+    interface prompts, never to validate one (an interface that comes up
+    later, e.g. a USB NIC plugged in afterwards, must still be enterable
+    by hand)."""
+
+    try:
+        return sorted(name for _, name in socket.if_nameindex() if name != "lo")
+    except (OSError, AttributeError):  # pragma: no cover - platform-dependent
+        return []
+
+
 def default_interface() -> str | None:
     """Best-guess default network interface, or ``None`` if it can't be determined."""
 

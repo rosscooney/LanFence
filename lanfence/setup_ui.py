@@ -26,7 +26,7 @@ from lanfence.channels import (
 )
 from lanfence.config import Config, ApprovedDhcpServer, DIGEST_CHANNELS
 from lanfence.sanitize import clean_text
-from lanfence import web
+from lanfence import scanner, web
 
 # Only real model fields appear here; field types/defaults stay in config.py.
 # web.password_hash/password_salt are deliberately excluded - they're set
@@ -199,6 +199,9 @@ def edit_field(raw, path):
         typer.echo("Allowed: " + ", ".join(get_args(field.annotation)))
     elif path == "digest.channels":
         typer.echo("Comma-separated destinations: " + ", ".join(DIGEST_CHANNELS))
+    if path == "scan.interface":
+        detected = scanner.available_interfaces()
+        typer.echo("Detected interfaces: " + (", ".join(detected) if detected else "(none detected)"))
     if type(None) in get_args(field.annotation):
         typer.echo("Type null for explicit auto/unset; reset removes the key to inherit its default.")
     typer.echo(f"Default: {safe_value(field.get_default(call_default_factory=True))}")
@@ -288,17 +291,22 @@ def edit_approvals(raw):
                 )
         else:
             typer.echo("  (none approved yet - every DHCP server seen will be treated as unexpected)")
-        for letter, label in _APPROVAL_ACTIONS.items():
+        # Edit/Delete need an existing entry to act on - don't offer them
+        # (or accept their letter) until there's at least one.
+        actions = _APPROVAL_ACTIONS if entries else {
+            letter: label for letter, label in _APPROVAL_ACTIONS.items() if label not in ("Edit", "Delete")
+        }
+        for letter, label in actions.items():
             typer.echo(f"{letter}  {label}")
         action_letter = typer.prompt(
-            f"Choose an action [{'/'.join(_APPROVAL_ACTIONS)}] or b [Back]", default="b", show_default=False
+            f"Choose an action [{'/'.join(actions)}] or b [Back]", default="b", show_default=False
         ).lower()
         if action_letter in ("back", "b"):
             return raw
-        if action_letter not in _APPROVAL_ACTIONS:
+        if action_letter not in actions:
             typer.echo("Choose a listed action.")
             continue
-        action = _APPROVAL_ACTIONS[action_letter]
+        action = actions[action_letter]
         if action == "Clear all":
             if typer.confirm("Remove every approval and inherit the default empty list?", default=False):
                 raw = patch_value(raw, "dhcp_servers.approved")
@@ -306,9 +314,6 @@ def edit_approvals(raw):
         row = {}
         index = None
         if action in ("Edit", "Delete"):
-            if not entries:
-                typer.echo("No entries yet - use Add first.")
-                continue
             number = typer.prompt("Entry number", type=int)
             if not 1 <= number <= len(entries):
                 typer.echo("No such entry.")
@@ -343,6 +348,8 @@ def edit_approvals(raw):
             "Server IP is DHCP option 54 (the server identifier) - not necessarily the packet's "
             "source or relay address. Interface scopes the approval (e.g. eth0.20 for a VLAN)."
         )
+        detected = scanner.available_interfaces()
+        typer.echo("Detected interfaces: " + (", ".join(detected) if detected else "(none detected)"))
         proposal = dict(row)
         for key, label in (("name", "Name"), ("interface", "Interface"), ("server_ip", "Server IP")):
             proposal[key] = typer.prompt(label, default=row.get(key, ""), show_default=True).strip()
@@ -375,23 +382,27 @@ def edit_section(raw, section):
         for i, path in enumerate(SECTIONS[section], 1):
             origin = "default" if value_at(raw, path) is MISSING else "explicit"
             typer.echo(f"{i}  {path}: {safe_value(value_at(cfg, path))} ({origin})")
-        approvals_letter = "a" if section == "DHCP servers" else None
-        if approvals_letter:
+        approvals_index = None
+        if section == "DHCP servers":
+            approvals_index = len(SECTIONS[section]) + 1
             count = len(value_at(raw, "dhcp_servers.approved", []) or [])
-            typer.echo(f"{approvals_letter}  Approved DHCP servers ({count} approved)")
+            typer.echo(f"{approvals_index}  Approved DHCP servers ({count} approved)")
         password_index = None
         if section == "Web portal":
             password_index = len(SECTIONS[section]) + 1
             configured = value_at(raw, "web.password_hash") not in (MISSING, None)
             typer.echo(f"{password_index}  Set/change password ({'configured' if configured else 'not set'})")
-        max_choice = password_index if password_index is not None else len(SECTIONS[section])
-        extra = f", {approvals_letter} [Approved servers]" if approvals_letter else ""
+        max_choice = len(SECTIONS[section])
+        if approvals_index is not None:
+            max_choice = approvals_index
+        if password_index is not None:
+            max_choice = password_index
         choice = typer.prompt(
-            f"Choose a section [1-{max_choice}]{extra}, or b [Back]", default="b", show_default=False
+            f"Choose a section [1-{max_choice}] or b [Back]", default="b", show_default=False
         ).lower()
         if choice in ("back", "b"):
             return raw
-        if choice == "a" and section == "DHCP servers":
+        if approvals_index is not None and choice == str(approvals_index):
             raw = edit_approvals(raw)
         elif password_index is not None and choice == str(password_index):
             raw = edit_web_password(raw)

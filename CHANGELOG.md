@@ -25,6 +25,13 @@ Each release is also published to
   can't visually drift apart. Untrusted-device text (a finding's title/
   rationale/recommendation) is HTML-escaped the same way the digest
   already escapes a hostile hostname.
+- `lanfence setup`'s DHCP servers section now numbers its **Approved DHCP
+  servers** entry (e.g. `3`) instead of a lettered `a`, matching every
+  other numbered section. Its Edit/Delete actions only appear once at
+  least one server is approved - nothing to act on otherwise. Adding or
+  editing an approval, and `scan.interface`'s own field prompt, now
+  suggest this host's detected network interfaces (best-effort, stdlib
+  `socket.if_nameindex()` - informational only, never validated against).
 
 ### Removed
 
