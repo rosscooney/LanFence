@@ -12,6 +12,7 @@ webhook endpoint, or messaging/SMS account).
 from __future__ import annotations
 
 import base64
+import html
 import json
 import math
 import smtplib
@@ -22,6 +23,7 @@ import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
 
+from lanfence import branding
 from lanfence.config import AlertConfig
 from lanfence.db import DeviceStore
 from lanfence.logging_config import get_logger
@@ -113,6 +115,74 @@ def _format_findings_compact(findings: list[Finding], *, max_len: int) -> str:
     return text
 
 
+#: Severity → accent colour for the HTML email's per-finding panel border
+#: and badge. Not part of `branding.COLORS` (that palette has no reds/ambers
+#: of its own) - chosen to read clearly against the dark panel background.
+_SEVERITY_COLORS = {"high": "#f87171", "medium": "#fbbf24", "info": branding.COLORS["accent2"]}
+
+
+def _html_finding_panel(finding: Finding) -> str:
+    color = _SEVERITY_COLORS.get(finding.severity, branding.COLORS["muted"])
+    subject_label = "MAC" if finding.mac else "Subject"
+    rationale_row = (
+        f'<tr><td style="padding-top:8px;font-size:13px;">{html.escape(finding.rationale)}</td></tr>'
+        if finding.rationale else ""
+    )
+    recommendation_row = (
+        f'<tr><td style="padding-top:6px;font-size:13px;{branding.EMAIL_MUTED_STYLE}">'
+        f"Recommendation: {html.escape(finding.recommendation)}</td></tr>"
+        if finding.recommendation else ""
+    )
+    return f"""
+<tr><td style="padding:12px 0 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_PANEL_STYLE}border-left:4px solid {color};">
+    <tr><td style="font-size:11px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:{color};">{html.escape(finding.severity)}</td></tr>
+    <tr><td style="font-size:15px;font-weight:700;padding-top:2px;">{html.escape(finding.title)}</td></tr>
+    <tr><td style="padding-top:4px;font-size:13px;{branding.EMAIL_MUTED_STYLE}">{subject_label}: {html.escape(_finding_subject(finding))}</td></tr>
+    {rationale_row}
+    {recommendation_row}
+  </table>
+</td></tr>
+"""
+
+
+def format_findings_html(findings: list[Finding], *, heading: str = "LAN Fence") -> str:
+    """Branded HTML alternative to :func:`_format_findings_text`, sent
+    alongside the plain-text body (see :func:`send_email`) - the same
+    look and feel as the digest email (:func:`lanfence.digest.format_digest_html`),
+    built from the same shared style constants in :mod:`lanfence.branding`.
+    Every value that could come from an untrusted device (a finding's
+    title/rationale/recommendation) is HTML-escaped, the same as the
+    digest - a device this tool is being suspicious of can set its own
+    DHCP hostname, which can end up inside a finding's text.
+    """
+
+    panels = "".join(_html_finding_panel(f) for f in findings)
+    colors = branding.COLORS
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="{branding.EMAIL_BODY_STYLE}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_TABLE_STYLE}">
+<tr><td style="padding:24px 20px 0;">
+  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+    <td style="padding-right:8px;">
+      <img src="cid:lanfence-logo" width="28" height="28" alt="LAN Fence" style="display:block;border:0;">
+    </td>
+    <td style="font-size:18px;font-weight:700;">{html.escape(heading)}</td>
+  </tr></table>
+  <p style="{branding.EMAIL_MUTED_STYLE}font-size:13px;margin:8px 0 0;">{len(findings)} finding(s)</p>
+</td></tr>
+{panels}
+<tr><td style="padding:20px 20px 28px;{branding.EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
+  {branding.FOOTER_HTML}
+</td></tr>
+</table>
+</body>
+</html>
+"""
+
+
 def _post_json(url: str, payload: dict, *, timeout: float, label: str) -> None:
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -138,7 +208,14 @@ def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
     msg["Subject"] = f"LAN Fence: {len(findings)} finding(s) on your network"
     msg["From"] = cfg.email.from_addr
     msg["To"] = ", ".join(cfg.email.to_addrs)
+    # Plain text first (the primary/fallback body for text-only clients),
+    # HTML as the alternative - same structure as the digest email.
     msg.set_content(_format_findings_text(findings, heading="LAN Fence"))
+    msg.add_alternative(format_findings_html(findings), subtype="html")
+    # Content-ID-attached logo, not inline <svg> - see
+    # lanfence.digest.send_digest_email's docstring note for why.
+    html_part = msg.get_payload()[-1]
+    html_part.add_related(branding.render_logo_png(64), maintype="image", subtype="png", cid="<lanfence-logo>")
 
     try:
         send_smtp_message(msg, cfg.email)

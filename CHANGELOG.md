@@ -13,6 +13,19 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Changed
+
+- Every email LAN Fence sends - a finding alert (`alerts.email`), not just
+  the digest, and `lanfence setup`'s post-save test message - now uses the
+  same branded HTML template as the digest email (logo, dark colour
+  palette, plain-text alternative for text-only clients), built from
+  shared style constants moved into `lanfence/branding.py` so the three
+  can't visually drift apart. Untrusted-device text (a finding's title/
+  rationale/recommendation) is HTML-escaped the same way the digest
+  already escapes a hostile hostname.
+
 ## [0.5.4] - 2026-09-22
 
 ### Added

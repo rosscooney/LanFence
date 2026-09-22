@@ -25,6 +25,19 @@ COLORS = {
     "accent2": "#38bdf8",
 }
 
+#: Shared inline-CSS building blocks for every HTML email LAN Fence sends
+#: (the digest, finding alerts, and channel test messages) - a single
+#: source of truth so they can't visually drift apart from one another.
+EMAIL_BODY_STYLE = (
+    f"margin:0;background:{COLORS['bg']};color:{COLORS['text']};"
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+)
+EMAIL_TABLE_STYLE = f"width:100%;max-width:640px;margin:0 auto;border-collapse:collapse;background:{COLORS['bg']};"
+EMAIL_PANEL_STYLE = (
+    f"background:{COLORS['panel']};border:1px solid {COLORS['border']};border-radius:12px;padding:16px 18px;"
+)
+EMAIL_MUTED_STYLE = f"color:{COLORS['muted']};"
+
 #: The logo mark's inner content only (no fixed width/height) so callers
 #: can size it with their own attributes - see :func:`logo_svg`.
 _LOGO_INNER = """<linearGradient id="lf-logo-g" x1="0" y1="0" x2="1" y2="1">

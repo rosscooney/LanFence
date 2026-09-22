@@ -37,6 +37,7 @@ hand-editing the file.
 from __future__ import annotations
 
 import base64
+import html
 import json
 import re
 import smtplib
@@ -52,6 +53,7 @@ from typing import Any
 
 import yaml
 
+from lanfence import branding
 from lanfence.config import DEFAULT_CONFIG_PATH, DIGEST_CHANNELS, Config, expand_operator_path
 from lanfence.fsutil import atomic_write
 from lanfence.logging_config import get_logger
@@ -586,6 +588,40 @@ _TEST_BODY = (
 )
 
 
+def _test_message_html() -> str:
+    """Branded HTML alternative for the test email - same shared look as
+    the digest (:func:`lanfence.digest.format_digest_html`) and finding
+    alert (:func:`lanfence.alerts.format_findings_html`) emails, built
+    from the same style constants in :mod:`lanfence.branding`."""
+
+    colors = branding.COLORS
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="{branding.EMAIL_BODY_STYLE}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_TABLE_STYLE}">
+<tr><td style="padding:24px 20px 0;">
+  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+    <td style="padding-right:8px;">
+      <img src="cid:lanfence-logo" width="28" height="28" alt="LAN Fence" style="display:block;border:0;">
+    </td>
+    <td style="font-size:18px;font-weight:700;">{html.escape(_TEST_TITLE)}</td>
+  </tr></table>
+</td></tr>
+<tr><td style="padding:16px 20px 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_PANEL_STYLE}">
+    <tr><td style="font-size:14px;">{html.escape(_TEST_BODY)}</td></tr>
+  </table>
+</td></tr>
+<tr><td style="padding:20px 20px 28px;{branding.EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
+  {branding.FOOTER_HTML}
+</td></tr>
+</table>
+</body>
+</html>
+"""
+
+
 def _post_json_ok(url: str, payload: dict, *, timeout: float, label: str) -> tuple[bool, str]:
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -653,6 +689,11 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
         msg["From"] = channel_cfg.from_addr
         msg["To"] = ", ".join(channel_cfg.to_addrs)
         msg.set_content(_TEST_BODY)
+        msg.add_alternative(_test_message_html(), subtype="html")
+        html_part = msg.get_payload()[-1]
+        html_part.add_related(
+            branding.render_logo_png(64), maintype="image", subtype="png", cid="<lanfence-logo>",
+        )
         try:
             send_smtp_message(msg, channel_cfg)
             return True, "accepted by the SMTP relay"

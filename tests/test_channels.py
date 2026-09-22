@@ -518,6 +518,31 @@ def test_test_message_email_uses_smtplib(monkeypatch):
     assert context.check_hostname is True
 
 
+def test_test_message_email_is_branded_multipart_html_with_logo():
+    cfg = Config(alerts={"email": {
+        "from_addr": "lanfence@example.com", "to_addrs": ["ops@example.com"], "enabled": True,
+    }})
+
+    with patch("lanfence.channels.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        ok, _message = send_channel_test_message("email", cfg)
+    assert ok is True
+    sent_msg = instance.send_message.call_args.args[0]
+
+    assert sent_msg.is_multipart()
+    content_types = {part.get_content_type() for part in sent_msg.walk()}
+    assert "text/plain" in content_types
+    assert "text/html" in content_types
+    html_part = next(part for part in sent_msg.walk() if part.get_content_type() == "text/html")
+    assert "LAN Fence test message" in html_part.get_content()
+    assert "MIT License" in html_part.get_content()
+    assert 'src="cid:lanfence-logo"' in html_part.get_content()
+
+    image_parts = [part for part in sent_msg.walk() if part.get_content_type() == "image/png"]
+    assert len(image_parts) == 1
+    assert image_parts[0].get("Content-ID") == "<lanfence-logo>"
+
+
 def test_test_message_email_failure_reported_honestly():
     import smtplib
 

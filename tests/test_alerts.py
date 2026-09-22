@@ -103,6 +103,42 @@ def test_send_syslog_noop_when_no_findings():
     syslog_mock.openlog.assert_not_called()
 
 
+# --- HTML formatting ----------------------------------------------------
+
+
+def test_format_findings_html_contains_branding_and_finding():
+    html_body = alerts.format_findings_html([_finding()])
+    assert "<!doctype html>" in html_body.lower()
+    assert "aa:bb:cc:dd:ee:ff" in html_body
+    assert "Unknown device connected" in html_body
+    assert "some rationale" in html_body
+    assert "Recommendation: do something" in html_body
+    assert "stablestate.co.uk" in html_body
+    assert "MIT License" in html_body
+    assert "github.com/rosscooney/lanfence" in html_body
+    assert 'src="cid:lanfence-logo"' in html_body
+
+
+def test_format_findings_html_handles_finding_with_no_mac():
+    finding = Finding(
+        mac=None, title="Unexpected DHCP server observed", severity="medium",
+        kind="network_service", subject_id="eth0/192.168.1.66",
+    )
+    html_body = alerts.format_findings_html([finding])
+    assert "Subject: eth0/192.168.1.66" in html_body
+
+
+def test_format_findings_html_escapes_hostile_finding_data():
+    finding = Finding(
+        mac="aa:bb:cc:dd:ee:ff", title="<script>alert(1)</script>", severity="high",
+        rationale="<img src=x onerror=alert(1)>",
+    )
+    html_body = alerts.format_findings_html([finding])
+    assert "<script>alert(1)</script>" not in html_body
+    assert "<img src=x onerror=alert(1)>" not in html_body
+    assert "&lt;script&gt;" in html_body
+
+
 # --- email -------------------------------------------------------------
 
 
@@ -124,6 +160,45 @@ def test_send_email_sends_when_configured():
     sent_msg = smtp_instance.send_message.call_args.args[0]
     assert sent_msg["From"] == "lanfence@example.com"
     assert sent_msg["To"] == "me@example.com"
+
+
+def test_send_email_is_multipart_with_html_alternative():
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+
+    with patch("lanfence.alerts.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        alerts.send_email([_finding()], cfg)
+    sent_msg = instance.send_message.call_args.args[0]
+    assert sent_msg.is_multipart()
+    content_types = {part.get_content_type() for part in sent_msg.walk()}
+    assert "text/plain" in content_types
+    assert "text/html" in content_types
+    html_part = next(part for part in sent_msg.walk() if part.get_content_type() == "text/html")
+    assert "Unknown device connected" in html_part.get_content()
+
+
+def test_send_email_attaches_logo_with_matching_content_id():
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+
+    with patch("lanfence.alerts.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        alerts.send_email([_finding()], cfg)
+    sent_msg = instance.send_message.call_args.args[0]
+
+    image_parts = [part for part in sent_msg.walk() if part.get_content_type() == "image/png"]
+    assert len(image_parts) == 1
+    assert image_parts[0].get("Content-ID") == "<lanfence-logo>"
+    assert image_parts[0].get("Content-Disposition", "").startswith("inline")
+    assert image_parts[0].get_payload(decode=True)[:8] == b"\x89PNG\r\n\x1a\n"
+
+    html_part = next(part for part in sent_msg.walk() if part.get_content_type() == "text/html")
+    assert 'src="cid:lanfence-logo"' in html_part.get_content()
 
 
 def test_send_email_starttls_uses_a_verifying_context():

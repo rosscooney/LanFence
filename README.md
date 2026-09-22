@@ -1009,6 +1009,15 @@ refused (delivery aborts rather than sending a password in the clear) if
 `use_tls` is disabled - an explicitly configured unauthenticated local
 relay (`use_tls: false` with no username/password) is unaffected.
 
+Every one of those email paths (a finding alert, the digest, and setup's
+post-save test message) shares the same branded HTML template and style
+constants (`lanfence/branding.py`) - LAN Fence's own logo and dark colour
+palette, sent as a standard multipart message with a plain-text alternative
+alongside it, so a text-only mail client still gets a complete, readable
+body either way. Any value that could come from an untrusted device (a
+finding's title/rationale, a hostname) is HTML-escaped before it's ever put
+in the email body.
+
 **Config file location**: LAN Fence has no other default *writable* config
 file (every other command treats a missing `--config` as "built-in
 defaults, touch no file"), so `setup` uses a conventional per-user path,

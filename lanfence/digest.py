@@ -263,10 +263,13 @@ def format_digest_text(digest: Digest) -> str:
 #: and spacing set directly on each element. Palette/logo/footer are
 #: shared with the web portal via lanfence.branding, so the two never
 #: drift into two different looks.
-_EMAIL_BODY_STYLE = f"margin:0;background:{branding.COLORS['bg']};color:{branding.COLORS['text']};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
-_EMAIL_TABLE_STYLE = f"width:100%;max-width:640px;margin:0 auto;border-collapse:collapse;background:{branding.COLORS['bg']};"
-_EMAIL_PANEL_STYLE = f"background:{branding.COLORS['panel']};border:1px solid {branding.COLORS['border']};border-radius:12px;padding:16px 18px;"
-_EMAIL_MUTED_STYLE = f"color:{branding.COLORS['muted']};"
+# Sourced from lanfence.branding - the single shared definition, also used
+# by lanfence/alerts.py and lanfence/channels.py, so every HTML email LAN
+# Fence sends looks the same.
+_EMAIL_BODY_STYLE = branding.EMAIL_BODY_STYLE
+_EMAIL_TABLE_STYLE = branding.EMAIL_TABLE_STYLE
+_EMAIL_PANEL_STYLE = branding.EMAIL_PANEL_STYLE
+_EMAIL_MUTED_STYLE = branding.EMAIL_MUTED_STYLE
 
 
 def _html_section_table(title: str, section: DigestSection) -> str:
