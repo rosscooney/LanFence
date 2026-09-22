@@ -1039,7 +1039,8 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
     lines = [
         f"LAN Fence digest - {digest.window_start.isoformat(timespec='seconds')} "
         f"to {digest.window_end.isoformat(timespec='seconds')}",
-        f"Generated: {digest.generated_at.isoformat(timespec='seconds')}",
+        f"Generated: {digest.generated_at.isoformat(timespec='seconds')}"
+        + (f"  ·  Host: {digest.generated_by_host}" if digest.generated_by_host else ""),
         "",
         f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}",
         f"New in window: {digest.activity.new_device_count}   "
@@ -1071,7 +1072,8 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
     console = Console()
     console.print(f"[bold]LAN Fence digest[/bold] - {digest.window_start.isoformat(timespec='seconds')} "
                   f"to {digest.window_end.isoformat(timespec='seconds')}")
-    console.print(f"[dim]Generated: {digest.generated_at.isoformat(timespec='seconds')}[/dim]")
+    host_suffix = f"  ·  Host: {_rich_escape(digest.generated_by_host)}" if digest.generated_by_host else ""
+    console.print(f"[dim]Generated: {digest.generated_at.isoformat(timespec='seconds')}{host_suffix}[/dim]")
     console.print(
         f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}   "
         f"[dim]{_rich_escape(digest.monitoring_health)}[/dim]"

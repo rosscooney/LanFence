@@ -349,6 +349,26 @@ def test_digest_monitor_running_false_shown_as_not_running(tmp_path: Path):
     assert "Monitor: not running" in format_digest_html(digest)
 
 
+def test_digest_generated_by_host_defaults_to_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
+    assert digest.generated_by_host is None
+    assert "Host:" not in format_digest_text(digest)
+
+
+def test_digest_generated_by_host_shown_in_text_and_html(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(
+            store, Allowlist.load(None), since=now - timedelta(hours=1), until=now,
+            generated_by_host="funguy-fortress",
+        )
+    assert digest.generated_by_host == "funguy-fortress"
+    assert "Host: funguy-fortress" in format_digest_text(digest)
+    assert "host funguy-fortress" in format_digest_html(digest)
+
+
 def test_digest_webhook_payload_includes_portal_url(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         now = _now()

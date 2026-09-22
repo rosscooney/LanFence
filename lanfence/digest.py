@@ -42,7 +42,7 @@ from lanfence import branding
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
-from lanfence.engine import build_inventory, is_review_needed
+from lanfence.engine import build_inventory, enrich_missing_hostnames, is_review_needed
 from lanfence.logging_config import get_logger
 from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, DigestSection
 from lanfence.safe_errors import summarize_error
@@ -116,6 +116,9 @@ def build_digest(
     until: datetime,
     portal_url: str | None = None,
     monitor_running: bool | None = None,
+    generated_by_host: str | None = None,
+    resolve_missing_hostnames: bool = False,
+    dns_timeout_seconds: float = 1.0,
 ) -> Digest:
     """Aggregate one digest for the window ``since``..``until``.
 
@@ -125,13 +128,21 @@ def build_digest(
     requirements. Pure read: never writes to the database, never changes
     trust/review/presence state, and never touches alert-dispatch cooldowns.
 
-    ``portal_url``/``monitor_running`` are passed straight through onto
-    ``Digest.portal_url``/``Digest.monitor_running`` - this function never
-    computes either itself (checking a pidfile isn't a database read; see
+    ``portal_url``/``monitor_running``/``generated_by_host`` are passed
+    straight through onto the matching ``Digest`` fields - this function
+    never computes any of them itself (a pidfile check or
+    ``socket.gethostname()`` isn't a database read; see
     :func:`lanfence.web.build_portal_url`/:mod:`lanfence.monitor_status`).
+
+    ``resolve_missing_hostnames`` (off by default, so any other caller's
+    behavior is unchanged) opts into a best-effort, unpersisted reverse-DNS
+    lookup for any *online* device that has no hostname yet - see
+    :func:`lanfence.engine.enrich_missing_hostnames` for exactly what that
+    does and doesn't do.
     """
 
     inventory = build_inventory(store, allowlist)
+    inventory = enrich_missing_hostnames(inventory, resolve=resolve_missing_hostnames, timeout=dns_timeout_seconds)
     by_mac = {d.mac: d for d in inventory}
 
     new_device_events = store.events_between(since, until, event_type="new_device")
@@ -177,6 +188,7 @@ def build_digest(
         ],
         portal_url=portal_url,
         monitor_running=monitor_running,
+        generated_by_host=generated_by_host,
     )
 
 
@@ -218,7 +230,8 @@ def format_digest_text(digest: Digest) -> str:
 
     lines = [
         f"LAN Fence digest - {digest.window_start.isoformat()} to {digest.window_end.isoformat()}",
-        f"Generated: {digest.generated_at.isoformat()}",
+        f"Generated: {digest.generated_at.isoformat()}"
+        + (f"  ·  Host: {digest.generated_by_host}" if digest.generated_by_host else ""),
         "",
         f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}",
         f"New in window: {digest.activity.new_device_count}   "
@@ -331,6 +344,7 @@ def format_digest_html(digest: Digest) -> str:
     {html.escape(digest.window_start.isoformat(timespec="seconds"))} to
     {html.escape(digest.window_end.isoformat(timespec="seconds"))}
     &middot; generated {html.escape(digest.generated_at.isoformat(timespec="seconds"))}
+    {f'&middot; host {html.escape(digest.generated_by_host)}' if digest.generated_by_host else ''}
   </p>
 </td></tr>
 <tr><td style="padding:16px 20px 0;">

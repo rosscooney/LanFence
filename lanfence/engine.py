@@ -628,6 +628,48 @@ def build_device(store: DeviceStore, allowlist: Allowlist, mac: str) -> Device |
     )
 
 
+def enrich_missing_hostnames(devices: list[Device], *, resolve: bool, timeout: float) -> list[Device]:
+    """Best-effort, on-demand reverse-DNS lookup for any device in
+    ``devices`` that has no hostname yet - so a device doesn't sit at
+    "[unknown]" forever in a listing/digest just because its one lookup
+    attempt at scan time failed (a DNS server was briefly unreachable,
+    the device hadn't registered its name yet, ...). Used by `lanfence
+    device` and `lanfence digest`.
+
+    Deliberately scoped and bounded:
+
+    - **Only currently-*online* devices.** An offline device's last-known
+      IP may since have been reassigned by DHCP to a different device, so
+      a fresh lookup on it could return *someone else's* hostname -
+      actively misleading, not just unhelpful, so it's skipped entirely
+      rather than risk that.
+    - **Never persisted.** This is a read command's on-the-fly display
+      enrichment, not a new observation - it does not write to the
+      database (unlike ``scan``/``monitor``, which persist a resolved
+      name as real evidence). A resolved name here is re-attempted fresh
+      every time this runs, which is the safe (if slightly wasteful)
+      trade against silently mutating state from what's documented
+      everywhere else as a pure read.
+    - **Respects ``resolve``** (``scan.resolve_hostnames``) - if hostname
+      resolution is disabled in config, this does nothing, the same as
+      at scan time; it never overrides an explicit "no DNS lookups"
+      choice.
+
+    Returns a new list; ``devices`` itself is never mutated.
+    """
+
+    if not resolve:
+        return devices
+    updated = []
+    for device in devices:
+        if device.hostname or device.status != "online" or not device.ip:
+            updated.append(device)
+            continue
+        hostname = scanner.resolve_hostname(device.ip, timeout=timeout)
+        updated.append(device.model_copy(update={"hostname": hostname}) if hostname else device)
+    return updated
+
+
 def is_review_needed(device: Device, *, now: datetime) -> bool:
     """Untrusted, not actively snoozed, and not already flagged for
     investigation. An expired snooze (``snoozed_until`` in the past) does not

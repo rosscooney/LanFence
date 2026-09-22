@@ -184,6 +184,64 @@ def test_reset_interactive_confirm_no_aborts_without_changes(config_path: Path):
     assert "allowlist is empty" not in listing.output.lower()
 
 
+# --- _open_store: no unhandled traceback on a broken database directory ---
+
+
+def test_open_store_translates_ownership_mismatch_into_clear_error_with_fix(tmp_path: Path, capsys):
+    import typer
+
+    from lanfence.cli import _open_store
+
+    exc = PermissionError(
+        f"{tmp_path} is owned by uid 0, not the expected uid 1000 "
+        "- refusing to use a path this process does not own"
+    )
+    with patch("lanfence.cli.DeviceStore", side_effect=exc), \
+         patch("pwd.getpwuid", return_value=type("_pw", (), {"pw_name": "rosscooney"})()):
+        with pytest.raises(typer.Exit) as exc_info:
+            _open_store(tmp_path / "lanfence.db")
+    assert exc_info.value.exit_code == 1
+    captured = capsys.readouterr()
+    assert "sudo chown -R rosscooney:rosscooney" in captured.err
+
+
+def test_open_store_never_raises_a_raw_exception_for_a_command(config_path: Path):
+    # Any command opening the store (device, scan, digest, ...) must get a
+    # clean CLI error, never an unhandled traceback - see the funguy-fortress
+    # bug report this fixes.
+    exc = PermissionError(
+        "/some/dir is owned by uid 0, not the expected uid 1000 "
+        "- refusing to use a path this process does not own"
+    )
+    with patch("lanfence.cli.DeviceStore", side_effect=exc):
+        result = runner.invoke(app, ["device", "--config", str(config_path)])
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1
+    assert "error: could not open the database" in result.output
+
+
+def test_open_store_symlink_error_also_handled_cleanly(config_path: Path):
+    with patch("lanfence.cli.DeviceStore", side_effect=RuntimeError("refusing to use ...: it is a symlink")):
+        result = runner.invoke(app, ["device", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "error: could not open the database" in result.output
+    assert "symlink" in result.output
+
+
+def test_ownership_fix_hint_none_for_unrelated_error(tmp_path: Path):
+    from lanfence.cli import _ownership_fix_hint
+
+    assert _ownership_fix_hint(OSError("disk full"), tmp_path) is None
+
+
+def test_ownership_fix_hint_none_for_unknown_uid(tmp_path: Path):
+    from lanfence.cli import _ownership_fix_hint
+
+    exc = PermissionError("x is owned by uid 0, not the expected uid 999999 - refusing to use a path")
+    with patch("pwd.getpwuid", side_effect=KeyError()):
+        assert _ownership_fix_hint(exc, tmp_path) is None
+
+
 def test_check_runs_without_crashing(config_path: Path):
     result = runner.invoke(app, ["check", "--config", str(config_path)])
     assert result.exit_code in (0, 1)
@@ -202,6 +260,28 @@ def test_check_reports_nmap_missing_as_optional_not_a_failure(config_path: Path)
     assert "nmap is not installed" in result.output
     assert "still works via its built-in scan" in result.output
     assert result.exit_code in (0, 1)
+
+
+def test_check_storage_failure_shows_chown_fix_and_keeps_checking(config_path: Path):
+    exc = PermissionError(
+        "/some/dir is owned by uid 0, not the expected uid 1000 "
+        "- refusing to use a path this process does not own"
+    )
+    with patch("lanfence.cli.DeviceStore", side_effect=exc), \
+         patch("pwd.getpwuid", return_value=type("_pw", (), {"pw_name": "rosscooney"})()):
+        result = runner.invoke(app, ["check", "--config", str(config_path)])
+    assert "FAIL     database not writable" in result.output
+    assert "fix: sudo chown -R rosscooney:rosscooney" in result.output
+    # check() must keep reporting the rest even after the storage failure.
+    assert "allowlist:" in result.output
+
+
+def test_check_storage_failure_without_ownership_hint_shown_plainly(config_path: Path):
+    with patch("lanfence.cli.DeviceStore", side_effect=OSError("disk full")):
+        result = runner.invoke(app, ["check", "--config", str(config_path)])
+    assert "FAIL     database not writable" in result.output
+    assert "disk full" in result.output
+    assert "fix: sudo chown" not in result.output
 
 
 def test_check_creates_missing_allowlist_file(tmp_path: Path, config_path: Path):
@@ -569,6 +649,25 @@ def test_scan_table_output_shows_triage_summary(config_path: Path, monkeypatch):
     assert "LAN Fence has discovered 4 devices." in result.output
     assert "None have been reviewed yet." in result.output
     assert "Run `lanfence review` to work through them." in result.output
+
+
+def test_scan_table_output_shows_short_scan_banner(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    sightings = [scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())]
+    result = _scan_with_sightings(config_path, monkeypatch, sightings)
+    assert result.exit_code == 0, result.output
+    assert "mobile/WiFi device" in result.output
+    assert "lanfence monitor" in result.output
+
+
+def test_scan_json_output_omits_short_scan_banner(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    sightings = [scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())]
+    result = _scan_with_sightings(config_path, monkeypatch, sightings, extra_args=["--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert "mobile/WiFi device" not in result.output
 
 
 def test_scan_json_output_omits_triage_summary_and_stays_stable(config_path: Path, monkeypatch):
@@ -2916,6 +3015,82 @@ def test_digest_shows_monitor_not_running(config_path: Path):
         result = runner.invoke(app, ["digest", "--config", str(config_path)])
     assert result.exit_code == 0
     assert "Monitor: not running" in result.output
+
+
+def test_digest_shows_generated_by_host(config_path: Path):
+    with patch("lanfence.cli.socket.gethostname", return_value="funguy-fortress"), \
+         patch("lanfence.web.is_server_running", return_value=False):
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Host: funguy-fortress" in result.output
+
+
+def test_digest_omits_host_when_gethostname_fails(config_path: Path):
+    with patch("lanfence.cli.socket.gethostname", side_effect=OSError("no hostname")), \
+         patch("lanfence.web.is_server_running", return_value=False):
+        result = runner.invoke(app, ["digest", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Host:" not in result.output
+
+
+def test_digest_resolves_missing_hostname_for_online_device(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    with DeviceStore(Path(raw["db_path"])) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+
+    with patch("lanfence.web.is_server_running", return_value=False), \
+         patch("lanfence.engine.scanner.resolve_hostname", return_value="resolved-live.local"):
+        result = runner.invoke(app, ["digest", "--verbose", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "resolved-live.local" in result.output
+
+
+def test_device_list_resolves_missing_hostname_for_online_device(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    with DeviceStore(Path(raw["db_path"])) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value="resolved-live.local"):
+        result = runner.invoke(app, ["device", "--format", "json", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "resolved-live.local" in result.output
+
+
+def test_device_single_mac_resolves_missing_hostname_for_online_device(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    with DeviceStore(Path(raw["db_path"])) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value="resolved-live.local"):
+        result = runner.invoke(app, ["device", "aa:aa:aa:aa:aa:aa", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "resolved-live.local" in result.output
+
+
+def test_device_resolve_hostnames_disabled_skips_live_lookup(config_path: Path):
+    from lanfence.db import DeviceStore
+    import yaml as _yaml
+
+    raw = _yaml.safe_load(config_path.read_text())
+    raw["scan"] = {"resolve_hostnames": False}
+    config_path.write_text(_yaml.safe_dump(raw))
+    with DeviceStore(Path(raw["db_path"])) as store:
+        store.observe(mac="aa:aa:aa:aa:aa:aa", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now())
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value="resolved-live.local") as resolve_mock:
+        result = runner.invoke(app, ["device", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "resolved-live.local" not in result.output
+    resolve_mock.assert_not_called()
 
 
 def test_monitor_quit_key_uses_clean_shutdown(config_path: Path, monkeypatch):

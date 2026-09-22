@@ -181,6 +181,16 @@ lanfence vendor-refresh         # pull a current copy of the IEEE OUI registry
 respectively - not shown in `--help` (to keep the command list short), but
 fully supported for anyone who reaches for those names instead.
 
+`lanfence scan` (table output only - not `--format json`) shows a standing
+note that it's a single, short active sweep: a mobile/WiFi device that's
+asleep or power-saving may simply not respond within its fixed timeout
+(`scan.active_scan_timeout_seconds`, default 3s) and won't appear in that
+one run, even though it's genuinely on the network - this is expected
+behavior, not a bug, and is exactly why `lanfence monitor` exists: it
+repeats the sweep periodically *and* passively listens in between, so a
+device only has to be caught once, ever, to be permanently in the
+database from then on.
+
 `scan`/`monitor` warn (and show copy-pasteable fixes) if not run as root, since
 ARP scanning needs raw-socket access. A pipx / `pip install --user` install
 puts the `lanfence` launcher in `~/.local/bin`, which `sudo` does not see by
@@ -1168,10 +1178,17 @@ interface (a primary and a failover, say). **Turning this on with an empty
 `approved` list means every server observed is treated as unexpected** -
 LAN Fence never auto-approves the first responder, and an existing device
 allowlist entry never implies DHCP server approval either; they're
-independent trust decisions, checked separately. This version has no
-config-writing workflow for approval - add entries to `dhcp_servers.approved`
-by hand and (since this config is only read at startup) restart `monitor`
-for the change to take effect.
+independent trust decisions, checked separately.
+
+`lanfence setup`'s DHCP servers section (`1` to enable, `a` for Approved
+DHCP servers) is the guided way to manage approvals - add one by hand
+(name, interface, the DHCP option 54 server identifier), or use its
+`o` **Observed** action to pick one from servers `monitor` has actually
+seen on the wire (`lanfence dhcp-servers` shows the same read-only list
+from the CLI). Editing `dhcp_servers.approved` directly in the config
+file also still works, if you'd rather. Either way, since config is only
+read at `monitor` startup, restart it for an approval change to take
+effect.
 
 Detection only ever runs during `lanfence monitor` (`scan`, a one-shot
 active sweep, has no equivalent - DHCP servers only speak when spoken to by

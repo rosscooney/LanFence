@@ -11,6 +11,7 @@ import queue
 import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -62,6 +63,7 @@ from lanfence.engine import (
     build_findings,
     build_inventory,
     coalesce_sightings,
+    enrich_missing_hostnames,
     filter_rate_limited,
     filter_snoozed,
     is_review_needed,
@@ -127,6 +129,53 @@ def _load_config(config_path: Optional[Path]) -> Config:
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"error: could not load config: {exc}", fg="red", err=True)
         raise typer.Exit(code=2) from exc
+
+
+#: Matches DeviceStore's own "owned by uid X, not the expected uid Y" text
+#: (see lanfence/db.py's _check_fd_owner_and_mode) - used only to add a
+#: copy-pasteable `chown` fix to the error below, never to change whether
+#: the error is treated as fatal.
+_OWNERSHIP_MISMATCH_RE = re.compile(r"owned by uid \d+, not the expected uid (\d+)")
+
+
+def _ownership_fix_hint(exc: BaseException, path: Path) -> Optional[str]:
+    """A copy-pasteable ``sudo chown ...`` command if ``exc`` is
+    specifically the "wrong owner" error :func:`_open_store`/`lanfence
+    check` can hit opening the database directory/file (see
+    ``lanfence.db._check_fd_owner_and_mode``) - ``None`` for any other
+    error, where there's nothing this specific to suggest."""
+
+    match = _OWNERSHIP_MISMATCH_RE.search(str(exc))
+    if not match:
+        return None
+    try:
+        import pwd
+
+        username = pwd.getpwuid(int(match.group(1))).pw_name
+    except (KeyError, ValueError, ImportError):
+        return None
+    return f"sudo chown -R {username}:{username} {path}"
+
+
+def _open_store(db_path: Path, **kwargs) -> DeviceStore:
+    """Open the device database, translating a directory/file ownership,
+    permission, or symlink problem (see ``lanfence.db._ensure_secure_directory``)
+    into a clear, actionable CLI error - with a copy-pasteable `chown` fix
+    when it's specifically an ownership mismatch - instead of a raw
+    Python traceback. The same boundary role `_load_config` already plays
+    for a broken config file, applied to the database for the same reason:
+    an environment problem outside this process's control should never
+    surface as an unhandled exception.
+    """
+
+    try:
+        return DeviceStore(db_path, **kwargs)
+    except (OSError, RuntimeError) as exc:
+        typer.secho(f"error: could not open the database at {db_path}: {exc}", fg="red", err=True)
+        hint = _ownership_fix_hint(exc, db_path.parent)
+        if hint:
+            typer.secho(f"fix: {hint}", fg="yellow", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _is_root() -> bool:
@@ -365,7 +414,7 @@ def scan(
     apply_self_trust(allowlist, interface=interface or cfg.scan.interface)
 
     triage: Optional[TriageSummary] = None
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         result = run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
         if alert:
             not_snoozed = filter_snoozed(result.findings, store, now=utcnow())
@@ -392,6 +441,14 @@ def scan(
     if output_format == "json":
         typer.echo(result.to_json())
     else:
+        typer.secho(
+            "note: this is a single, short active scan - a mobile/WiFi device that's asleep or "
+            "power-saving may not respond in time and won't appear here, even though it's on the "
+            "network. Run `lanfence monitor` for a complete picture: it repeats this sweep over time "
+            "and passively listens in between, so a device only needs to be caught once.",
+            fg="yellow",
+        )
+        typer.echo("")
         render_scan_result(result)
         summary_text = render_triage_summary(triage) if triage is not None else ""
         if summary_text:
@@ -591,7 +648,7 @@ def monitor(
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    store = DeviceStore(
+    store = _open_store(
         cfg.resolved_db_path(),
         max_evidence_rows_per_mac=cfg.retention.max_evidence_rows_per_mac,
         max_dhcp_server_findings=cfg.retention.max_dhcp_server_findings,
@@ -957,10 +1014,16 @@ def digest(
     signatures = SignatureSet.load(cfg.rogue_signatures_file) if verbose else None
     portal_url = web.build_portal_url(cfg)
     monitor_running = monitor_status.is_running()
+    try:
+        generated_by_host = socket.gethostname() or None
+    except OSError:
+        generated_by_host = None
 
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         digest_obj = build_digest(
             store, allowlist, since=since_dt, until=until, portal_url=portal_url, monitor_running=monitor_running,
+            generated_by_host=generated_by_host, resolve_missing_hostnames=cfg.scan.resolve_hostnames,
+            dns_timeout_seconds=cfg.scan.dns_timeout_seconds,
         )
         events = store.events_since(since_dt) if verbose else []
         devices_by_mac = {d.mac: d for d in store.all_devices()} if verbose else {}
@@ -1079,7 +1142,7 @@ def dhcp_servers_cmd(
         raise typer.Exit(code=2)
 
     cfg = _load_config(config)
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         records = dhcp_server_inventory(store, cfg)
 
     if output_format == "json":
@@ -1151,7 +1214,7 @@ def services(
 
     cfg = _load_config(config)
     now = utcnow()
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         total_count = len(store.advertised_services(include_expired=True, now=now))
         records = store.advertised_services(
             protocol=protocol, include_expired=include_expired, unassociated_only=unassociated, now=now,
@@ -1221,7 +1284,7 @@ def allow(
         except ValueError:
             norm_mac = None
         if norm_mac is not None:
-            with DeviceStore(cfg.resolved_db_path()) as store:
+            with _open_store(cfg.resolved_db_path()) as store:
                 already_known = store.get_device(norm_mac) is not None
                 dossier = None
                 if already_known:
@@ -1277,7 +1340,7 @@ def reset(
             typer.echo("aborted - nothing changed.")
             return
 
-    with DeviceStore(db_path) as store:
+    with _open_store(db_path) as store:
         store.reset_all()
 
     if not keep_allowlist:
@@ -1337,7 +1400,7 @@ def _list_devices(
     apply_self_trust(allowlist, interface=cfg.scan.interface)
     now = utcnow()
 
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         inventory = build_inventory(store, allowlist)
 
     total_count = len(inventory)
@@ -1358,6 +1421,14 @@ def _list_devices(
     if location is not None:
         needle = location.strip().casefold()
         inventory = [d for d in inventory if (d.metadata.location or "").strip().casefold() == needle]
+
+    # Best-effort, unpersisted DNS lookup for shown devices still missing a
+    # hostname - after filtering, so this only ever costs lookups for rows
+    # actually displayed. See enrich_missing_hostnames's own docstring for
+    # why it's online-only and never written back to the database.
+    inventory = enrich_missing_hostnames(
+        inventory, resolve=cfg.scan.resolve_hostnames, timeout=cfg.scan.dns_timeout_seconds
+    )
 
     if output_format == "json":
         typer.echo(json.dumps([d.model_dump(mode="json") for d in inventory], indent=2))
@@ -1380,7 +1451,7 @@ def _delete_new_offline_devices(*, config: Optional[Path], yes: bool) -> None:
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=cfg.scan.interface)
 
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         inventory = build_inventory(store, allowlist)
         targets = [
             d for d in inventory
@@ -1566,7 +1637,7 @@ def device(
 
     mutating = presence is not None or offline_after is not None or clear_offline_after or metadata_updates
     if mutating:
-        with DeviceStore(cfg.resolved_db_path()) as store:
+        with _open_store(cfg.resolved_db_path()) as store:
             if store.get_device(norm_mac) is None:
                 typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
                 raise typer.Exit(code=2)
@@ -1607,11 +1678,12 @@ def device(
     apply_self_trust(allowlist, interface=cfg.scan.interface)
     now = utcnow()
 
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         dev = build_device(store, allowlist, norm_mac)
         if dev is None:
             typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
             raise typer.Exit(code=2)
+        dev = enrich_missing_hostnames([dev], resolve=cfg.scan.resolve_hostnames, timeout=cfg.scan.dns_timeout_seconds)[0]
         events = store.events_for(norm_mac, since=since_dt)
         addresses = store.address_evidence_for(norm_mac)
         names = store.name_evidence_for(norm_mac)
@@ -1685,7 +1757,7 @@ def inspect(
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=cfg.scan.interface)
 
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         dev = build_device(store, allowlist, norm_mac)
         if dev is None:
             typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
@@ -1736,7 +1808,7 @@ def _run_interactive_review(cfg: Config) -> None:
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
 
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         now = utcnow()
         # A separate copy (never saved) just for building the queue, so
         # self-trust never leaks into the file if the operator goes on to
@@ -1983,7 +2055,7 @@ def review(
         raise typer.Exit(code=2)
 
     now = utcnow()
-    with DeviceStore(cfg.resolved_db_path()) as store:
+    with _open_store(cfg.resolved_db_path()) as store:
         if trust:
             path = cfg.resolved_allowlist_file()
             al = Allowlist.load(path)
@@ -2172,8 +2244,11 @@ def check(
         DeviceStore(db_path).close()
         typer.secho(f"  ok       database writable: {db_path}", fg="green")
         db_ok = True
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         typer.secho(f"  FAIL     database not writable: {db_path} ({exc})", fg="red")
+        hint = _ownership_fix_hint(exc, db_path.parent)
+        if hint:
+            typer.secho(f"           fix: {hint}", fg="yellow")
         db_ok = False
 
     allowlist_file = cfg.resolved_allowlist_file()

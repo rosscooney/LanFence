@@ -455,6 +455,15 @@ class Digest(BaseModel):
 
     schema_version: int = 1
     generated_at: datetime
+    #: This host's own hostname (``socket.gethostname()``), so a digest is
+    #: self-identifying if you run LAN Fence on more than one machine -
+    #: separate from any *observed device's* hostname elsewhere in this
+    #: model. ``None`` only if the caller never set it (e.g. an older
+    #: caller, or the lookup itself failed). Set by the caller (`lanfence
+    #: digest`), never computed inside :func:`lanfence.digest.build_digest`
+    #: itself, for the same presentation-vs-database-read reason as
+    #: ``portal_url``/``monitor_running`` below.
+    generated_by_host: str | None = None
     window_start: datetime
     window_end: datetime
 

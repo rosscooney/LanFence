@@ -123,11 +123,11 @@ def test_schema_unknown_keys_are_refused_without_discarding_data(tmp_path):
 def test_dhcp_add_edit_duplicate_remove(tmp_path):
     path = tmp_path / 'config.yaml'
     result, _ = run_setup(path,
-        '4\na\nadd\nRouter\neth0\n192.168.1.1\ny\n'
-        'add\nDuplicate\neth0\n192.168.1.1\n'
-        'edit\n1\nBackup\neth0.20\n192.168.20.1\ny\n'
-        'add\nOther\neth1\n192.168.2.1\ny\nremove\n2\ny\n'
-        'back\nback\nsave\ny\nexit\n')
+        '4\na\na\nRouter\neth0\n192.168.1.1\ny\n'
+        'a\nDuplicate\neth0\n192.168.1.1\n'
+        'e\n1\nBackup\neth0.20\n192.168.20.1\ny\n'
+        'a\nOther\neth1\n192.168.2.1\ny\nd\n2\ny\n'
+        'b\nb\nsave\nexit\n')
     assert 'Invalid approval' in result.output
     assert yaml.safe_load(path.read_text())['dhcp_servers']['approved'] == [
         {'name': 'Backup', 'interface': 'eth0.20', 'server_ip': '192.168.20.1'}]
@@ -152,9 +152,9 @@ def test_observed_server_approval_requires_confirmation(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text(yaml.safe_dump({'db_path': str(db)}))
     before = path.read_bytes()
-    run_setup(path, '4\na\nobserved\n1\nRouter\n\n\nn\nback\nback\nexit\n')
+    run_setup(path, '4\na\no\n1\nRouter\n\n\nn\nb\nb\nexit\n')
     assert path.read_bytes() == before
-    run_setup(path, '4\na\nobserved\n1\nRouter\n\n\ny\nback\nback\nsave\ny\nexit\n')
+    run_setup(path, '4\na\no\n1\nRouter\n\n\ny\nb\nb\nsave\nexit\n')
     assert yaml.safe_load(path.read_text())['dhcp_servers']['approved'][0]['server_ip'] == '192.168.1.1'
 
 

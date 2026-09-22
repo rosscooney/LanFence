@@ -271,56 +271,81 @@ def observed_servers(cfg):
         connection.close()
 
 
+#: Action letters for edit_approvals's menu - distinct first letters
+#: (Delete/Clear instead of Remove/Reset) so each is unambiguous.
+_APPROVAL_ACTIONS = {"a": "Add", "e": "Edit", "d": "Delete", "o": "Observed", "c": "Clear all"}
+
+
 def edit_approvals(raw):
     while True:
         entries = deepcopy(value_at(raw, "dhcp_servers.approved", []))
-        typer.echo("\nApproved DHCP servers (role approval, separate from device trust)")
-        for i, row in enumerate(entries, 1):
-            typer.echo(f"{i}  {safe_value(row.get('name', ''))}  {safe_value(row['interface'])}  {safe_value(row['server_ip'])}")
-        action = typer.prompt("Add / Edit / Remove / Observed / Reset / Back", default="back").lower()
-        if action == "back":
+        typer.echo("\nApproved DHCP servers (which server(s) are allowed to answer DHCP on each interface)")
+        if entries:
+            for i, row in enumerate(entries, 1):
+                typer.echo(
+                    f"{i}  {safe_value(row.get('name', ''))}  {safe_value(row['interface'])}  "
+                    f"{safe_value(row['server_ip'])}"
+                )
+        else:
+            typer.echo("  (none approved yet - every DHCP server seen will be treated as unexpected)")
+        for letter, label in _APPROVAL_ACTIONS.items():
+            typer.echo(f"{letter}  {label}")
+        action_letter = typer.prompt(
+            f"Choose an action [{'/'.join(_APPROVAL_ACTIONS)}] or b [Back]", default="b", show_default=False
+        ).lower()
+        if action_letter in ("back", "b"):
             return raw
-        if action == "reset":
-            if typer.confirm("Remove explicit approvals and inherit the default empty list?", default=False):
+        if action_letter not in _APPROVAL_ACTIONS:
+            typer.echo("Choose a listed action.")
+            continue
+        action = _APPROVAL_ACTIONS[action_letter]
+        if action == "Clear all":
+            if typer.confirm("Remove every approval and inherit the default empty list?", default=False):
                 raw = patch_value(raw, "dhcp_servers.approved")
             continue
         row = {}
         index = None
-        if action in ("edit", "remove"):
+        if action in ("Edit", "Delete"):
+            if not entries:
+                typer.echo("No entries yet - use Add first.")
+                continue
             number = typer.prompt("Entry number", type=int)
             if not 1 <= number <= len(entries):
                 typer.echo("No such entry.")
                 continue
             index = number - 1
             row = entries[index]
-            if action == "remove":
-                if typer.confirm(f"Remove {safe_value(row)}?", default=False):
+            if action == "Delete":
+                if typer.confirm(f"Delete {safe_value(row)}?", default=False):
                     entries.pop(index)
                     raw = patch_value(raw, "dhcp_servers.approved", entries)
                 continue
-        elif action == "observed":
+        elif action == "Observed":
             try:
                 records = observed_servers(Config.model_validate(raw))
             except (OSError, sqlite3.Error):
                 typer.echo("Observed inventory unavailable; use Add for manual entry.")
                 continue
+            if not records:
+                typer.echo(
+                    "No DHCP server replies observed yet on this database - run `lanfence monitor` with "
+                    "passive capture on for a while first, or use Add to approve one by hand."
+                )
+                continue
             for i, record in enumerate(records, 1):
                 typer.echo(f"{i}  {safe_value(record)}")
-            if not records:
-                typer.echo("No observed servers; use Add for manual entry.")
-                continue
             number = typer.prompt("Observed entry number (0 cancels)", type=int, default=0)
             if not 1 <= number <= len(records):
                 continue
             record = records[number - 1]
             row = {"interface": record['interface'], "server_ip": record['server_id']}
-        elif action != "add":
-            typer.echo("Choose Add, Edit, Remove, Observed, Reset, or Back.")
-            continue
-        typer.echo("server_ip is DHCP option 54, not necessarily the source or relay. Interface scopes approval (e.g. eth0.20).")
+        typer.echo(
+            "Server IP is DHCP option 54 (the server identifier) - not necessarily the packet's "
+            "source or relay address. Interface scopes the approval (e.g. eth0.20 for a VLAN)."
+        )
         proposal = dict(row)
-        for key in ("name", "interface", "server_ip"):
-            proposal[key] = typer.prompt(key, default=row.get(key, ""), show_default=True).strip()
+        for key, label in (("name", "Name"), ("interface", "Interface"), ("server_ip", "Server IP")):
+            proposal[key] = typer.prompt(label, default=row.get(key, ""), show_default=True).strip()
         try:
             ApprovedDhcpServer.model_validate(proposal)
             if index is None:
@@ -340,19 +365,29 @@ def edit_approvals(raw):
 def edit_section(raw, section):
     while True:
         cfg = Config.model_validate(raw).model_dump(mode="json")
+        if section == "DHCP servers":
+            typer.echo(
+                "Detects a DHCP server that isn't on your approved list below (a rogue or "
+                "misconfigured server can silently redirect new clients) - see README's "
+                "\"Unexpected DHCP servers\". Needs Scanning's passive capture and DHCP snooping "
+                "both on to see anything at all."
+            )
         for i, path in enumerate(SECTIONS[section], 1):
             origin = "default" if value_at(raw, path) is MISSING else "explicit"
             typer.echo(f"{i}  {path}: {safe_value(value_at(cfg, path))} ({origin})")
-        if section == "DHCP servers":
-            typer.echo("a  Approved DHCP servers")
+        approvals_letter = "a" if section == "DHCP servers" else None
+        if approvals_letter:
+            count = len(value_at(raw, "dhcp_servers.approved", []) or [])
+            typer.echo(f"{approvals_letter}  Approved DHCP servers ({count} approved)")
         password_index = None
         if section == "Web portal":
             password_index = len(SECTIONS[section]) + 1
             configured = value_at(raw, "web.password_hash") not in (MISSING, None)
             typer.echo(f"{password_index}  Set/change password ({'configured' if configured else 'not set'})")
         max_choice = password_index if password_index is not None else len(SECTIONS[section])
+        extra = f", {approvals_letter} [Approved servers]" if approvals_letter else ""
         choice = typer.prompt(
-            f"Choose a section [1-{max_choice}] or b [Back]", default="b", show_default=False
+            f"Choose a section [1-{max_choice}]{extra}, or b [Back]", default="b", show_default=False
         ).lower()
         if choice in ("back", "b"):
             return raw

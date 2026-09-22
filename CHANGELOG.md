@@ -13,6 +13,55 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Added
+
+- `lanfence digest` now includes the sending host's own hostname
+  (`socket.gethostname()`) alongside its generated-at timestamp, in the
+  CLI table, the text/HTML digest bodies, and the JSON payload
+  (`Digest.generated_by_host`) - useful if you run LAN Fence on more than
+  one machine and want to tell at a glance which one a digest is from.
+- `lanfence scan` (table output only) now shows a standing note that it's
+  a single, short active sweep - a mobile/WiFi device that's asleep or
+  power-saving may not respond within the fixed timeout and won't appear
+  in that one run, even though it's genuinely on the network - and points
+  at `lanfence monitor` for a complete picture.
+- `lanfence device` and `lanfence digest` now attempt a live, unpersisted
+  reverse-DNS lookup for any *online* device that's still missing a
+  hostname (instead of showing "[unknown]" forever just because its one
+  lookup at scan time failed) - gated by the existing
+  `scan.resolve_hostnames` setting, and deliberately skipped for offline
+  devices (a stale IP may have been reassigned by DHCP, so a lookup on it
+  could return a different device's hostname).
+
+### Changed
+
+- `lanfence setup`'s DHCP servers section is overhauled for clarity: a
+  short explanation of what the feature does and its `scan.passive`/
+  `scan.dhcp_snooping` dependency now shows right there (not just as a
+  separate warning), and its Approved DHCP servers sub-menu now uses the
+  same numbered/lettered `[options] or b [Back]` style as the rest of the
+  wizard instead of typed full words (`Add`/`Edit`/`Remove`/`Observed`/
+  `Reset` are now `a`/`e`/`d`/`o`/`c`, chosen to avoid the `Remove`/
+  `Reset` letter clash).
+
+### Fixed
+
+- **A broken database directory/file ownership check now gives a clear,
+  actionable CLI error instead of crashing with a raw Python traceback.**
+  Every command that opens the device database (`scan`, `monitor`,
+  `device`, `digest`, `review`, ...) now goes through a new `_open_store`
+  helper that catches the "wrong owner" and "not a real directory"
+  errors `lanfence.db` already raised for this (see 0.4.x's ownership
+  hardening) and prints a clear message - with a copy-pasteable `sudo
+  chown -R <you>:<you> <dir>` fix when it's specifically an ownership
+  mismatch (the common case: the directory was created as root before
+  this project's sudo-aware home-resolution existed, or the operator has
+  changed). `lanfence check`'s own storage check gets the same fix hint,
+  without losing its existing behavior of still checking everything else
+  afterward.
+
 ## [0.5.3] - 2026-09-21
 
 ### Changed

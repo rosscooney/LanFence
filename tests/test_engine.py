@@ -15,6 +15,7 @@ from lanfence.engine import (
     build_findings,
     build_inventory,
     coalesce_sightings,
+    enrich_missing_hostnames,
     evaluate_availability,
     filter_rate_limited,
     filter_snoozed,
@@ -1084,6 +1085,71 @@ def test_build_inventory_joins_presence_policy(tmp_path: Path):
     device = inventory[0]
     assert device.presence_policy == "always-on"
     assert device.offline_after_seconds == 600.0
+
+
+# --- enrich_missing_hostnames -----------------------------------------
+
+
+def test_enrich_missing_hostnames_resolves_online_device_without_one():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", status="online", first_seen=_now(), last_seen=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value="phone.local") as resolve_mock:
+        result = enrich_missing_hostnames([device], resolve=True, timeout=1.0)
+    assert result[0].hostname == "phone.local"
+    resolve_mock.assert_called_once_with("10.0.0.5", timeout=1.0)
+
+
+def test_enrich_missing_hostnames_skips_device_that_already_has_one():
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname="already-known", status="online",
+        first_seen=_now(), last_seen=_now(),
+    )
+    with patch("lanfence.engine.scanner.resolve_hostname") as resolve_mock:
+        result = enrich_missing_hostnames([device], resolve=True, timeout=1.0)
+    assert result[0].hostname == "already-known"
+    resolve_mock.assert_not_called()
+
+
+def test_enrich_missing_hostnames_skips_offline_device():
+    # An offline device's last-known IP may have been reassigned by DHCP -
+    # a lookup on it could return a different device's hostname.
+    device = Device(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", status="offline", first_seen=_now(), last_seen=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname") as resolve_mock:
+        result = enrich_missing_hostnames([device], resolve=True, timeout=1.0)
+    assert result[0].hostname is None
+    resolve_mock.assert_not_called()
+
+
+def test_enrich_missing_hostnames_skips_device_without_ip():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", ip=None, status="online", first_seen=_now(), last_seen=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname") as resolve_mock:
+        result = enrich_missing_hostnames([device], resolve=True, timeout=1.0)
+    assert result[0].hostname is None
+    resolve_mock.assert_not_called()
+
+
+def test_enrich_missing_hostnames_noop_when_resolve_false():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", status="online", first_seen=_now(), last_seen=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname") as resolve_mock:
+        result = enrich_missing_hostnames([device], resolve=False, timeout=1.0)
+    assert result[0].hostname is None
+    resolve_mock.assert_not_called()
+
+
+def test_enrich_missing_hostnames_keeps_none_when_lookup_fails():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", status="online", first_seen=_now(), last_seen=_now())
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None):
+        result = enrich_missing_hostnames([device], resolve=True, timeout=1.0)
+    assert result[0].hostname is None
+
+
+def test_enrich_missing_hostnames_never_mutates_input_list():
+    device = Device(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", status="online", first_seen=_now(), last_seen=_now())
+    devices = [device]
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value="phone.local"):
+        result = enrich_missing_hostnames(devices, resolve=True, timeout=1.0)
+    assert devices[0].hostname is None  # original untouched
+    assert result[0].hostname == "phone.local"
+    assert result is not devices
 
 
 def test_is_review_needed_true_for_plain_untrusted_device():
