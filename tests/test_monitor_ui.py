@@ -20,6 +20,7 @@ from lanfence.monitor_ui import (
     render_footer,
     render_header,
     render_minimal,
+    scan_progress_fraction,
     should_use_live,
 )
 
@@ -219,6 +220,69 @@ def test_elapsed_seconds_uses_monotonic_clock():
     assert snap.elapsed_seconds == 42.5
 
 
+def test_scan_progress_fraction_advances_with_elapsed_time():
+    stats = MonitorStats(
+        scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0,
+        expected_sweep_seconds=10.0,
+    )
+    stats.record_sweep_start(now_monotonic=100.0)
+    snap = stats.snapshot(now_monotonic=105.0)
+    assert scan_progress_fraction(snap, now_monotonic=105.0) == 0.5
+
+
+def test_scan_progress_fraction_clamps_at_one_hundred_percent():
+    stats = MonitorStats(
+        scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0,
+        expected_sweep_seconds=10.0,
+    )
+    stats.record_sweep_start(now_monotonic=100.0)
+    snap = stats.snapshot(now_monotonic=999.0)  # way past the expected duration
+    assert scan_progress_fraction(snap, now_monotonic=999.0) == 1.0
+
+
+def test_scan_progress_fraction_none_when_not_scanning():
+    stats = MonitorStats(
+        scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0,
+        expected_sweep_seconds=10.0,
+    )
+    snap = stats.snapshot(now_monotonic=5.0)
+    assert scan_progress_fraction(snap, now_monotonic=5.0) is None
+
+
+def test_scan_progress_fraction_none_when_expected_duration_unknown():
+    """Default `expected_sweep_seconds=0.0` (an older/simpler caller) means
+    no fabricated percentage - falls back to the plain "scanning" text."""
+
+    stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
+    stats.record_sweep_start(now_monotonic=10.0)
+    snap = stats.snapshot(now_monotonic=15.0)
+    assert scan_progress_fraction(snap, now_monotonic=15.0) is None
+
+
+def test_render_footer_shows_progress_bar_while_scanning():
+    stats = MonitorStats(
+        scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0,
+        expected_sweep_seconds=10.0,
+    )
+    stats.record_sweep_start(now_monotonic=100.0)
+    snap = stats.snapshot(now_monotonic=105.0)
+    text = render_footer(snap, width=100, now_monotonic=105.0).plain
+    assert "50%" in text
+    assert "█" in text
+
+
+def test_render_header_shows_progress_percentage_while_scanning():
+    stats = MonitorStats(
+        scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0,
+        expected_sweep_seconds=10.0,
+    )
+    stats.record_sweep_start(now_monotonic=100.0)
+    snap = stats.snapshot(now_monotonic=103.0)
+    text = render_header(_header(), snap, width=200, now_monotonic=103.0)
+    joined = "\n".join(t.plain for t in text.renderables)
+    assert "scanning now (30%)" in joined
+
+
 def test_format_duration():
     assert format_duration(0) == "00:00:00"
     assert format_duration(65) == "00:01:05"
@@ -243,7 +307,7 @@ def test_footer_visible_at_wide_size():
     header = _header()
     snap = _snap()
     log = ActivityLog()
-    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(100, 24))
+    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(100, 24), now_monotonic=0.0)
     lines = _rendered_lines(panel, width=100, height=24)
     assert len(lines) == 24
     assert "Known: 10" in lines[-2]  # last line is the panel's bottom border
@@ -253,7 +317,7 @@ def test_footer_visible_at_narrow_size():
     header = _header()
     snap = _snap()
     log = ActivityLog()
-    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(30, 12))
+    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(30, 12), now_monotonic=0.0)
     lines = _rendered_lines(panel, width=30, height=12)
     assert len(lines) == 12
     assert any("Known" in line for line in lines)
@@ -267,7 +331,7 @@ def test_footer_visible_even_with_long_activity_detail():
         timestamp=local_now(), level="finding", label="NEW",
         detail="x" * 500,  # a pathologically long line
     ))
-    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(60, 15))
+    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(60, 15), now_monotonic=0.0)
     lines = _rendered_lines(panel, width=60, height=15)
     assert len(lines) == 15
     assert any("Known" in line for line in lines)
@@ -277,7 +341,7 @@ def test_render_falls_back_to_minimal_below_min_usable_size():
     header = _header()
     snap = _snap()
     log = ActivityLog()
-    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(10, 3))
+    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(10, 3), now_monotonic=0.0)
     lines = _rendered_lines(panel, width=10, height=3)
     assert len(lines) <= 3
 
@@ -286,7 +350,7 @@ def test_render_does_not_crash_on_zero_dimensions():
     header = _header()
     snap = _snap()
     log = ActivityLog()
-    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(0, 0))
+    panel = build_dashboard(header, snap, log.snapshot(), size=ConsoleDimensions(0, 0), now_monotonic=0.0)
     console = _console(1, 1)
     console.render_lines(panel, console.options.update(height=None))  # must not raise
 
@@ -334,7 +398,7 @@ def test_activity_detail_does_not_interpret_rich_markup():
 def test_header_sanitizes_and_bounds_interface_and_network_strings():
     header = _header(interface="eth0\x00; rm -rf /", network="A" * 500)
     snap = _snap()
-    text = render_header(header, snap, width=200)
+    text = render_header(header, snap, width=200, now_monotonic=0.0)
     joined = "\n".join(t.plain for t in text.renderables)
     assert "\x00" not in joined
     assert len(joined) < 600  # bounded, not a raw 500+-char dump
@@ -471,7 +535,7 @@ def test_render_footer_hides_zero_findings_only_at_wide_width_never_fabricated()
 
     stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
     snap = stats.snapshot(now_monotonic=1.0)  # known/review never set
-    narrow = render_footer(snap, width=50).plain
+    narrow = render_footer(snap, width=50, now_monotonic=1.0).plain
     assert "Known: n/a" in narrow
     assert "Review: n/a" in narrow
     assert "Seen: 0" in narrow  # a real, legitimate zero - not fabricated
@@ -481,7 +545,7 @@ def test_render_footer_scanning_state_overrides_countdown_text():
     stats = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0)
     stats.record_sweep_start(now_monotonic=5.0)
     snap = stats.snapshot(now_monotonic=999.0)
-    text = render_footer(snap, width=100).plain
+    text = render_footer(snap, width=100, now_monotonic=999.0).plain
     assert "scanning" in text.lower()
     assert "-" not in text.split("Scan:")[1][:5]  # no stray negative countdown
 
@@ -528,6 +592,6 @@ def test_dashboard_quit_hint_normal_and_small():
     snap = MonitorSnapshot.empty(passive_enabled=False)
     for width, height in ((80, 24), (35, 12), (20, 3)):
         rendered = build_dashboard(_header(quit_key_enabled=True), snap, (),
-                                   size=ConsoleDimensions(width, height))
+                                   size=ConsoleDimensions(width, height), now_monotonic=0.0)
         text = '\n'.join(_rendered_lines(rendered, width=width, height=height))
         assert 'q' in text and 'quit' in text

@@ -267,8 +267,10 @@ lanfence monitor --no-live  # force plain, append-only output (e.g. when redirec
 
 **Header**: interface, network scope, elapsed session time, LAN Fence's
 version, which discovery mechanisms are active (from actual config, not
-guessed), and the last completed sweep time (or "scanning now" while one is
-in progress). **Activity feed**: new/reappeared/disconnected devices and
+guessed), and the last completed sweep time (or "scanning now (NN%)" while
+one is in progress - an *estimate*, based on elapsed time against
+`scan.active_scan_timeout_seconds`, not a report of how many hosts have
+actually responded). **Activity feed**: new/reappeared/disconnected devices and
 findings, most recent first - a device that also produced a security
 finding gets one combined line, not two, and a routine "still online"
 sighting never adds a line at all. Every timestamp is your system's local
@@ -289,21 +291,28 @@ in LAN Fence - see [Device inventory and review](#device-inventory-and-review)):
   never counted as new.
 - **Review**: the same needs-review count `lanfence device --review-needed`
   uses (trust/snooze/investigation rules included).
-- **Scan**: time until the next scheduled active sweep, or "scanning" while
-  one is running - computed from the real scheduler, never a separate UI
-  timer. A wide enough terminal also shows this session's finding count,
-  sweep success/failure counts, and passive-listener status. An unavailable
-  statistic is always shown as such (e.g. "n/a"), never as a fabricated 0.
+- **Scan**: time until the next scheduled active sweep, or a progress bar
+  (`[████░░░░] 35%`) while one is running - the countdown is computed from
+  the real scheduler, never a separate UI timer, but the in-progress bar is
+  an estimate (elapsed time against the expected sweep duration - a quiet
+  subnet can finish faster, a busy one slower). A wide enough terminal also
+  shows this session's finding count, sweep success/failure counts, and
+  passive-listener status. An unavailable statistic is always shown as
+  such (e.g. "n/a"), never as a fabricated 0.
 
-Refreshes about once a second and never triggers a scan on its own. On a
-narrow terminal, labels shorten and lower-priority statistics drop off
-(Known/Seen/New are kept longest); a terminal too small for any
-usable layout falls back to one compact line rather than a garbled one.
-`--live` on output that isn't a real interactive terminal (a pipe, a
-redirected log file, `TERM=dumb`) falls back to plain output with one clear
-message rather than emitting raw control sequences into a file; the default
-(no `--live`/`--no-live`) auto-detects this the same way. Plain/append-only
-mode's output is unchanged from previous versions. Press **q** (no Enter needed) to exit the live dashboard; the bottom border
+Refreshes about once a second - including the in-progress scan percentage,
+which keeps advancing even while the main loop itself is blocked inside a
+real active sweep - and never triggers a scan on its own. On a narrow
+terminal, labels shorten and lower-priority statistics drop off (Known/
+Seen/New are kept longest); a terminal too small for any usable layout
+falls back to one compact line rather than a garbled one. `--live` on
+output that isn't a real interactive terminal (a pipe, a redirected log
+file, `TERM=dumb`) falls back to plain output with one clear message
+rather than emitting raw control sequences into a file; the default (no
+`--live`/`--no-live`) auto-detects this the same way. Plain/append-only
+mode prints one `scanning...` line immediately before each active sweep
+(there's no live dashboard there to show it happening) - otherwise its
+output is unchanged from previous versions. Press **q** (no Enter needed) to exit the live dashboard; the bottom border
 shows the shortcut. **Ctrl+C** also works, including in plain output mode.
 A queued quit takes effect after the current scan or delivery operation
 finishes. Terminal input settings are restored on exit. On shutdown, the dashboard

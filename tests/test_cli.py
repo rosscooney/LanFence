@@ -946,6 +946,17 @@ def test_monitor_no_live_flag_forces_append_only_output(config_path: Path, monke
     assert "monitoring (Ctrl+C to stop)" in result.output
 
 
+def test_monitor_append_only_prints_scanning_notice_immediately(config_path: Path, monkeypatch):
+    """Non-live mode has no live dashboard to show "scanning now" - it
+    must print something before the (potentially multi-second) blocking
+    sweep starts, so the process doesn't look hung."""
+
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    result = runner.invoke(app, ["monitor", "--no-live", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "scanning..." in result.output
+
+
 def test_monitor_default_is_append_only_when_not_a_tty(config_path: Path, monkeypatch):
     """CliRunner's captured stdout is never a real terminal - default
     (no --live/--no-live given) must behave like --no-live, not hang or

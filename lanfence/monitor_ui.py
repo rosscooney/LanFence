@@ -33,6 +33,7 @@ import logging
 import os
 import select
 import sys
+import time
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -151,6 +152,12 @@ class MonitorSnapshot:
     passive_enabled: bool
     passive_ok: bool
     last_sweep_local: Optional[datetime]
+    #: When the in-progress sweep started (monotonic clock) and how long
+    #: it's expected to take - see :func:`scan_progress_fraction`. Both
+    #: ``None``/``0.0`` when not currently scanning or the duration isn't
+    #: known.
+    sweep_start_monotonic: Optional[float] = None
+    expected_sweep_seconds: float = 0.0
 
     @classmethod
     def empty(cls, *, passive_enabled: bool) -> "MonitorSnapshot":
@@ -170,11 +177,21 @@ class MonitorStats:
     a timer. See each ``record_*`` method for exactly what feeds it.
     """
 
-    def __init__(self, *, scan_interval_seconds: float, passive_enabled: bool, now_monotonic: float) -> None:
+    def __init__(
+        self, *, scan_interval_seconds: float, passive_enabled: bool, now_monotonic: float,
+        expected_sweep_seconds: float = 0.0,
+    ) -> None:
         self.scan_interval_seconds = scan_interval_seconds
         self.passive_enabled = passive_enabled
         self.passive_ok = True
         self.session_start_monotonic = now_monotonic
+        #: Best-effort expected duration of one active sweep (e.g.
+        #: `scan.active_scan_timeout_seconds`, doubled if IPv6 is also
+        #: swept) - used only to estimate :func:`scan_progress_fraction`
+        #: for the live dashboard's progress bar, never to cut a sweep
+        #: short or claim it's actually done.
+        self.expected_sweep_seconds = max(0.0, expected_sweep_seconds)
+        self.sweep_start_monotonic: float | None = None
         self.seen: set[str] = set()
         self.new_macs: set[str] = set()
         self.findings_count = 0
@@ -212,9 +229,11 @@ class MonitorStats:
 
     def record_sweep_start(self, now_monotonic: float) -> None:
         self.scanning = True
+        self.sweep_start_monotonic = now_monotonic
 
     def record_sweep_end(self, *, ok: bool, now_monotonic: float) -> None:
         self.scanning = False
+        self.sweep_start_monotonic = None
         self.last_sweep_monotonic = now_monotonic
         self.last_sweep_local = local_now()
         self.next_sweep_monotonic = now_monotonic + self.scan_interval_seconds
@@ -239,10 +258,33 @@ class MonitorStats:
             scanning=self.scanning, next_sweep_seconds=next_in,
             passive_enabled=self.passive_enabled, passive_ok=self.passive_ok,
             last_sweep_local=self.last_sweep_local,
+            sweep_start_monotonic=self.sweep_start_monotonic,
+            expected_sweep_seconds=self.expected_sweep_seconds,
         )
 
 
 # --- rendering (pure functions - no I/O, no thread affinity) ---------------
+
+
+def scan_progress_fraction(snap: MonitorSnapshot, *, now_monotonic: float) -> Optional[float]:
+    """Best-effort fraction (0.0-1.0) of the in-progress active sweep's
+    expected duration elapsed so far, or ``None`` when not currently
+    scanning or the expected duration isn't known. This is an *estimate*
+    for the live dashboard's progress bar only - a real sweep can finish
+    faster or slower than `scan.active_scan_timeout_seconds` implies (a
+    quiet subnet returns early; a busy one may not) - clamped to 1.0 so it
+    never claims to be over 100% while still actually running."""
+
+    if not snap.scanning or snap.sweep_start_monotonic is None or snap.expected_sweep_seconds <= 0:
+        return None
+    elapsed = max(0.0, now_monotonic - snap.sweep_start_monotonic)
+    return min(1.0, elapsed / snap.expected_sweep_seconds)
+
+
+def _progress_bar(fraction: float, *, width: int) -> str:
+    width = max(4, width)
+    filled = round(fraction * width)
+    return "█" * filled + "░" * (width - filled)
 
 
 def format_duration(seconds: float) -> str:
@@ -276,7 +318,7 @@ def _one_line(text: str, *, width: int, style: str = "") -> Text:
     return t
 
 
-def render_header(header: HeaderInfo, snap: MonitorSnapshot, *, width: int) -> Group:
+def render_header(header: HeaderInfo, snap: MonitorSnapshot, *, width: int, now_monotonic: float) -> Group:
     compact = width < 70
     parts = [
         f"Interface: {_safe(header.interface, max_len=32)}",
@@ -299,7 +341,8 @@ def render_header(header: HeaderInfo, snap: MonitorSnapshot, *, width: int) -> G
         mechanisms.append("dhcp-server-detection")
 
     if snap.scanning:
-        sweep_state = "scanning now"
+        fraction = scan_progress_fraction(snap, now_monotonic=now_monotonic)
+        sweep_state = f"scanning now ({round(fraction * 100)}%)" if fraction is not None else "scanning now"
     elif snap.last_sweep_local is not None:
         sweep_state = f"last sweep {snap.last_sweep_local.strftime('%H:%M:%S')}"
     else:
@@ -339,14 +382,18 @@ def render_activity(entries: tuple[ActivityEntry, ...], *, height: int, width: i
     return Group(*lines)
 
 
-def render_footer(snap: MonitorSnapshot, *, width: int) -> Text:
+def render_footer(snap: MonitorSnapshot, *, width: int, now_monotonic: float) -> Text:
     def fmt(label: str, value) -> str:
         if value is None:
             return f"{label}: n/a"
         return f"{label}: {value}"
 
     if snap.scanning:
-        scan_field = "Scan: scanning"
+        fraction = scan_progress_fraction(snap, now_monotonic=now_monotonic)
+        if fraction is not None:
+            scan_field = f"Scan: [{_progress_bar(fraction, width=12)}] {round(fraction * 100)}%"
+        else:
+            scan_field = "Scan: scanning"
     elif snap.next_sweep_seconds is not None:
         scan_field = f"Scan: {format_duration(snap.next_sweep_seconds)}"
     else:
@@ -387,15 +434,20 @@ def render_minimal(snap: MonitorSnapshot, *, width: int) -> Text:
 
 def build_dashboard(
     header: HeaderInfo, snap: MonitorSnapshot, entries: tuple[ActivityEntry, ...],
-    *, size: ConsoleDimensions,
+    *, size: ConsoleDimensions, now_monotonic: float,
 ) -> Panel | Text:
     """Assemble the full bordered dashboard - a single Rich renderable
     computed fresh from ``snap``/``entries`` (both already-immutable
     snapshots) every time it's called, so it always reflects the terminal's
-    *current* size (handles resize) with no cached layout state. Falls
-    back to :func:`render_minimal` below :data:`MIN_USABLE_WIDTH`/
-    :data:`MIN_USABLE_HEIGHT` rather than attempting a layout with no room
-    for one, which would otherwise push the footer off screen."""
+    *current* size (handles resize) with no cached layout state. ``now_monotonic``
+    is likewise taken fresh at each call (see :class:`MonitorDisplay`), not
+    read from ``snap``, so the in-progress-sweep percentage keeps advancing
+    on Rich's own auto-refresh timer even while the main thread is blocked
+    inside the sweep itself and can't update ``snap`` again until it
+    returns. Falls back to :func:`render_minimal` below
+    :data:`MIN_USABLE_WIDTH`/:data:`MIN_USABLE_HEIGHT` rather than
+    attempting a layout with no room for one, which would otherwise push
+    the footer off screen."""
 
     width = max(1, size.width)
     height = max(1, size.height)
@@ -408,7 +460,7 @@ def build_dashboard(
     # footer/activity line is independently truncated to one visual row
     # (see `_one_line`/`_activity_line`), so this budget is exact, not an
     # estimate that word-wrapping could silently blow.
-    header_group = render_header(header, snap, width=width - 4)
+    header_group = render_header(header, snap, width=width - 4, now_monotonic=now_monotonic)
     header_lines = len(header_group.renderables)
     chrome = 2 + header_lines + 1 + 1 + 1
     activity_height = max(1, height - chrome)
@@ -418,7 +470,7 @@ def build_dashboard(
         Text(""),
         render_activity(entries, height=activity_height, width=width - 4),
         Text("─" * max(1, width - 4), style="dim"),
-        render_footer(snap, width=width - 4),
+        render_footer(snap, width=width - 4, now_monotonic=now_monotonic),
     )
     hint = "Press q to quit · Ctrl+C also works" if header.quit_key_enabled else "Ctrl+C to quit"
     return Panel(body, title="LAN Fence · Monitoring", subtitle=hint, border_style="green", expand=True)
@@ -555,7 +607,10 @@ class MonitorDisplay:
         self._saved_handlers: list[logging.Handler] | None = None
 
     def _render(self) -> Panel:
-        return build_dashboard(self._header, self._snapshot, self._entries, size=self._console.size)
+        return build_dashboard(
+            self._header, self._snapshot, self._entries,
+            size=self._console.size, now_monotonic=time.monotonic(),
+        )
 
     def update(self, stats: MonitorStats, log: ActivityLog, *, now_monotonic: float) -> None:
         self._snapshot = stats.snapshot(now_monotonic)

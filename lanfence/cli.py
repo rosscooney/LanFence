@@ -678,6 +678,7 @@ def monitor(
     stats = monitor_ui.MonitorStats(
         scan_interval_seconds=cfg.scan.scan_interval_seconds, passive_enabled=cfg.scan.passive,
         now_monotonic=time.monotonic(),
+        expected_sweep_seconds=cfg.scan.active_scan_timeout_seconds * (2 if cfg.scan.ipv6 else 1),
     )
     activity_log = monitor_ui.ActivityLog() if use_live else None
 
@@ -897,6 +898,12 @@ def monitor(
                 stats.record_sweep_start(now)
                 if use_live:
                     display.update(stats, activity_log, now_monotonic=time.monotonic())
+                else:
+                    # No live dashboard to show "scanning now" - say so
+                    # immediately, since the sweep below blocks for up to
+                    # scan.active_scan_timeout_seconds (doubled with IPv6)
+                    # and would otherwise look like nothing is happening.
+                    typer.echo("scanning...")
                 result = run_active_sweep(cfg, store, allowlist, signatures, interface=iface, subnet=net)
                 # Keep using the just-resolved subnet for passive sightings
                 # drained between now and the next sweep, so their coverage

@@ -15,6 +15,17 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- `lanfence monitor` now shows that an active sweep is actually running
+  instead of going quiet for up to `scan.active_scan_timeout_seconds`
+  (doubled with IPv6): the live dashboard's header/footer show a
+  progress-bar estimate (`scanning now (35%)` / `[████░░░░] 35%`, based on
+  elapsed time against the expected sweep duration) that keeps advancing
+  even while the main loop is blocked inside the sweep itself, and plain/
+  append-only mode prints an immediate `scanning...` line before each
+  sweep starts.
+
 ### Changed
 
 - Every email LAN Fence sends - a finding alert (`alerts.email`), not just
