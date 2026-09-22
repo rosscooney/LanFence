@@ -18,9 +18,8 @@ anywhere in this codebase to draw on:
   alert-cooldown bookkeeping are) - "new devices" and the activity summary
   are built from persisted ``events``, not reconstructed findings, and the
   digest never claims to show historical severity.
-- There is no durable monitor-health/alert-delivery-success record, so
-  ``Digest.monitoring_health`` always reads "Monitoring health unavailable"
-  rather than guessing.
+- There is no durable monitor-health/alert-delivery-success record, so the
+  digest does not report on it at all rather than guessing.
 
 Delivery reuses ``lanfence/alerts.py``'s transport helpers (``_post_json``,
 the same SMTP pattern) rather than duplicating HTTP/SMTP handling - digest
@@ -240,7 +239,6 @@ def format_digest_text(digest: Digest) -> str:
         f"Needs review: {digest.needs_review.total_count}   "
         f"Investigating: {digest.investigating.total_count}   "
         f"Missing always-on: {digest.missing_always_on.total_count}",
-        f"{digest.monitoring_health}",
     ]
     status_line = monitor_status_line(digest)
     if status_line:
@@ -362,7 +360,6 @@ def format_digest_html(digest: Digest) -> str:
       Investigating: <strong>{digest.investigating.total_count}</strong> &middot;
       Missing always-on: <strong>{digest.missing_always_on.total_count}</strong>
     </td></tr>
-    <tr><td style="padding-top:10px;{_EMAIL_MUTED_STYLE}font-size:13px;">{html.escape(digest.monitoring_health)}</td></tr>
     {monitor_row}
     <tr><td style="padding-top:6px;font-size:13px;">{portal_line}</td></tr>
   </table>

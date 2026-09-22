@@ -851,15 +851,11 @@ A digest reports, clearly separated:
   it's resolved): devices needing review, current investigations (with
   notes and last-seen time), and - if presence policies are in use -
   currently-missing `always-on` devices.
-- **Monitoring health**: this version has no durable record of monitor
-  uptime or alert-delivery success/failure to draw on, so this always reads
-  *"Monitoring health unavailable"* rather than guessing "healthy" - a
-  known, documented gap, not a bug.
-- **Monitor status**: separately, whether `lanfence monitor` is running on
-  this host *right now* ("Monitor: running"/"Monitor: not running"),
-  checked via the same pidfile convention as the web portal - a live,
-  present-tense check, not the historical record "Monitoring health"
-  above still doesn't have.
+- **Monitor status**: whether `lanfence monitor` is running on this host
+  *right now* ("Monitor: running"/"Monitor: not running"), checked via the
+  same pidfile convention as the web portal - a live, present-tense check.
+  This version has no durable record of monitor uptime or alert-delivery
+  success/failure over time, so the digest doesn't report on that at all.
 
 A device can legitimately appear in more than one section (e.g. new *and*
 still needing review) since each section states a different fact; within a

@@ -1049,7 +1049,6 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         f"Needs review: {digest.needs_review.total_count}   "
         f"Investigating: {digest.investigating.total_count}   "
         f"Missing always-on: {digest.missing_always_on.total_count}",
-        digest.monitoring_health,
     ]
     status_line = monitor_status_line(digest)
     if status_line:
@@ -1074,10 +1073,7 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
                   f"to {digest.window_end.isoformat(timespec='seconds')}")
     host_suffix = f"  ·  Host: {_rich_escape(digest.generated_by_host)}" if digest.generated_by_host else ""
     console.print(f"[dim]Generated: {digest.generated_at.isoformat(timespec='seconds')}{host_suffix}[/dim]")
-    console.print(
-        f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}   "
-        f"[dim]{_rich_escape(digest.monitoring_health)}[/dim]"
-    )
+    console.print(f"Known devices: {digest.known_devices}   Online now: {digest.online_devices}")
     console.print(
         f"New: {digest.activity.new_device_count}   Reappeared: {digest.activity.reappeared_device_count}   "
         f"Disconnected: {digest.activity.disconnected_device_count}   "

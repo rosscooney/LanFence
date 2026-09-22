@@ -32,6 +32,11 @@ Each release is also published to
   the default per-user config path the first time it creates
   `~/.config/lanfence/config.yaml` - it just saves it, same as any other
   save.
+- The digest's `Digest.monitoring_health` field and its "Monitoring health
+  unavailable" boilerplate line (CLI, text, and HTML digest output) are
+  gone - it never carried real information (this version still has no
+  durable monitor-uptime/alert-delivery record to report on), and that gap
+  is already noted once in `Digest.omitted_capabilities`.
 
 ## [0.5.4] - 2026-09-22
 

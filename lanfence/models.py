@@ -444,13 +444,6 @@ class Digest(BaseModel):
     ``generated_at`` (``needs_review``, ``investigating``,
     ``missing_always_on``, ``counts.known_devices``/``online_devices``) -
     the latter intentionally includes devices first seen before the window.
-
-    ``monitoring_health`` is deliberately never inferred from the absence of
-    evidence - this codebase has no durable, persisted record of monitor
-    uptime or alert-delivery success/failure to draw on, so it always reads
-    ``"Monitoring health unavailable"`` rather than guessing "healthy". A
-    future version could persist real health evidence and report it here
-    instead.
     """
 
     schema_version: int = 1
@@ -476,14 +469,12 @@ class Digest(BaseModel):
     missing_always_on: DigestSection = Field(default_factory=DigestSection)
     activity: DigestActivity = Field(default_factory=DigestActivity)
 
-    monitoring_health: str = "Monitoring health unavailable"
     #: Whether `lanfence monitor` is running right now, checked via its own
     #: pidfile (see ``lanfence/monitor_status.py``) - ``None`` if this was
-    #: never checked. Distinct from ``monitoring_health`` above: this is a
-    #: live, present-tense check ("is the process up as of right now"),
-    #: not a durable historical record of past uptime/alert-delivery
-    #: success, which this version still doesn't persist. Set by the
-    #: caller (`lanfence digest`), never computed inside
+    #: never checked. This is a live, present-tense check ("is the process
+    #: up as of right now"), not a durable historical record of past
+    #: uptime/alert-delivery success, which this version doesn't persist.
+    #: Set by the caller (`lanfence digest`), never computed inside
     #: :func:`lanfence.digest.build_digest` itself, for the same
     #: presentation-vs-database-read reason as ``portal_url`` below.
     monitor_running: bool | None = None
@@ -510,9 +501,7 @@ class Digest(BaseModel):
         are informational only and never affect this - an unchanged
         inventory alone does not make a digest nonempty, and neither does
         the other direction: a big inventory with nothing new or
-        outstanding is still an empty digest. ``monitoring_health`` being
-        unavailable is an absence of evidence, not a known problem, so it
-        never makes a digest nonempty either.
+        outstanding is still an empty digest.
         """
 
         return (

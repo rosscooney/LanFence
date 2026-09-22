@@ -430,15 +430,6 @@ def test_digest_is_empty_true_for_a_quiet_network(tmp_path: Path):
     assert digest.is_empty is True
 
 
-def test_digest_monitoring_health_always_unavailable_never_fabricated(tmp_path: Path):
-    with DeviceStore(tmp_path / "db.sqlite") as store:
-        now = _now()
-        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
-
-    assert digest.monitoring_health == "Monitoring health unavailable"
-    assert digest.is_empty is True  # unavailable health evidence never makes a digest nonempty
-
-
 def test_digest_documents_omitted_capabilities(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         now = _now()

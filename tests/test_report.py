@@ -687,12 +687,6 @@ def test_render_digest_plain_shows_window_and_counts(capsys):
     assert "phone.local" in text
 
 
-def test_render_digest_shows_monitoring_health_unavailable(capsys):
-    digest = _digest()
-    text = render_digest(digest, plain=True)
-    assert "Monitoring health unavailable" in text
-
-
 def test_render_digest_shows_omitted_count(capsys):
     entry = DigestDeviceEntry(mac="aa:bb:cc:dd:ee:ff")
     digest = _digest(needs_review=DigestSection(items=[entry], total_count=5, omitted_count=4))
