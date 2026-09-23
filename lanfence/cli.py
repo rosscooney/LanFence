@@ -323,7 +323,13 @@ def _warn_not_root(subcommand: str) -> None:
     """Print a not-root warning with copy-pasteable ways to fix it.
 
     ARP scanning/sniffing needs raw-socket access (``CAP_NET_RAW``), so
-    ``scan``/``monitor`` see little or nothing without root.
+    ``scan``/``monitor`` see little or nothing without root. Both call
+    :func:`_reexec_with_sudo` first, which transparently re-runs the
+    command under ``sudo`` (prompting for a password) whenever that's
+    actually possible - this fallback warning is reached only when it
+    wasn't (no ``sudo`` binary, no interactive terminal to prompt on, an
+    untrusted launcher location, or an explicit ``LANFENCE_NO_SUDO_REEXEC``
+    opt-out).
     """
 
     hint = "\n    ".join(_sudo_hints(subcommand))
@@ -406,6 +412,7 @@ def scan(
         cfg.scan.ipv6 = ipv6
 
     if not _is_root():
+        _reexec_with_sudo()  # replaces the process (prompting for a password) on success
         _warn_not_root("scan")
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
@@ -658,6 +665,7 @@ def monitor(
         cfg.discovery.ssdp = ssdp
 
     if not _is_root():
+        _reexec_with_sudo()  # replaces the process (prompting for a password) on success
         _warn_not_root("monitor")
 
     monitor_status.write_pid_file()

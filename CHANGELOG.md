@@ -13,6 +13,19 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Added
+
+- `scan`/`monitor` now transparently re-exec themselves under `sudo`
+  (prompting for your password right then, at a real interactive
+  terminal) when not already running as root, instead of just warning and
+  limping along without raw-socket access. Falls back to the existing
+  copy-pasteable-fix warning when elevation genuinely isn't possible (no
+  TTY to prompt on, no `sudo` binary, an untrusted launcher, or explicit
+  `LANFENCE_NO_SUDO_REEXEC` opt-out) - reuses the same re-exec mechanism
+  `lanfence link` already used.
+
 ## [0.5.6] - 2026-09-23
 
 ### Added

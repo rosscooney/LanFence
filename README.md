@@ -197,9 +197,22 @@ monitor`'s own in-progress indicator) instead of going quiet until it
 finishes; redirected/non-interactive output instead gets one plain
 `scanning...` line.
 
-`scan`/`monitor` warn (and show copy-pasteable fixes) if not run as root, since
-ARP scanning needs raw-socket access. A pipx / `pip install --user` install
-puts the `lanfence` launcher in `~/.local/bin`, which `sudo` does not see by
+`scan`/`monitor` need raw-socket access, so if you run either one without
+root, it transparently re-execs itself under `sudo` right then - prompting
+for your password at a real interactive terminal, exactly as if you'd typed
+`sudo` yourself - rather than limping along half-broken. This needs a real
+TTY to prompt on and a `sudo` binary; it silently skips straight to the
+copy-pasteable-fix warning below instead when either is missing (a script,
+a cron job, CI), when `LANFENCE_NO_SUDO_REEXEC` is set (opt out entirely),
+or when the launcher it would elevate isn't trusted (its file or directory
+is writable by another account - re-run as root explicitly if you're sure).
+Only ever attempted once per invocation - a `sudo` that "succeeds" without
+actually elevating (a non-standard wrapper, a misconfiguration) fails with
+a clear error instead of prompting forever.
+
+When that isn't possible, `scan`/`monitor` fall back to warning (with
+copy-pasteable fixes) instead. A pipx / `pip install --user` install puts
+the `lanfence` launcher in `~/.local/bin`, which `sudo` does not see by
 default - `sudo lanfence scan` then fails with "command not found". Run
 `lanfence link` once (no `sudo` needed up front - it re-execs itself under
 `sudo` and prompts for your password) to symlink the launcher onto root's

@@ -578,6 +578,27 @@ def test_scan_without_permission_reports_error_gracefully(config_path: Path):
     assert "No devices responded" in result.stdout or "devices" in result.stdout.lower()
 
 
+def test_scan_attempts_sudo_reexec_when_not_root(config_path: Path):
+    """`scan` tries to transparently elevate (prompting for a password)
+    before falling back to the plain not-root warning - see
+    _reexec_with_sudo, which is a safe no-op outside a real interactive
+    terminal (exercised for real, not mocked, by every other scan test)."""
+
+    with patch("lanfence.cli._is_root", return_value=False), \
+         patch("lanfence.cli._reexec_with_sudo") as reexec_mock:
+        result = runner.invoke(app, ["scan", "--subnet", "192.0.2.0/29", "--config", str(config_path)])
+    assert result.exit_code == 0
+    reexec_mock.assert_called_once()
+
+
+def test_scan_skips_sudo_reexec_when_already_root(config_path: Path):
+    with patch("lanfence.cli._is_root", return_value=True), \
+         patch("lanfence.cli._reexec_with_sudo") as reexec_mock:
+        result = runner.invoke(app, ["scan", "--subnet", "192.0.2.0/29", "--config", str(config_path)])
+    assert result.exit_code == 0
+    reexec_mock.assert_not_called()
+
+
 def test_check_reports_ipv6_line(config_path: Path):
     result = runner.invoke(app, ["check", "--config", str(config_path)])
     assert "ipv6:" in result.output
@@ -985,6 +1006,20 @@ def test_monitor_dhcp_server_detection_warns_when_no_approvals(tmp_path: Path, m
 
 
 # --- monitor: live dashboard / --live / --no-live --------------------------
+
+
+def test_monitor_attempts_sudo_reexec_when_not_root(config_path: Path, monkeypatch):
+    """`monitor` tries to transparently elevate (prompting for a password)
+    before falling back to the plain not-root warning - see
+    _reexec_with_sudo, which is a safe no-op outside a real interactive
+    terminal (exercised for real, not mocked, by every other monitor test)."""
+
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    with patch("lanfence.cli._is_root", return_value=False), \
+         patch("lanfence.cli._reexec_with_sudo") as reexec_mock:
+        result = runner.invoke(app, ["monitor", "--no-live", "--config", str(config_path)])
+    assert result.exit_code == 0
+    reexec_mock.assert_called_once()
 
 
 def test_monitor_no_live_flag_forces_append_only_output(config_path: Path, monkeypatch):
