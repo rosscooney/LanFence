@@ -724,7 +724,15 @@ def monitor(
         # (unchanged by this feature) exactly as it was.
         if activity_log is None:
             return
-        identity = hostname or mac
+        # The name we gave it (allowlist) always wins when set, same
+        # preference order a finding-based activity line already uses
+        # (see `_finding_identity`) - previously this fell straight to
+        # hostname, so a trusted device's DISCONNECTED line showed its raw
+        # hostname while its RETURNED line (when that reappearance itself
+        # produced an allowlisted-device finding) showed the allowlist
+        # name instead, inconsistently.
+        allow_entry = allowlist.match(mac)
+        identity = (allow_entry.name if allow_entry else None) or hostname or mac
         detail = f"{identity} · {ip}" if ip else identity
         activity_log.add(monitor_ui.ActivityEntry(timestamp=monitor_ui.local_now(), level="info", label=label, detail=detail))
 

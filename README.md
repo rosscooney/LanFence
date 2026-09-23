@@ -279,9 +279,13 @@ one is in progress - an *estimate*, based on elapsed time against
 actually responded). **Activity feed**: new/reappeared/disconnected devices and
 findings, most recent first - a device that also produced a security
 finding gets one combined line, not two, and a routine "still online"
-sighting never adds a line at all. Every timestamp is your system's local
-time. A repeated identical operational error (e.g. a failing sweep) is
-shown once with a growing count rather than flooding the feed.
+sighting never adds a line at all. A trusted device's identity is always
+the name you gave it (its allowlist name) when it has one, consistently
+across DISCONNECTED and RETURNED lines alike - falling back to its
+hostname, then its MAC, only when untrusted. Every timestamp is your
+system's local time. A repeated identical operational error (e.g. a
+failing sweep) is shown once with a growing count rather than flooding
+the feed.
 
 **Footer statistics** (a device is identified the same way everywhere else
 in LAN Fence - see [Device inventory and review](#device-inventory-and-review)):

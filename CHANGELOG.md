@@ -39,6 +39,15 @@ Each release is also published to
   in-progress sweep), or one plain `scanning...` line otherwise. Table
   output only, not `--format json`.
 
+### Fixed
+
+- `lanfence monitor`'s live activity feed showed a trusted device's raw
+  hostname on its DISCONNECTED line but its allowlist name on its
+  RETURNED line (when that reappearance happened to produce an
+  allowlisted-device finding) - the same device, two different labels.
+  DISCONNECTED (and any RETURNED line not tied to a finding) now prefers
+  the allowlist name too, consistently.
+
 ## [0.5.5] - 2026-09-22
 
 ### Added

@@ -2642,6 +2642,70 @@ def test_monitor_queued_passive_sighting_prevents_false_disconnect_reappear(
     assert [e.event_type for e in events] == ["new_device"]
 
 
+def test_monitor_disconnect_activity_line_prefers_allowlist_name_over_hostname(tmp_path: Path, monkeypatch):
+    """A trusted device's DISCONNECTED line must show the name we gave it
+    (allowlist), the same preference a RETURNED line already gets when its
+    reappearance produces an allowlisted-device finding - previously
+    DISCONNECTED (which never produces a finding) fell straight to the raw
+    hostname instead, showing a different identity for the same device."""
+
+    db_path = tmp_path / "lanfence.db"
+    allowlist_path = tmp_path / "allowlist.yaml"
+    allowlist_path.write_text(
+        "allow:\n  - mac: aa:bb:cc:dd:ee:ff\n    name: Emily Work Phone\n", encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(db_path),
+            "allowlist_file": str(allowlist_path),
+            "scan": {
+                "scan_interval_seconds": 0.001, "resolve_hostnames": False, "passive": False,
+                "interface": "eth0", "subnet": "10.0.0.0/24",
+                "offline_grace_seconds": 0, "offline_after_missed_scans": 1,
+                "offline_retry_probe": False,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    old = _now() - timedelta(hours=1)
+    with DeviceStore(db_path) as store:
+        store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname="Galaxy-A33-5G", vendor=None, seen_at=old,
+            interface="eth0", subnet="10.0.0.0/24",
+        )
+
+    monkeypatch.setattr(
+        "lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: [],
+    )
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: "10.0.0.0/24")
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr("lanfence.cli.monitor_ui.should_use_live", lambda explicit, console: (True, None))
+
+    captured_activity = {}
+    from lanfence import monitor_ui as monitor_ui_module
+
+    original_display_init = monitor_ui_module.MonitorDisplay.__init__
+
+    def capturing_init(self, header, activity_log, **kwargs):
+        captured_activity["log"] = activity_log
+        kwargs["console"] = monitor_ui_module.make_console()
+        original_display_init(self, header, activity_log, **kwargs)
+
+    monkeypatch.setattr("lanfence.cli.monitor_ui.MonitorDisplay.__init__", capturing_init)
+
+    result = runner.invoke(app, ["monitor", "--no-ipv6", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+
+    entries = captured_activity["log"].snapshot()
+    disconnected = [e for e in entries if e.label == "DISCONNECTED"]
+    assert len(disconnected) == 1
+    assert "Emily Work Phone" in disconnected[0].detail
+    assert "Galaxy-A33-5G" not in disconnected[0].detail
+
+
 def test_monitor_reports_dropped_observations_when_passive_queue_overflows(tmp_path: Path, monkeypatch):
     """A burst larger than scan.passive_queue_maxsize must not block the
     capture thread or silently vanish - it's counted and surfaced as a
