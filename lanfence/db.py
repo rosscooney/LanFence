@@ -1783,7 +1783,7 @@ class DeviceStore:
         """
 
         rows = self._conn.execute(
-            "SELECT d.mac, d.ip, d.hostname, d.last_seen, d.seen_via_ipv4, d.seen_via_ipv6, "
+            "SELECT d.mac, d.ip, d.hostname, d.vendor, d.last_seen, d.seen_via_ipv4, d.seen_via_ipv6, "
             "d.last_interface, d.ipv4_subnet, p.offline_after_seconds "
             "FROM devices d JOIN device_presence p ON p.mac = d.mac "
             "WHERE d.status = 'offline' AND p.policy = 'always-on' AND p.availability_alerted = 0"
@@ -1801,7 +1801,7 @@ class DeviceStore:
             if elapsed >= effective:
                 due.append({
                     "mac": row["mac"], "ip": row["ip"], "hostname": row["hostname"],
-                    "offline_after_seconds": effective,
+                    "vendor": row["vendor"], "offline_after_seconds": effective,
                 })
 
         for item in due:

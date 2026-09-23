@@ -29,6 +29,25 @@ def test_format_findings_text_includes_heading_and_fields():
     assert "Recommendation: do something" in text
 
 
+def test_format_findings_text_lists_full_evidence_not_just_mac():
+    finding = Finding(
+        mac="aa:bb:cc:dd:ee:ff", title="Always-on device has been absent longer than expected",
+        severity="medium", kind="availability", rationale="absent too long",
+        recommendation="check it",
+        evidence=[
+            "MAC: aa:bb:cc:dd:ee:ff", "IP: 10.0.0.5", "Hostname: Galaxy-A33-5G", "Vendor: Samsung",
+            "Trusted as: Emily Work Phone", "Owner: Emily", "Location: Home office",
+        ],
+    )
+    text = alerts._format_findings_text([finding], heading="LAN Fence")
+    assert "IP: 10.0.0.5" in text
+    assert "Hostname: Galaxy-A33-5G" in text
+    assert "Vendor: Samsung" in text
+    assert "Trusted as: Emily Work Phone" in text
+    assert "Owner: Emily" in text
+    assert "Location: Home office" in text
+
+
 def test_format_findings_text_no_heading():
     text = alerts._format_findings_text([_finding()], heading=None)
     assert "LAN Fence:" not in text
@@ -137,6 +156,40 @@ def test_format_findings_html_escapes_hostile_finding_data():
     assert "<script>alert(1)</script>" not in html_body
     assert "<img src=x onerror=alert(1)>" not in html_body
     assert "&lt;script&gt;" in html_body
+
+
+def test_format_findings_html_lists_full_evidence_not_just_mac():
+    finding = Finding(
+        mac="aa:bb:cc:dd:ee:ff", title="Always-on device has been absent longer than expected",
+        severity="medium", kind="availability", rationale="absent too long",
+        recommendation="check it",
+        evidence=[
+            "MAC: aa:bb:cc:dd:ee:ff", "IP: 10.0.0.5", "Hostname: Galaxy-A33-5G", "Vendor: Samsung",
+            "Trusted as: Emily Work Phone", "Owner: Emily", "Location: Home office",
+        ],
+    )
+    html_body = alerts.format_findings_html([finding])
+    assert "IP: 10.0.0.5" in html_body
+    assert "Hostname: Galaxy-A33-5G" in html_body
+    assert "Vendor: Samsung" in html_body
+    assert "Trusted as: Emily Work Phone" in html_body
+    assert "Owner: Emily" in html_body
+    assert "Location: Home office" in html_body
+
+
+def test_format_findings_html_escapes_hostile_evidence_line():
+    finding = Finding(
+        mac="aa:bb:cc:dd:ee:ff", title="Unknown device connected", severity="high",
+        evidence=["Hostname: <script>alert(1)</script>"],
+    )
+    html_body = alerts.format_findings_html([finding])
+    assert "<script>alert(1)</script>" not in html_body
+    assert "&lt;script&gt;" in html_body
+
+
+def test_format_findings_html_omits_evidence_list_when_empty():
+    html_body = alerts.format_findings_html([_finding()])
+    assert "<ul" not in html_body
 
 
 # --- email -------------------------------------------------------------

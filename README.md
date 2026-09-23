@@ -1058,6 +1058,16 @@ body either way. Any value that could come from an untrusted device (a
 finding's title/rationale, a hostname) is HTML-escaped before it's ever put
 in the email body.
 
+A finding alert (and the same shared formatting under Slack/Discord/Teams/
+ntfy) lists a device-scoped finding's *full* evidence, not just its MAC:
+IP, hostname, vendor, its allowlist trust label if it's trusted, and any
+operator-set metadata you've recorded for it (owner/purpose/group/
+location - see [Device inventory metadata](#device-inventory-metadata)
+below) - each shown only when actually set, so a device nobody's
+annotated doesn't get a wall of blank fields. SMS (Twilio) stays a
+length-capped one-liner (MAC only) - there's no room for more within a
+billed segment.
+
 **Config file location**: LAN Fence has no other default *writable* config
 file (every other command treats a missing `--config` as "built-in
 defaults, touch no file"), so `setup` uses a conventional per-user path,

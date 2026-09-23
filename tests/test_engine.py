@@ -24,7 +24,7 @@ from lanfence.engine import (
     run_active_sweep,
 )
 from lanfence.fingerprint import SignatureSet
-from lanfence.models import Device, Finding
+from lanfence.models import Device, DeviceMetadata, Finding
 
 
 def _now():
@@ -54,6 +54,31 @@ def test_build_findings_new_unknown_device_defaults_medium():
     assert len(findings) == 1
     assert findings[0].severity == "medium"
     assert findings[0].mac == "aa:bb:cc:dd:ee:ff"
+
+
+def test_build_findings_new_device_evidence_includes_metadata_when_set():
+    metadata = DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", owner="Emily", purpose="Work phone", location="Home office")
+    device = _device(hostname="Galaxy-A33-5G", vendor="Samsung", metadata=metadata)
+    findings = build_findings(device, "new_device", [])
+    evidence = findings[0].evidence
+    assert "Hostname: Galaxy-A33-5G" in evidence
+    assert "Vendor: Samsung" in evidence
+    assert "Owner: Emily" in evidence
+    assert "Purpose: Work phone" in evidence
+    assert "Location: Home office" in evidence
+    assert not any(e.startswith("Group:") for e in evidence)  # unset field, not shown as "[unknown]"
+
+
+def test_build_findings_new_device_evidence_omits_metadata_when_unset():
+    findings = build_findings(_device(), "new_device", [])
+    evidence = findings[0].evidence
+    assert not any(e.startswith(("Owner:", "Purpose:", "Group:", "Location:")) for e in evidence)
+
+
+def test_build_findings_allowlisted_device_evidence_includes_trust_label():
+    device = _device(allowlisted=True, allowlist_name="Emily Work Phone")
+    findings = build_findings(device, "new_device", [])
+    assert "Trusted as: Emily Work Phone" in findings[0].evidence
 
 
 def test_build_findings_new_allowlisted_device_is_info():
@@ -182,6 +207,53 @@ def test_process_sighting_new_device_and_allowlist_downgrade(tmp_path: Path, mon
     assert device.allowlisted is True
     assert device.allowlist_name == "Trusted Thing"
     assert findings[0].severity == "info"
+    store.close()
+
+
+def test_process_sighting_new_device_finding_includes_operator_metadata(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("lanfence.engine.scanner.resolve_hostname", lambda ip, timeout=1.0: None)
+    cfg = Config()
+    store = DeviceStore(tmp_path / "db.sqlite")
+    store.update_device_metadata(
+        "aa:bb:cc:dd:ee:ff", owner="Emily", location="Home office", updated_at=_now(),
+    )
+    allowlist = Allowlist.load(None)
+    signatures = SignatureSet.load()
+
+    device, event_type, findings = process_sighting(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=_now(),
+        store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
+    )
+    assert event_type == "new_device"
+    assert "Owner: Emily" in findings[0].evidence
+    assert "Location: Home office" in findings[0].evidence
+    store.close()
+
+
+def test_process_sighting_routine_refresh_skips_metadata_lookup(tmp_path: Path, monkeypatch):
+    """No finding can result from a routine still-online refresh
+    (event_type=None) - the metadata query is skipped entirely rather
+    than fetched and discarded."""
+
+    monkeypatch.setattr("lanfence.engine.scanner.resolve_hostname", lambda ip, timeout=1.0: None)
+    cfg = Config()
+    store = DeviceStore(tmp_path / "db.sqlite")
+    allowlist = Allowlist.load(None)
+    signatures = SignatureSet.load()
+    t0 = _now()
+    process_sighting(
+        mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=t0,
+        store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
+    )
+
+    with patch.object(store, "get_device_metadata") as metadata_mock:
+        device, event_type, findings = process_sighting(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=t0 + timedelta(seconds=1),
+            store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
+        )
+    assert event_type is None
+    assert findings == []
+    metadata_mock.assert_not_called()
     store.close()
 
 
@@ -764,6 +836,43 @@ def test_run_active_sweep_availability_finding_after_delay_elapses(tmp_path: Pat
     availability = [f for f in second.findings if f.kind == "availability"]
     assert len(availability) == 1
     assert availability[0].severity == "medium"
+
+
+def test_evaluate_availability_evidence_includes_vendor_and_metadata(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    v4 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    cfg = Config()
+    cfg.scan.ipv6 = False
+    cfg.scan.offline_grace_seconds = 0
+    cfg.scan.offline_after_missed_scans = 1
+    cfg.scan.offline_retry_probe = False
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[v4]):
+        store = DeviceStore(db_path)
+        t0 = _now()
+        run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                          interface="eth0", subnet="192.168.1.0/24")
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=t0)
+        store.set_offline_after("aa:bb:cc:dd:ee:ff", 0.0, updated_at=t0)
+        store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", owner="Emily", location="Home office", updated_at=t0,
+        )
+        store.close()
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch("lanfence.engine.utcnow", return_value=t0 + timedelta(seconds=1)):
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+
+    availability = [f for f in result.findings if f.kind == "availability"]
+    assert len(availability) == 1
+    assert "IP: 192.168.1.5" in availability[0].evidence
+    assert "Owner: Emily" in availability[0].evidence
+    assert "Location: Home office" in availability[0].evidence
 
 
 # --- filter_rate_limited ------------------------------------------------

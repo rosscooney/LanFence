@@ -37,6 +37,43 @@ def _top_severity(matches: list[SignatureMatch]) -> str | None:
     return max((m.severity for m in matches), key=lambda s: _SEVERITY_RANK[s])
 
 
+def _device_evidence_lines(
+    *, mac: str, ip: str | None, hostname: str | None, vendor: str | None,
+    allowlisted: bool = False, allowlist_name: str | None = None,
+    metadata: DeviceMetadata | None = None,
+) -> list[str]:
+    """Standard identifying context for a device-scoped finding's evidence
+    list - MAC/IP/hostname/vendor always, plus a trust label and any
+    operator-set metadata (owner/purpose/group/location - see
+    :class:`~lanfence.models.DeviceMetadata`), each included only when
+    actually set, so a device nobody has annotated doesn't get a wall of
+    "[unknown]" lines. Shared by every device-scoped finding
+    (:func:`build_findings`, :func:`evaluate_availability`, and
+    ``process_sighting``'s "recovered" finding) so an operator reading a
+    finding - in an alert email or anywhere else evidence is shown - gets
+    enough context to act on it without a separate lookup.
+    """
+
+    lines = [
+        f"MAC: {mac}",
+        f"IP: {ip or '[unknown]'}",
+        f"Hostname: {hostname or '[unknown]'}",
+        f"Vendor: {vendor or '[unknown]'}",
+    ]
+    if allowlisted:
+        lines.append(f"Trusted as: {allowlist_name or mac}")
+    if metadata is not None:
+        if metadata.owner:
+            lines.append(f"Owner: {metadata.owner}")
+        if metadata.purpose:
+            lines.append(f"Purpose: {metadata.purpose}")
+        if metadata.group:
+            lines.append(f"Group: {metadata.group}")
+        if metadata.location:
+            lines.append(f"Location: {metadata.location}")
+    return lines
+
+
 def build_findings(device: Device, event_type: EventType | None, matches: list[SignatureMatch]) -> list[Finding]:
     """Plain-language findings for one device's lifecycle transition.
 
@@ -69,12 +106,10 @@ def build_findings(device: Device, event_type: EventType | None, matches: list[S
         return []
 
     top = _top_severity(matches)
-    evidence = [
-        f"MAC: {device.mac}",
-        f"IP: {device.ip or '[unknown]'}",
-        f"Hostname: {device.hostname or '[unknown]'}",
-        f"Vendor: {device.vendor or '[unknown]'}",
-    ]
+    evidence = _device_evidence_lines(
+        mac=device.mac, ip=device.ip, hostname=device.hostname, vendor=device.vendor,
+        allowlisted=device.allowlisted, allowlist_name=device.allowlist_name, metadata=device.metadata,
+    )
     evidence.extend(m.evidence for m in matches)
     rationale = " ".join(m.description for m in matches) or (
         "No built-in fingerprint signature matched this device; its identity is unverified."
@@ -234,6 +269,10 @@ def process_sighting(
 
     allow_entry = allowlist.match(mac)
     presence = store.get_presence(mac)
+    # Only fetched when a finding could actually result (build_findings'
+    # own no-op guard below) - skips the extra query on the overwhelmingly
+    # common "still online, nothing happened" refresh.
+    metadata = store.get_device_metadata(mac) if event_type not in (None, "disconnected") else None
     device = device.model_copy(
         update={
             "allowlisted": allow_entry is not None,
@@ -241,6 +280,7 @@ def process_sighting(
             "fingerprints": [m.category for m in matches],
             "presence_policy": presence.policy,
             "offline_after_seconds": presence.offline_after_seconds,
+            "metadata": metadata,
         }
     )
     findings = build_findings(device, event_type, matches)
@@ -259,7 +299,11 @@ def process_sighting(
                     "long enough to trigger an availability alert; it has now reappeared."
                 ),
                 recommendation="No action needed.",
-                evidence=[f"MAC: {device.mac}", f"IP: {device.ip or '[unknown]'}"],
+                evidence=_device_evidence_lines(
+                    mac=device.mac, ip=device.ip, hostname=device.hostname, vendor=device.vendor,
+                    allowlisted=device.allowlisted, allowlist_name=device.allowlist_name,
+                    metadata=device.metadata,
+                ),
             )
         )
         store.set_availability_alerted(mac, False, updated_at=seen_at)
@@ -292,6 +336,8 @@ def evaluate_availability(
         ipv4_covered=ipv4_covered, ipv4_subnet=ipv4_subnet,
         ipv6_covered=ipv6_covered, interface=interface,
     )
+    # One bulk query for every due device's metadata, not one per device.
+    metadata_by_mac = store.device_metadata_for_macs([item["mac"] for item in due])
     findings: list[Finding] = []
     for item in due:
         delay = item["offline_after_seconds"]
@@ -306,10 +352,10 @@ def evaluate_availability(
                     f"least {delay:.0f}s since it was confirmed offline."
                 ),
                 recommendation="Check that this device is powered on and connected.",
-                evidence=[
-                    f"MAC: {item['mac']}", f"IP: {item['ip'] or '[unknown]'}",
-                    f"Hostname: {item['hostname'] or '[unknown]'}",
-                ],
+                evidence=_device_evidence_lines(
+                    mac=item["mac"], ip=item["ip"], hostname=item["hostname"], vendor=item["vendor"],
+                    metadata=metadata_by_mac.get(item["mac"]),
+                ),
             )
         )
     return findings

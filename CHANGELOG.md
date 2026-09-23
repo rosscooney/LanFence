@@ -15,6 +15,20 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- A device-scoped finding's full evidence (IP, hostname, vendor, its
+  allowlist trust label, and any operator-set owner/purpose/group/
+  location metadata - each shown only when actually set) is now listed
+  in finding alert emails and the equivalent Slack/Discord/Teams/ntfy
+  messages, not just its bare MAC - the same bullet-point evidence
+  listing `lanfence`'s own console renderer already used. Twilio SMS is
+  unchanged (still a length-capped MAC-only line - no room for more in a
+  billed segment). New `engine._device_evidence_lines` (shared by every
+  device-scoped finding); `evaluate_availability`'s finding (e.g. "has
+  been absent longer than expected") now also carries vendor and
+  metadata, not just MAC/IP/hostname.
+
 ### Changed
 
 - `lanfence scan` now prints its "single, short active sweep" note

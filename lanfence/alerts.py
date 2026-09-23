@@ -86,7 +86,17 @@ def send_syslog(findings: list[Finding], cfg: AlertConfig) -> None:
 
 
 def _format_findings_text(findings: list[Finding], *, heading: str | None) -> str:
-    """A multi-line human-readable summary, shared by every text-based channel."""
+    """A multi-line human-readable summary, shared by every text-based channel.
+
+    ``finding.evidence`` (MAC/IP/hostname/vendor, plus operator-set
+    owner/purpose/group/location when set - see
+    :func:`lanfence.engine._device_evidence_lines` - and any signature-
+    match detail) is listed in full, the same bullet-point convention
+    `lanfence`'s own console renderer already uses
+    (:func:`lanfence.report._render_findings`) - previously this showed
+    only the bare MAC, which isn't enough to act on without a separate
+    lookup.
+    """
 
     lines: list[str] = []
     if heading:
@@ -99,6 +109,8 @@ def _format_findings_text(findings: list[Finding], *, heading: str | None) -> st
             lines.append(f"  {finding.rationale}")
         if finding.recommendation:
             lines.append(f"  Recommendation: {finding.recommendation}")
+        for line in finding.evidence:
+            lines.append(f"    • {line}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -133,6 +145,19 @@ def _html_finding_panel(finding: Finding) -> str:
         f"Recommendation: {html.escape(finding.recommendation)}</td></tr>"
         if finding.recommendation else ""
     )
+    # finding.evidence (MAC/IP/hostname/vendor, plus operator-set
+    # owner/purpose/group/location when set, and any signature-match
+    # detail - see lanfence.engine._device_evidence_lines) listed in full,
+    # the same bullet-point convention the console renderer already uses
+    # (lanfence.report._render_findings) - previously this panel showed
+    # only the bare MAC/Subject line above.
+    evidence_row = ""
+    if finding.evidence:
+        items = "".join(f'<li style="margin:2px 0;">{html.escape(line)}</li>' for line in finding.evidence)
+        evidence_row = (
+            f'<tr><td style="padding-top:6px;font-size:13px;{branding.EMAIL_MUTED_STYLE}">'
+            f'<ul style="margin:4px 0 0;padding-left:18px;">{items}</ul></td></tr>'
+        )
     return f"""
 <tr><td style="padding:12px 0 0;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_PANEL_STYLE}border-left:4px solid {color};">
@@ -141,6 +166,7 @@ def _html_finding_panel(finding: Finding) -> str:
     <tr><td style="padding-top:4px;font-size:13px;{branding.EMAIL_MUTED_STYLE}">{subject_label}: {html.escape(_finding_subject(finding))}</td></tr>
     {rationale_row}
     {recommendation_row}
+    {evidence_row}
   </table>
 </td></tr>
 """
