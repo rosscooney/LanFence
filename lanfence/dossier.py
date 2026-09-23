@@ -82,14 +82,11 @@ class DeviceDossier(BaseModel):
 
     @property
     def label(self) -> str:
-        """The best available short human label for this device - operator-
-        provided context first (it's what a human actually calls the
-        device), then the allowlist name, then the observed hostname,
-        finally the bare MAC. Never a fabricated name."""
+        """The best available short human label for this device - the
+        allowlist name first (it's what a human actually calls the
+        device), then the observed hostname, finally the bare MAC. Never a
+        fabricated name."""
 
-        metadata = self.device.metadata
-        if metadata and metadata.purpose:
-            return metadata.purpose
         if self.device.allowlist_name:
             return self.device.allowlist_name
         if self.device.hostname:

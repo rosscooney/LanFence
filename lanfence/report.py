@@ -396,9 +396,8 @@ def render_device_inventory(
     lets the empty case say whether the database itself is empty or a filter
     just matched nothing - passing ``None`` treats ``devices`` as unfiltered.
 
-    ``show_metadata`` adds owner/purpose/group/location columns - kept
-    opt-in so the default table stays compact for operators who don't use
-    those fields.
+    ``show_metadata`` adds owner/location columns - kept opt-in so the
+    default table stays compact for operators who don't use those fields.
     """
 
     empty_message = (
@@ -419,10 +418,7 @@ def render_device_inventory(
         )
         if show_metadata:
             m = d.metadata or DeviceMetadata(mac=d.mac)
-            line += (
-                f"  owner={m.owner or '-'}  purpose={m.purpose or '-'}  "
-                f"group={m.group or '-'}  location={m.location or '-'}"
-            )
+            line += f"  owner={m.owner or '-'}  location={m.location or '-'}"
         lines.append(line)
     text = "\n".join(lines)
     if plain or not _RICH:
@@ -445,8 +441,6 @@ def render_device_inventory(
     table.add_column("Presence")
     if show_metadata:
         table.add_column("Owner", overflow="fold")
-        table.add_column("Purpose", overflow="fold")
-        table.add_column("Group", overflow="fold")
         table.add_column("Location", overflow="fold")
     table.add_column("Last seen")
     for d in devices:
@@ -462,14 +456,7 @@ def render_device_inventory(
         ]
         if show_metadata:
             m = d.metadata or DeviceMetadata(mac=d.mac)
-            row.extend(
-                [
-                    _rich_escape(m.owner or "-"),
-                    _rich_escape(m.purpose or "-"),
-                    _rich_escape(m.group or "-"),
-                    _rich_escape(m.location or "-"),
-                ]
-            )
+            row.extend([_rich_escape(m.owner or "-"), _rich_escape(m.location or "-")])
         row.append(format_datetime(d.last_seen))
         table.add_row(*row)
     console.print(table)
@@ -843,8 +830,6 @@ def render_device_detail(
     lines.append("")
     lines.append("Inventory details (user-provided, not derived from observed traffic):")
     lines.append(f"  Owner:      {metadata.owner or 'Not set'}")
-    lines.append(f"  Purpose:    {metadata.purpose or 'Not set'}")
-    lines.append(f"  Group:      {metadata.group or 'Not set'}")
     lines.append(f"  Location:   {metadata.location or 'Not set'}")
 
     lines.append("")
@@ -910,8 +895,6 @@ def render_device_detail(
             "\n".join(
                 [
                     f"Owner:      {_rich_escape(metadata.owner or 'Not set')}",
-                    f"Purpose:    {_rich_escape(metadata.purpose or 'Not set')}",
-                    f"Group:      {_rich_escape(metadata.group or 'Not set')}",
                     f"Location:   {_rich_escape(metadata.location or 'Not set')}",
                 ]
             ),
@@ -1019,10 +1002,7 @@ def _section_lines(title: str, section: DigestSection) -> list[str]:
         lines.append("  (none)")
     for entry in section.items:
         label = entry.name or entry.mac
-        context = ""
-        if entry.owner or entry.group:
-            bits = [b for b in (entry.owner, entry.group) if b]
-            context = f"  ({', '.join(bits)})"
+        context = f"  ({entry.owner})" if entry.owner else ""
         line = f"  - {label} ({entry.mac})  {entry.ip or '-':<15}  {entry.hostname or '[unknown]'}{context}"
         if entry.services_summary:
             line += f"  advertises: {entry.services_summary}"
@@ -1107,14 +1087,13 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         table.add_column("IP")
         table.add_column("Hostname", overflow="fold")
         table.add_column("Owner", overflow="fold")
-        table.add_column("Group", overflow="fold")
         if show_services:
             table.add_column("Advertises", overflow="fold")
         for entry in section.items:
             row = [
                 entry.mac, _rich_escape(entry.name or "-"), entry.ip or "-",
                 _rich_escape(entry.hostname or "[unknown]"),
-                _rich_escape(entry.owner or "-"), _rich_escape(entry.group or "-"),
+                _rich_escape(entry.owner or "-"),
             ]
             if show_services:
                 row.append(_rich_escape(entry.services_summary or "-"))

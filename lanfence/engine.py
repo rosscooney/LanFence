@@ -43,32 +43,29 @@ def _device_evidence_lines(
     metadata: DeviceMetadata | None = None,
 ) -> list[str]:
     """Standard identifying context for a device-scoped finding's evidence
-    list - MAC/IP/hostname/vendor always, plus a trust label and any
-    operator-set metadata (owner/purpose/group/location - see
-    :class:`~lanfence.models.DeviceMetadata`), each included only when
-    actually set, so a device nobody has annotated doesn't get a wall of
-    "[unknown]" lines. Shared by every device-scoped finding
-    (:func:`build_findings`, :func:`evaluate_availability`, and
+    list - the name we gave it first (its allowlist name, when trusted),
+    then MAC/IP/hostname/vendor, then any operator-set metadata (owner/
+    location - see :class:`~lanfence.models.DeviceMetadata`), each
+    included only when actually set, so a device nobody has annotated
+    doesn't get a wall of "[unknown]" lines. Shared by every device-scoped
+    finding (:func:`build_findings`, :func:`evaluate_availability`, and
     ``process_sighting``'s "recovered" finding) so an operator reading a
     finding - in an alert email or anywhere else evidence is shown - gets
     enough context to act on it without a separate lookup.
     """
 
-    lines = [
+    lines = []
+    if allowlisted:
+        lines.append(f"Name: {allowlist_name or mac}")
+    lines.extend([
         f"MAC: {mac}",
         f"IP: {ip or '[unknown]'}",
         f"Hostname: {hostname or '[unknown]'}",
         f"Vendor: {vendor or '[unknown]'}",
-    ]
-    if allowlisted:
-        lines.append(f"Trusted as: {allowlist_name or mac}")
+    ])
     if metadata is not None:
         if metadata.owner:
             lines.append(f"Owner: {metadata.owner}")
-        if metadata.purpose:
-            lines.append(f"Purpose: {metadata.purpose}")
-        if metadata.group:
-            lines.append(f"Group: {metadata.group}")
         if metadata.location:
             lines.append(f"Location: {metadata.location}")
     return lines

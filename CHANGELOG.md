@@ -26,6 +26,24 @@ Each release is also published to
   `LANFENCE_NO_SUDO_REEXEC` opt-out) - reuses the same re-exec mechanism
   `lanfence link` already used.
 
+### Changed
+
+- A finding's evidence list now leads with its name (the allowlist name,
+  when it's trusted) instead of repeating the MAC on its own line right
+  above the evidence - the MAC was already the first evidence bullet, so
+  that line was pure duplication. `Trusted as: X` is now `Name: X`.
+
+### Removed
+
+- The device metadata `purpose` and `group` fields are gone - `lanfence
+  device`'s `--purpose`/`--group`/`--clear-purpose`/`--clear-group`
+  options and matching filters, the web portal's Purpose/Group form
+  fields, and both columns from every table/JSON/email/digest rendering.
+  Only `owner`/`location` remain. New databases no longer create the
+  underlying `purpose`/`group_name` columns; an existing database keeps
+  them on disk, simply unused from now on, rather than a destructive
+  migration.
+
 ## [0.5.6] - 2026-09-23
 
 ### Added

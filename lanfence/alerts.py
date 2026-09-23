@@ -88,14 +88,14 @@ def send_syslog(findings: list[Finding], cfg: AlertConfig) -> None:
 def _format_findings_text(findings: list[Finding], *, heading: str | None) -> str:
     """A multi-line human-readable summary, shared by every text-based channel.
 
-    ``finding.evidence`` (MAC/IP/hostname/vendor, plus operator-set
-    owner/purpose/group/location when set - see
-    :func:`lanfence.engine._device_evidence_lines` - and any signature-
-    match detail) is listed in full, the same bullet-point convention
-    `lanfence`'s own console renderer already uses
-    (:func:`lanfence.report._render_findings`) - previously this showed
-    only the bare MAC, which isn't enough to act on without a separate
-    lookup.
+    ``finding.evidence`` (the device's name - its allowlist name, when
+    trusted - MAC/IP/hostname/vendor, plus operator-set owner/purpose/
+    group/location when set - see :func:`lanfence.engine._device_evidence_lines`
+    - and any signature-match detail) is listed in full, the same
+    bullet-point convention `lanfence`'s own console renderer already
+    uses (:func:`lanfence.report._render_findings`) - previously this
+    showed only the bare MAC on its own line above the evidence list,
+    which duplicated it.
     """
 
     lines: list[str] = []
@@ -104,7 +104,6 @@ def _format_findings_text(findings: list[Finding], *, heading: str | None) -> st
         lines.append("")
     for finding in findings:
         lines.append(f"[{finding.severity.upper()}] {finding.title}")
-        lines.append(f"  {'MAC' if finding.mac else 'Subject'}: {_finding_subject(finding)}")
         if finding.rationale:
             lines.append(f"  {finding.rationale}")
         if finding.recommendation:
@@ -135,7 +134,6 @@ _SEVERITY_COLORS = {"high": "#f87171", "medium": "#fbbf24", "info": branding.COL
 
 def _html_finding_panel(finding: Finding) -> str:
     color = _SEVERITY_COLORS.get(finding.severity, branding.COLORS["muted"])
-    subject_label = "MAC" if finding.mac else "Subject"
     rationale_row = (
         f'<tr><td style="padding-top:8px;font-size:13px;">{html.escape(finding.rationale)}</td></tr>'
         if finding.rationale else ""
@@ -145,12 +143,13 @@ def _html_finding_panel(finding: Finding) -> str:
         f"Recommendation: {html.escape(finding.recommendation)}</td></tr>"
         if finding.recommendation else ""
     )
-    # finding.evidence (MAC/IP/hostname/vendor, plus operator-set
-    # owner/purpose/group/location when set, and any signature-match
-    # detail - see lanfence.engine._device_evidence_lines) listed in full,
-    # the same bullet-point convention the console renderer already uses
-    # (lanfence.report._render_findings) - previously this panel showed
-    # only the bare MAC/Subject line above.
+    # finding.evidence (the device's name - its allowlist name, when
+    # trusted - MAC/IP/hostname/vendor, plus operator-set owner/purpose/
+    # group/location when set, and any signature-match detail - see
+    # lanfence.engine._device_evidence_lines) listed in full, the same
+    # bullet-point convention the console renderer already uses
+    # (lanfence.report._render_findings) - previously this panel also
+    # showed the bare MAC on its own line above, duplicating it.
     evidence_row = ""
     if finding.evidence:
         items = "".join(f'<li style="margin:2px 0;">{html.escape(line)}</li>' for line in finding.evidence)
@@ -163,7 +162,6 @@ def _html_finding_panel(finding: Finding) -> str:
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_PANEL_STYLE}border-left:4px solid {color};">
     <tr><td style="font-size:11px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:{color};">{html.escape(finding.severity)}</td></tr>
     <tr><td style="font-size:15px;font-weight:700;padding-top:2px;">{html.escape(finding.title)}</td></tr>
-    <tr><td style="padding-top:4px;font-size:13px;{branding.EMAIL_MUTED_STYLE}">{subject_label}: {html.escape(_finding_subject(finding))}</td></tr>
     {rationale_row}
     {recommendation_row}
     {evidence_row}

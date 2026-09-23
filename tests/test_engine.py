@@ -57,16 +57,14 @@ def test_build_findings_new_unknown_device_defaults_medium():
 
 
 def test_build_findings_new_device_evidence_includes_metadata_when_set():
-    metadata = DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", owner="Emily", purpose="Work phone", location="Home office")
+    metadata = DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", owner="Emily", location="Home office")
     device = _device(hostname="Galaxy-A33-5G", vendor="Samsung", metadata=metadata)
     findings = build_findings(device, "new_device", [])
     evidence = findings[0].evidence
     assert "Hostname: Galaxy-A33-5G" in evidence
     assert "Vendor: Samsung" in evidence
     assert "Owner: Emily" in evidence
-    assert "Purpose: Work phone" in evidence
     assert "Location: Home office" in evidence
-    assert not any(e.startswith("Group:") for e in evidence)  # unset field, not shown as "[unknown]"
 
 
 def test_build_findings_new_device_evidence_omits_metadata_when_unset():
@@ -75,10 +73,11 @@ def test_build_findings_new_device_evidence_omits_metadata_when_unset():
     assert not any(e.startswith(("Owner:", "Purpose:", "Group:", "Location:")) for e in evidence)
 
 
-def test_build_findings_allowlisted_device_evidence_includes_trust_label():
+def test_build_findings_allowlisted_device_evidence_includes_name_first():
     device = _device(allowlisted=True, allowlist_name="Emily Work Phone")
     findings = build_findings(device, "new_device", [])
-    assert "Trusted as: Emily Work Phone" in findings[0].evidence
+    evidence = findings[0].evidence
+    assert evidence[0] == "Name: Emily Work Phone"
 
 
 def test_build_findings_new_allowlisted_device_is_info():

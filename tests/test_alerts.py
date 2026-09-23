@@ -14,6 +14,7 @@ def _finding(severity="high", mac="aa:bb:cc:dd:ee:ff", title="Unknown device con
     return Finding(
         mac=mac, title=title, severity=severity,
         rationale="some rationale", recommendation="do something",
+        evidence=[f"MAC: {mac}"],
     )
 
 
@@ -58,10 +59,13 @@ def test_format_findings_text_handles_finding_with_no_mac():
     finding = Finding(
         mac=None, title="Unexpected DHCP server observed", severity="medium",
         kind="network_service", subject_id="eth0/192.168.1.66",
+        evidence=["Interface: eth0", "DHCP server identifier (option 54): 192.168.1.66"],
     )
     text = alerts._format_findings_text([finding], heading="LAN Fence")
-    assert "Subject: eth0/192.168.1.66" in text
+    assert "Interface: eth0" in text
+    assert "DHCP server identifier (option 54): 192.168.1.66" in text
     assert "MAC: None" not in text
+    assert "Subject:" not in text  # no separate Subject line - the evidence bullets already cover it
 
 
 def test_finding_subject_prefers_mac_then_subject_id_then_placeholder():
@@ -142,9 +146,11 @@ def test_format_findings_html_handles_finding_with_no_mac():
     finding = Finding(
         mac=None, title="Unexpected DHCP server observed", severity="medium",
         kind="network_service", subject_id="eth0/192.168.1.66",
+        evidence=["Interface: eth0", "DHCP server identifier (option 54): 192.168.1.66"],
     )
     html_body = alerts.format_findings_html([finding])
-    assert "Subject: eth0/192.168.1.66" in html_body
+    assert "Interface: eth0" in html_body
+    assert "DHCP server identifier (option 54): 192.168.1.66" in html_body
 
 
 def test_format_findings_html_escapes_hostile_finding_data():
@@ -188,7 +194,8 @@ def test_format_findings_html_escapes_hostile_evidence_line():
 
 
 def test_format_findings_html_omits_evidence_list_when_empty():
-    html_body = alerts.format_findings_html([_finding()])
+    finding = Finding(mac="aa:bb:cc:dd:ee:ff", title="Unknown device connected", severity="high")
+    html_body = alerts.format_findings_html([finding])
     assert "<ul" not in html_body
 
 

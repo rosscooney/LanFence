@@ -49,16 +49,15 @@ def test_digest_new_device_exactly_at_window_boundaries_is_included(tmp_path: Pa
     assert digest.new_devices.total_count == 1
 
 
-def test_digest_new_device_includes_owner_and_group_context(tmp_path: Path):
+def test_digest_new_device_includes_owner_context(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()
         store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=t0)
-        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice", group="staff")
+        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice")
         digest = build_digest(store, Allowlist.load(None), since=t0, until=t0)
 
     entry = digest.new_devices.items[0]
     assert entry.owner == "Alice"
-    assert entry.group == "staff"
 
 
 def test_digest_new_device_includes_services_summary(tmp_path: Path):

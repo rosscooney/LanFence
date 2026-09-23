@@ -83,7 +83,6 @@ def _to_entry(device: Device, *, services_summary: str | None = None) -> DigestD
         first_seen=device.first_seen,
         last_seen=device.last_seen,
         owner=metadata.owner if metadata else None,
-        group=metadata.group if metadata else None,
         services_summary=services_summary,
     )
 
@@ -200,10 +199,7 @@ def _format_section_plain(title: str, section: DigestSection) -> list[str]:
         lines.append("  (none)")
     for entry in section.items:
         label = entry.name or entry.mac
-        context = ""
-        if entry.owner or entry.group:
-            bits = [b for b in (entry.owner, entry.group) if b]
-            context = f"  ({', '.join(bits)})"
+        context = f"  ({entry.owner})" if entry.owner else ""
         line = f"  - {label} ({entry.mac})  {entry.ip or '-'}  {entry.hostname or '[unknown]'}{context}"
         if entry.services_summary:
             line += f"  advertises: {entry.services_summary}"
@@ -277,10 +273,7 @@ def _html_section_table(title: str, section: DigestSection) -> str:
     else:
         for entry in section.items:
             label = html.escape(entry.name or entry.mac)
-            context = ""
-            if entry.owner or entry.group:
-                bits = [html.escape(b) for b in (entry.owner, entry.group) if b]
-                context = f" &middot; {', '.join(bits)}"
+            context = f" &middot; {html.escape(entry.owner)}" if entry.owner else ""
             rows += (
                 '<tr><td style="padding:8px 0;border-top:1px solid '
                 f'{branding.COLORS["border"]};font-size:14px;">'

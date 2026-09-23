@@ -1963,10 +1963,10 @@ def test_device_shows_not_set_for_unset_metadata_by_default(config_path: Path):
     assert "Owner:      Not set" in result.output
 
 
-def test_device_set_owner_and_purpose(config_path: Path):
+def test_device_set_owner_and_location(config_path: Path):
     _seed_devices(config_path)
     result = runner.invoke(
-        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--purpose", "Laptop",
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--location", "Office",
               "--config", str(config_path)],
     )
     assert result.exit_code == 0
@@ -1974,17 +1974,17 @@ def test_device_set_owner_and_purpose(config_path: Path):
 
     show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
     assert "Owner:      Alice" in show.output
-    assert "Purpose:    Laptop" in show.output
+    assert "Location:   Office" in show.output
 
 
 def test_device_metadata_set_persists_across_separate_invocations(config_path: Path):
     _seed_devices(config_path)
-    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--group", "staff", "--config", str(config_path)])
+    runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--config", str(config_path)])
     result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--location", "Office", "--config", str(config_path)])
     assert result.exit_code == 0
 
     show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
-    assert "Group:      staff" in show.output  # still set from the earlier call
+    assert "Owner:      Alice" in show.output  # still set from the earlier call
     assert "Location:   Office" in show.output
 
 
@@ -2054,7 +2054,7 @@ def test_device_metadata_json_output_is_additive(config_path: Path):
 
     payload = json.loads(result.output)
     assert payload["device"]["metadata"]["owner"] == "Alice"
-    assert payload["device"]["metadata"]["purpose"] is None
+    assert payload["device"]["metadata"]["location"] is None
 
 
 def test_device_metadata_edit_does_not_create_lifecycle_event(config_path: Path):
@@ -2092,14 +2092,14 @@ def test_devices_owner_filter_no_match_is_empty(config_path: Path):
     assert by_mac == {}
 
 
-def test_devices_group_and_location_filters_combine(config_path: Path):
+def test_devices_owner_and_location_filters_combine(config_path: Path):
     _seed_devices(config_path)
     runner.invoke(
-        app, ["device", "aa:bb:cc:dd:ee:ff", "--group", "staff", "--location", "Office", "--config", str(config_path)]
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--owner", "Alice", "--location", "Office", "--config", str(config_path)]
     )
-    runner.invoke(app, ["device", "11:22:33:44:55:66", "--group", "staff", "--config", str(config_path)])
+    runner.invoke(app, ["device", "11:22:33:44:55:66", "--owner", "Alice", "--config", str(config_path)])
 
-    by_mac = _devices_json(config_path, "--group", "staff", "--location", "Office")
+    by_mac = _devices_json(config_path, "--owner", "Alice", "--location", "Office")
     assert set(by_mac) == {"aa:bb:cc:dd:ee:ff"}
 
 
@@ -2344,15 +2344,13 @@ def test_review_interactive_trust_then_add_device_details(config_path: Path):
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
             app, ["review", "--config", str(config_path)],
-            input="t\nNAS\n\nu\ny\nAlice\nLaptop\nstaff\nOffice\n",
+            input="t\nNAS\n\nu\ny\nAlice\nOffice\n",
         )
     assert result.exit_code == 0
     assert "device details updated" in result.output.lower()
 
     show = runner.invoke(app, ["device", "11:22:33:44:55:66", "--config", str(config_path)])
     assert "Owner:      Alice" in show.output
-    assert "Purpose:    Laptop" in show.output
-    assert "Group:      staff" in show.output
     assert "Location:   Office" in show.output
 
 

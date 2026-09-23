@@ -1400,7 +1400,6 @@ def _list_devices(
     review_needed: bool,
     presence: Optional[str],
     owner: Optional[str],
-    group: Optional[str],
     location: Optional[str],
     details: bool,
     output_format: str,
@@ -1414,11 +1413,11 @@ def _list_devices(
     allowlist. Allowlist membership is applied fresh from the current
     allowlist file, not whatever it was the last time a scan ran.
 
-    `--owner`/`--group`/`--location` match a device's user-provided
-    metadata exactly (after trimming whitespace, case-insensitive) - a
-    device with that field unset never matches. `--details` adds those
-    metadata fields as extra table columns; JSON output always includes
-    them (nested under `metadata`) regardless of `--details`.
+    `--owner`/`--location` match a device's user-provided metadata exactly
+    (after trimming whitespace, case-insensitive) - a device with that
+    field unset never matches. `--details` adds those metadata fields as
+    extra table columns; JSON output always includes them (nested under
+    `metadata`) regardless of `--details`.
     """
 
     if status is not None and status not in ("online", "offline"):
@@ -1454,9 +1453,6 @@ def _list_devices(
     if owner is not None:
         needle = owner.strip().casefold()
         inventory = [d for d in inventory if (d.metadata.owner or "").strip().casefold() == needle]
-    if group is not None:
-        needle = group.strip().casefold()
-        inventory = [d for d in inventory if (d.metadata.group or "").strip().casefold() == needle]
     if location is not None:
         needle = location.strip().casefold()
         inventory = [d for d in inventory if (d.metadata.location or "").strip().casefold() == needle]
@@ -1540,12 +1536,8 @@ def device(
         False, "--clear-offline-after", help="Remove the --offline-after override; restore the global default."
     ),
     owner: Optional[str] = typer.Option(None, "--owner", help="With a MAC: set the owner metadata field."),
-    purpose: Optional[str] = typer.Option(None, "--purpose", help="With a MAC: set the purpose metadata field."),
-    group: Optional[str] = typer.Option(None, "--group", help="With a MAC: set the group metadata field."),
     location: Optional[str] = typer.Option(None, "--location", help="With a MAC: set the location metadata field."),
     clear_owner: bool = typer.Option(False, "--clear-owner", help="Clear the owner metadata field."),
-    clear_purpose: bool = typer.Option(False, "--clear-purpose", help="Clear the purpose metadata field."),
-    clear_group: bool = typer.Option(False, "--clear-group", help="Clear the group metadata field."),
     clear_location: bool = typer.Option(False, "--clear-location", help="Clear the location metadata field."),
     status: Optional[str] = typer.Option(
         None, "--status", help="Without a MAC: filter the list by status: online | offline."
@@ -1558,7 +1550,7 @@ def device(
         help="Without a MAC: only list devices needing review (untrusted, not snoozed, not investigating).",
     ),
     details: bool = typer.Option(
-        False, "--details", help="Without a MAC: also show owner/purpose/group/location columns (table format only)."
+        False, "--details", help="Without a MAC: also show owner/location columns (table format only)."
     ),
     delete_new_offline: bool = typer.Option(
         False, "--delete-new-offline",
@@ -1585,8 +1577,8 @@ def device(
     never changes the allowlist, and a policy edit alone never fabricates a
     lifecycle event or fires an alert.
 
-    With `--owner`/`--purpose`/`--group`/`--location` (or their
-    `--clear-*` counterparts), also edits operator-provided inventory
+    With `--owner`/`--location` (or their `--clear-*` counterparts), also
+    edits operator-provided inventory
     metadata - separate from observed hostname, vendor, trust, review, and
     presence. Any combination of presence and metadata options may be
     given in one call; an omitted field is left unchanged, and after a
@@ -1618,7 +1610,7 @@ def device(
     if mac is None:
         _list_devices(
             status=status, untrusted=untrusted, review_needed=review_needed,
-            presence=presence, owner=owner, group=group, location=location,
+            presence=presence, owner=owner, location=location,
             details=details, output_format=output_format, config=config,
         )
         return
@@ -1636,8 +1628,7 @@ def device(
         typer.secho("error: --offline-after and --clear-offline-after are contradictory", fg="red", err=True)
         raise typer.Exit(code=2)
     for field, set_value, clear_flag in (
-        ("owner", owner, clear_owner), ("purpose", purpose, clear_purpose),
-        ("group", group, clear_group), ("location", location, clear_location),
+        ("owner", owner, clear_owner), ("location", location, clear_location),
     ):
         if set_value is not None and clear_flag:
             typer.secho(f"error: --{field} and --clear-{field} are contradictory", fg="red", err=True)
@@ -1654,10 +1645,6 @@ def device(
     try:
         if owner is not None:
             metadata_updates["owner"] = validate_metadata_value("owner", owner)
-        if purpose is not None:
-            metadata_updates["purpose"] = validate_metadata_value("purpose", purpose)
-        if group is not None:
-            metadata_updates["group"] = validate_metadata_value("group", group)
         if location is not None:
             metadata_updates["location"] = validate_metadata_value("location", location)
     except ValueError as exc:
@@ -1665,10 +1652,6 @@ def device(
         raise typer.Exit(code=2) from exc
     if clear_owner:
         metadata_updates["owner"] = None
-    if clear_purpose:
-        metadata_updates["purpose"] = None
-    if clear_group:
-        metadata_updates["group"] = None
     if clear_location:
         metadata_updates["location"] = None
 
@@ -1961,15 +1944,12 @@ def _run_interactive_review(cfg: Config) -> None:
                 # default no, and aborting this step never undoes the trust
                 # (already persisted above) or the presence choice just made.
                 try:
-                    add_details = typer.confirm("  Add device details (owner/purpose/group/location)?", default=False)
+                    add_details = typer.confirm("  Add device details (owner/location)?", default=False)
                 except (typer.Abort, EOFError):
                     add_details = False
                 if add_details:
                     existing = store.get_device_metadata(dev.mac)
-                    field_prompts = (
-                        ("owner", "owner"), ("purpose", "purpose"),
-                        ("group", "group"), ("location", "location"),
-                    )
+                    field_prompts = (("owner", "owner"), ("location", "location"))
                     try:
                         raw_values = {}
                         for field, label in field_prompts:

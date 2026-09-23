@@ -16,7 +16,7 @@ from lanfence.dossier import (
 )
 from lanfence.engine import process_sighting
 from lanfence.fingerprint import SignatureSet
-from lanfence.models import AdvertisedService, Device, DeviceMetadata
+from lanfence.models import AdvertisedService, Device
 
 
 def _now():
@@ -119,16 +119,6 @@ def test_build_device_dossier_reuses_passed_in_device_without_a_second_lookup(tm
 
 
 # --- DeviceDossier.label ---------------------------------------------------
-
-
-def test_label_prefers_operator_metadata_purpose():
-    dossier = _dossier(
-        device=_device(
-            hostname="some-host", allowlist_name="My Laptop",
-            metadata=DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", purpose="Kitchen Sonos"),
-        ),
-    )
-    assert dossier.label == "Kitchen Sonos"
 
 
 def test_label_falls_back_to_allowlist_name_then_hostname_then_mac():

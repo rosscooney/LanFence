@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """Validation for operator-provided device inventory metadata
-(owner/purpose/group/location) - shared by `lanfence device` and the web
-portal (`lanfence/web.py`) so the two never drift apart on limits or
+(owner/location) - shared by `lanfence device` and the web portal
+(`lanfence/web.py`) so the two never drift apart on limits or
 sanitisation."""
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from lanfence.sanitize import clean_text
 #: Character limits for user-provided device metadata - long enough for a
 #: real value, short enough to keep the database and rendering sane.
 #: Overlong input is rejected with a clear error, never silently truncated.
-METADATA_LIMITS = {"owner": 128, "purpose": 256, "group": 128, "location": 128}
+METADATA_LIMITS = {"owner": 128, "location": 128}
 
 
 def validate_metadata_value(field: str, value: str) -> str:

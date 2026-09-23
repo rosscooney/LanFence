@@ -505,7 +505,7 @@ def test_metadata_edit_persists_and_is_html_escaped(running_portal):
 
     hostile = "<script>alert(1)</script>"
     data = urllib.parse.urlencode(
-        {"action": "metadata", "owner": hostile, "purpose": "", "group": "", "location": ""}
+        {"action": "metadata", "owner": hostile, "location": ""}
     ).encode()
     resp = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data)
     body = resp.read().decode()
@@ -618,7 +618,7 @@ def test_metadata_rejects_overlong_value(running_portal):
     opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
 
     data = urllib.parse.urlencode(
-        {"action": "metadata", "owner": "x" * 200, "purpose": "", "group": "", "location": ""}
+        {"action": "metadata", "owner": "x" * 200, "location": ""}
     ).encode()
     resp = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data)
     body = resp.read().decode()

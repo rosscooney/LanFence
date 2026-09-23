@@ -831,9 +831,7 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 
     metadata_fields = "".join(
         _metadata_field_html(field, label, getattr(metadata, field) if metadata else None)
-        for field, label in (
-            ("owner", "Owner"), ("purpose", "Purpose"), ("group", "Group"), ("location", "Location"),
-        )
+        for field, label in (("owner", "Owner"), ("location", "Location"))
     )
 
     body = f"""
@@ -1033,7 +1031,7 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             elif action == "metadata":
                 updates: dict[str, str | None] = {}
                 try:
-                    for field in ("owner", "purpose", "group", "location"):
+                    for field in ("owner", "location"):
                         raw_value = form.get(field, "").strip()
                         updates[field] = validate_metadata_value(field, raw_value) if raw_value else None
                     with DeviceStore(context.cfg.resolved_db_path()) as store:

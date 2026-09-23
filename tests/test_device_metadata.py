@@ -22,8 +22,6 @@ def test_get_device_metadata_defaults_to_unset(tmp_path: Path):
 
     assert meta.mac == "aa:bb:cc:dd:ee:ff"
     assert meta.owner is None
-    assert meta.purpose is None
-    assert meta.group is None
     assert meta.location is None
     assert meta.updated_at is None
 
@@ -54,7 +52,7 @@ def test_update_device_metadata_sets_one_field(tmp_path: Path):
         result = store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice")
 
     assert result.owner == "Alice"
-    assert result.purpose is None
+    assert result.location is None
     assert result.updated_at == t0
 
 
@@ -62,23 +60,21 @@ def test_update_device_metadata_sets_several_fields_at_once(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()
         result = store.update_device_metadata(
-            "aa:bb:cc:dd:ee:ff", updated_at=t0,
-            owner="Alice", purpose="Laptop", group="staff", location="Office",
+            "aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice", location="Office",
         )
 
-    assert (result.owner, result.purpose, result.group, result.location) == ("Alice", "Laptop", "staff", "Office")
+    assert (result.owner, result.location) == ("Alice", "Office")
 
 
 def test_update_device_metadata_omitted_field_left_unchanged(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()
-        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice", group="staff")
+        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice")
         t1 = t0 + timedelta(minutes=5)
-        result = store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t1, purpose="Laptop")
+        result = store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t1, location="Office")
 
     assert result.owner == "Alice"  # untouched by the second call
-    assert result.group == "staff"  # untouched by the second call
-    assert result.purpose == "Laptop"
+    assert result.location == "Office"
     assert result.updated_at == t1
 
 

@@ -82,18 +82,16 @@ AddressAssociationKind = Literal["observed", "lease_reported"]
 
 class DeviceMetadata(BaseModel):
     """Operator-provided inventory context for one device - who's
-    responsible for it, what it's for, which group it belongs to, and
-    where it is. Entirely separate from observed hostname/vendor, trust,
-    review state, and presence policy: nothing here is verified, detected,
-    or authenticated - ``owner`` is a responsibility label, not an
-    authenticated identity, and ``location`` is whatever the operator typed
-    in, not a detected physical position. ``updated_at`` is ``None`` for a
-    MAC with no metadata set yet (every field unset)."""
+    responsible for it and where it is. Entirely separate from observed
+    hostname/vendor, trust, review state, and presence policy: nothing
+    here is verified, detected, or authenticated - ``owner`` is a
+    responsibility label, not an authenticated identity, and ``location``
+    is whatever the operator typed in, not a detected physical position.
+    ``updated_at`` is ``None`` for a MAC with no metadata set yet (every
+    field unset)."""
 
     mac: str
     owner: str | None = None
-    purpose: str | None = None
-    group: str | None = None
     location: str | None = None
     updated_at: datetime | None = None
 
@@ -102,7 +100,7 @@ class DeviceMetadata(BaseModel):
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("owner", "purpose", "group", "location")
+    @field_validator("owner", "location")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None
@@ -412,12 +410,10 @@ class DigestDeviceEntry(BaseModel):
     review_notes: str | None = None
     first_seen: datetime | None = None
     last_seen: datetime | None = None
-    #: Current owner/group metadata, for context only - see
-    #: ``DeviceMetadata``. Purpose/location are deliberately left out of
-    #: digest rows to keep them terse; the full detail is one `lanfence
-    #: device <MAC>` away.
+    #: Current owner metadata, for context only - see ``DeviceMetadata``.
+    #: Location is deliberately left out of digest rows to keep them
+    #: terse; the full detail is one `lanfence device <MAC>` away.
     owner: str | None = None
-    group: str | None = None
     #: A terse, bounded summary of currently-advertised services (see
     #: :mod:`lanfence.discovery`) - populated only for ``new_devices``
     #: entries (see ``lanfence/digest.py``'s ``_bounded_section``); every
@@ -430,7 +426,7 @@ class DigestDeviceEntry(BaseModel):
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("name", "ip", "hostname", "vendor", "review_notes", "owner", "group", "services_summary")
+    @field_validator("name", "ip", "hostname", "vendor", "review_notes", "owner", "services_summary")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None

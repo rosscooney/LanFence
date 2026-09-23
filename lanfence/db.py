@@ -181,8 +181,6 @@ CREATE INDEX IF NOT EXISTS idx_device_names_mac ON device_names (mac);
 CREATE TABLE IF NOT EXISTS device_metadata (
     mac TEXT PRIMARY KEY,
     owner TEXT,
-    purpose TEXT,
-    group_name TEXT,
     location TEXT,
     updated_at TEXT NOT NULL
 );
@@ -954,13 +952,13 @@ class DeviceStore:
 
         mac = normalize_mac(mac)
         row = self._conn.execute(
-            "SELECT owner, purpose, group_name, location, updated_at FROM device_metadata WHERE mac = ?",
+            "SELECT owner, location, updated_at FROM device_metadata WHERE mac = ?",
             (mac,),
         ).fetchone()
         if row is None:
             return DeviceMetadata(mac=mac)
         return DeviceMetadata(
-            mac=mac, owner=row["owner"], purpose=row["purpose"], group=row["group_name"],
+            mac=mac, owner=row["owner"],
             location=row["location"], updated_at=_parse_dt(row["updated_at"]),
         )
 
@@ -976,13 +974,13 @@ class DeviceStore:
         normalized = [normalize_mac(m) for m in macs]
         placeholders = ",".join("?" * len(normalized))
         rows = self._conn.execute(
-            f"SELECT mac, owner, purpose, group_name, location, updated_at FROM device_metadata "
+            f"SELECT mac, owner, location, updated_at FROM device_metadata "
             f"WHERE mac IN ({placeholders})",
             normalized,
         ).fetchall()
         return {
             row["mac"]: DeviceMetadata(
-                mac=row["mac"], owner=row["owner"], purpose=row["purpose"], group=row["group_name"],
+                mac=row["mac"], owner=row["owner"],
                 location=row["location"], updated_at=_parse_dt(row["updated_at"]),
             )
             for row in rows
@@ -994,41 +992,35 @@ class DeviceStore:
         *,
         updated_at: datetime,
         owner: str | None | object = _UNSET,
-        purpose: str | None | object = _UNSET,
-        group: str | None | object = _UNSET,
         location: str | None | object = _UNSET,
     ) -> DeviceMetadata:
         """Apply any combination of metadata field changes atomically.
 
-        Each of ``owner``/``purpose``/``group``/``location`` is tri-state:
-        omitted (the ``_UNSET`` default) leaves that field unchanged,
-        ``None`` clears it, and a string sets it (already validated/
-        sanitized by the caller - see ``lanfence device``'s CLI options).
-        Never creates a ``devices`` row - metadata can exist for a MAC with
-        no observation history without implying one now exists. A no-op
-        request (the merged result is identical to what's already stored)
-        does not touch ``updated_at`` - see the class docs for why this
-        matters for a durable "when did this last actually change" signal.
+        Each of ``owner``/``location`` is tri-state: omitted (the
+        ``_UNSET`` default) leaves that field unchanged, ``None`` clears
+        it, and a string sets it (already validated/sanitized by the
+        caller - see ``lanfence device``'s CLI options). Never creates a
+        ``devices`` row - metadata can exist for a MAC with no observation
+        history without implying one now exists. A no-op request (the
+        merged result is identical to what's already stored) does not
+        touch ``updated_at`` - see the class docs for why this matters for
+        a durable "when did this last actually change" signal.
         """
 
         mac = normalize_mac(mac)
         current = self.get_device_metadata(mac)
         new_owner = current.owner if owner is _UNSET else owner
-        new_purpose = current.purpose if purpose is _UNSET else purpose
-        new_group = current.group if group is _UNSET else group
         new_location = current.location if location is _UNSET else location
 
-        if (new_owner, new_purpose, new_group, new_location) == (
-            current.owner, current.purpose, current.group, current.location,
-        ):
+        if (new_owner, new_location) == (current.owner, current.location):
             return current
 
         self._conn.execute(
-            "INSERT INTO device_metadata (mac, owner, purpose, group_name, location, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(mac) DO UPDATE SET owner = excluded.owner, purpose = excluded.purpose, "
-            "group_name = excluded.group_name, location = excluded.location, updated_at = excluded.updated_at",
-            (mac, new_owner, new_purpose, new_group, new_location, _iso(updated_at)),
+            "INSERT INTO device_metadata (mac, owner, location, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(mac) DO UPDATE SET owner = excluded.owner, "
+            "location = excluded.location, updated_at = excluded.updated_at",
+            (mac, new_owner, new_location, _iso(updated_at)),
         )
         self._conn.commit()
         return self.get_device_metadata(mac)
