@@ -73,7 +73,7 @@ from lanfence.engine import apply_self_trust, build_inventory, is_review_needed
 from lanfence.fingerprint import SignatureSet
 from lanfence.identity import IdentityRuleSet
 from lanfence.logging_config import get_logger
-from lanfence.models import ASSET_TYPES, DEVICE_CATEGORIES, Device, utcnow
+from lanfence.models import ASSET_TYPES, DEVICE_CATEGORIES, Device, format_datetime, utcnow
 from lanfence.netutil import normalize_mac
 
 log = get_logger("web")
@@ -1028,26 +1028,104 @@ def _identity_evidence_html(dossier: DeviceDossier) -> str:
 
 def _identity_section_html(dossier: DeviceDossier) -> str:
     identity = dossier.identity
+    metadata = dossier.device.metadata
+    override = metadata.category_override if metadata else None
+    hostname_line = f"<p>Hostname: {html.escape(dossier.device.hostname)}</p>" if dossier.device.hostname else ""
+    # A category the operator set always wins for display, but is labelled
+    # as theirs - the detected category stays visible beside it.
+    if override:
+        category_line = (
+            f"<p>Category: <strong>{html.escape(override)}</strong> (assigned by you) &middot; "
+            f"detected: {html.escape(identity.category)}</p>"
+        )
+    else:
+        category_line = f"<p>Category: {html.escape(identity.category)} (detected)</p>"
     if not identity.is_known:
         return f"""
 <h2>Identity (Know Your Network)</h2>
 <p>Probable identity: <strong>{html.escape(identity.probable_identity)}</strong> (no supporting evidence)</p>
+{category_line}
+{hostname_line}
 """
     manufacturer_line = f"<p>Manufacturer: {html.escape(identity.manufacturer)}</p>" if identity.manufacturer else ""
     platform_line = f"<p>Platform: {html.escape(identity.platform)}</p>" if identity.platform else ""
     return f"""
 <h2>Identity (Know Your Network)</h2>
 <p>Probable identity: <strong>{html.escape(identity.probable_identity)}</strong></p>
-<p>Category: {html.escape(identity.category)}</p>
-<p>Confidence: {identity.confidence}%</p>
+{category_line}
+<p>Identity confidence: {identity.confidence}%</p>
 {manufacturer_line}
 {platform_line}
+{hostname_line}
 {_identity_evidence_html(dossier)}
 <p class="muted">A labelled inference from evidence LAN Fence has observed - not a verified fact.</p>
 """
 
 
-def _render_device_detail(dossier: DeviceDossier, *, message: str | None = None, error: str | None = None) -> str:
+def _network_section_html(dossier: DeviceDossier, *, offline_grace_seconds: float | None) -> str:
+    """Everything LAN Fence has observed about where and when this device
+    appears on the network - all retained evidence, nothing inferred."""
+
+    # Imported here: lanfence.report imports this module at load time.
+    from lanfence.report import _ADDRESS_SOURCE_LABELS, _NAME_SOURCE_LABELS, presence_label, review_status_label
+
+    device = dossier.device
+    trust = review_status_label(device, now=utcnow())
+    address_items = "".join(
+        f"<li><code>{html.escape(a.ip)}</code> <span class=\"muted\">({html.escape(_ADDRESS_SOURCE_LABELS.get(a.source, a.source))}"
+        f"{', ' + html.escape(a.interface) if a.interface else ''}; "
+        f"last seen {html.escape(format_datetime(a.last_seen))})</span></li>"
+        for a in dossier.addresses
+    ) or '<li class="muted">None retained</li>'
+    name_items = "".join(
+        f"<li>{html.escape(n.name)} <span class=\"muted\">({html.escape(_NAME_SOURCE_LABELS.get(n.source, n.source))}; "
+        f"last seen {html.escape(format_datetime(n.last_seen))})</span></li>"
+        for n in dossier.names
+    ) or '<li class="muted">None observed</li>'
+    services = dossier.observed_services_summary
+    service_items = "".join(f"<li>{html.escape(s)}</li>" for s in services) or '<li class="muted">None advertised</li>'
+    return f"""
+<h2>Network</h2>
+<p>MAC: <code>{html.escape(device.mac)}</code> &middot; Vendor: {html.escape(device.vendor or '[unknown]')}</p>
+<p>Status: {_status_badge(device)} &middot; {html.escape(presence_label(device, default_offline_after_seconds=offline_grace_seconds))}
+&middot; Trust: {html.escape(trust)}</p>
+<p>First seen: {html.escape(format_datetime(device.first_seen))} &middot;
+Last seen: {html.escape(format_datetime(device.last_seen))}</p>
+<p>Addresses (IPv4/IPv6):</p>
+<ul>{address_items}</ul>
+<p>Hostnames:</p>
+<ul>{name_items}</ul>
+<p>Advertised services (the device's own claims):</p>
+<ul>{service_items}</ul>
+"""
+
+
+def _security_section_html(dossier: DeviceDossier) -> str:
+    """Security signals only - kept apart from identity confidence, which
+    says how sure LAN Fence is of what a device is, not whether it's safe."""
+
+    device = dossier.device
+    matches = "".join(
+        f"<li><strong>{html.escape(m.severity)}</strong>: {html.escape(m.title)}</li>"
+        for m in dossier.fingerprint_matches
+    ) or '<li class="muted">No rogue-device signatures matched</li>'
+    investigation = ""
+    if device.review_state == "investigating":
+        notes = f": {html.escape(device.review_notes)}" if device.review_notes else ""
+        investigation = f"<p>Flagged for investigation{notes}</p>"
+    return f"""
+<h2>Security</h2>
+{investigation}
+<ul>{matches}</ul>
+<p class="muted">Identity confidence and security risk are separate: a well-identified device can
+still be a risk, and an unidentified one can be perfectly safe.</p>
+"""
+
+
+def _render_device_detail(
+    dossier: DeviceDossier, *, message: str | None = None, error: str | None = None,
+    offline_grace_seconds: float | None = None,
+) -> str:
     device = dossier.device
     metadata = device.metadata
     trust_section = ""
@@ -1115,15 +1193,21 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 {_identity_section_html(dossier)}
 </div>
 <div class="panel">
-{trust_section}
-</div>
-<div class="panel">
-<h2>Inventory details</h2>
+<h2>Ownership</h2>
 <form class="stack" method="post" action="/device/{html.escape(device.mac)}">
 <input type="hidden" name="action" value="metadata">
 {metadata_fields}
 <button class="btn" type="submit">Save details</button>
 </form>
+</div>
+<div class="panel">
+{_network_section_html(dossier, offline_grace_seconds=offline_grace_seconds)}
+</div>
+<div class="panel">
+{_security_section_html(dossier)}
+</div>
+<div class="panel">
+{trust_section}
 </div>
 """
     return body
@@ -1291,7 +1375,8 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                 return
             self._send(
                 HTTPStatus.OK,
-                _page(title=dossier.device.allowlist_name or mac, body=_render_device_detail(dossier), authed=True),
+                _page(title=dossier.device.allowlist_name or mac, body=_render_device_detail(dossier, offline_grace_seconds=context.cfg.scan.offline_grace_seconds),
+                      authed=True),
             )
 
         def _handle_device_post(self, raw_mac: str) -> None:
@@ -1354,7 +1439,10 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                 HTTPStatus.OK,
                 _page(
                     title=dossier.device.allowlist_name or mac,
-                    body=_render_device_detail(dossier, message=message, error=error),
+                    body=_render_device_detail(
+                        dossier, message=message, error=error,
+                        offline_grace_seconds=context.cfg.scan.offline_grace_seconds,
+                    ),
                     authed=True,
                 ),
             )

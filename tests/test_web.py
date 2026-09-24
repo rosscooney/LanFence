@@ -682,6 +682,51 @@ def test_device_page_shows_identity_section(running_portal):
     assert "Hostname suggests an iPhone" in body
 
 
+
+def test_device_page_shows_network_and_security_sections(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.record_address_evidence(
+            mac="aa:bb:cc:dd:ee:ff", ip="fe80::abcd", interface="eth0",
+            source="ipv6_nd", kind="observed", seen_at=datetime.now(timezone.utc),
+        )
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "<h2>Network</h2>" in body
+    assert "fe80::abcd" in body
+    assert "First seen:" in body
+    assert "Presence: unspecified" in body
+    assert "<h2>Security</h2>" in body
+    assert "Identity confidence and security risk are separate" in body
+    assert "<h2>Ownership</h2>" in body
+
+
+def test_device_page_labels_a_user_assigned_category_apart_from_the_detected_one(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc), category_override="Printer",
+        )
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "<strong>Printer</strong> (assigned by you)" in body
+    assert "detected: Unknown" in body
+
+
+def test_device_page_security_section_shows_investigation_notes(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.set_investigating("aa:bb:cc:dd:ee:ff", notes="<b>odd</b> traffic", updated_at=datetime.now(timezone.utc))
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "Flagged for investigation: &lt;b&gt;odd&lt;/b&gt; traffic" in body
+
 def test_index_shows_network_overview_panel(running_portal):
     base_url, _ = running_portal
     opener = _opener()

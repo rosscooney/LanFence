@@ -1277,9 +1277,14 @@ URLs and survive a bookmark or refresh. Every count in the overview panel
 links straight to the matching filter. A device's own page shows the same
 [Know Your Network identity](#know-your-network-device-identity) as the
 CLI, including a "Why this identity?" disclosure with the full evidence
-list, and the ownership form covers the same friendly name/owner/location/
-asset type/category override/purpose/notes fields as `lanfence device`'s
-`--friendly-name`/etc. options.
+list (a category you've assigned is labelled as yours, beside the detected
+one). Below it, an Ownership form covers the same friendly name/owner/
+location/asset type/category override/purpose/notes fields as `lanfence
+device`'s `--friendly-name`/etc. options; a Network section lists every
+retained address and hostname, first/last seen, presence and trust state,
+and advertised services; and a Security section shows rogue-signature
+matches and any investigation notes - deliberately separate from identity
+confidence.
 
 ```text
 lanfence setup       # Web portal section: enable it, set a password
