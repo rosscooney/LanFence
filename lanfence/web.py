@@ -47,6 +47,7 @@ import hashlib
 import html
 import http.cookies
 import ipaddress
+import json
 import os
 import secrets
 import signal
@@ -175,6 +176,53 @@ def resolve_bind_host() -> str:
     return ip
 
 
+def _addresses_on_interface_holding(ip: str) -> list[str]:
+    """Every address (IPv4 and IPv6) on whichever interface holds ``ip``,
+    read from iproute2's ``ip -j addr`` (Linux). Empty if that isn't
+    available or ``ip`` isn't found on any interface."""
+
+    try:
+        result = subprocess.run(
+            ["ip", "-j", "addr", "show"], capture_output=True, text=True, timeout=2, check=False,
+        )
+        interfaces = json.loads(result.stdout) if result.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    for interface in interfaces if isinstance(interfaces, list) else []:
+        addresses = [
+            info.get("local") for info in interface.get("addr_info", [])
+            if isinstance(info, dict) and isinstance(info.get("local"), str)
+        ]
+        if ip in addresses:
+            return addresses
+    return []
+
+
+def resolve_bind_hosts() -> list[str]:
+    """Every address `lanfence web` binds to: this host's detected LAN
+    address (see :func:`resolve_bind_host`, always first) plus every other
+    private address on the same interface - e.g. several addresses on
+    eth0. The same bind policy applies to each: public addresses are
+    skipped, as are IPv6 link-local ones (they need a scope ID and don't
+    work in most browsers' URLs). Falls back to just the detected address
+    where the interface's addresses can't be listed."""
+
+    primary = resolve_bind_host()
+    hosts = [primary]
+    for address in _addresses_on_interface_holding(primary):
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if parsed.is_private and not parsed.is_link_local and not parsed.is_loopback and address not in hosts:
+            hosts.append(address)
+    return hosts
+
+
+def portal_url(host: str, port: int) -> str:
+    return f"https://[{host}]:{port}/" if ":" in host else f"https://{host}:{port}/"
+
+
 def build_portal_url(cfg: Config) -> str | None:
     """URL to link to the web portal from a digest, or ``None`` if it isn't
     actually reachable right now.
@@ -224,15 +272,18 @@ def _resolved_cert_host_file() -> Path:
     return expand_operator_path(_CERT_HOST_FILE)
 
 
-def ensure_self_signed_cert(host: str) -> tuple[Path, Path]:
-    """A self-signed cert+key for ``host``, generating one with ``openssl``
-    if none exists yet (or the existing one was issued for a different
-    address - see above). Returns ``(cert_path, key_path)``.
+def ensure_self_signed_cert(host: str | list[str]) -> tuple[Path, Path]:
+    """A self-signed cert+key covering ``host`` (one address, or every
+    address the portal binds to), generating one with ``openssl`` if none
+    exists yet (or the existing one was issued for different addresses -
+    see above). Returns ``(cert_path, key_path)``.
 
     Raises :class:`WebError` if the ``openssl`` CLI isn't available or
     generation fails - there is no fallback to plain HTTP.
     """
 
+    hosts = [host] if isinstance(host, str) else list(host)
+    host_key = ",".join(hosts)
     cert_path = _resolved_cert_file()
     key_path = _resolved_key_file()
     host_path = _resolved_cert_host_file()
@@ -242,7 +293,7 @@ def ensure_self_signed_cert(host: str) -> tuple[Path, Path]:
             cached_host = host_path.read_text(encoding="utf-8").strip()
         except OSError:
             cached_host = None
-        if cached_host == host:
+        if cached_host == host_key:
             return cert_path, key_path
 
     cert_path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,8 +303,8 @@ def ensure_self_signed_cert(host: str) -> tuple[Path, Path]:
                 "openssl", "req", "-x509", "-newkey", "rsa:2048",
                 "-keyout", str(key_path), "-out", str(cert_path),
                 "-days", "825", "-nodes",
-                "-subj", f"/CN={host}",
-                "-addext", f"subjectAltName=IP:{host}",
+                "-subj", f"/CN={hosts[0]}",
+                "-addext", "subjectAltName=" + ",".join(f"IP:{h}" for h in hosts),
             ],
             capture_output=True, timeout=30, check=False,
         )
@@ -270,7 +321,7 @@ def ensure_self_signed_cert(host: str) -> tuple[Path, Path]:
             "check that `openssl` is a working installation and try again"
         )
     key_path.chmod(0o600)
-    host_path.write_text(host, encoding="utf-8")
+    host_path.write_text(host_key, encoding="utf-8")
     return cert_path, key_path
 
 
@@ -453,14 +504,14 @@ def allow_port_through_firewall(firewall: str, *, host: str, port: int) -> tuple
     return True, f"firewall rule added ({firewall}): port {port}/tcp allowed for {host}"
 
 
-def start_background(config_path: Path) -> str:
+def start_background(config_path: Path) -> list[str]:
     """Spawn `lanfence web` as a detached background process for immediate
     use right after `lanfence setup` enables it - convenience only. Not a
     substitute for the packaged systemd unit
     (``packaging/lanfence-web.service``) if you want the portal to survive
     a reboot or restart automatically after a crash; see README.
 
-    Returns the URL it should be reachable at. Raises :class:`WebError` if
+    Returns every URL it should be reachable at. Raises :class:`WebError` if
     the portal isn't actually ready to start (not enabled, no password) or
     no private LAN address can be confirmed.
     """
@@ -470,7 +521,7 @@ def start_background(config_path: Path) -> str:
         raise WebError("the web portal is not enabled")
     if cfg.web.password_hash is None:
         raise WebError("no web portal password is set")
-    host = resolve_bind_host()
+    hosts = resolve_bind_hosts()
 
     log_path = _resolved_log_file()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -480,7 +531,7 @@ def start_background(config_path: Path) -> str:
             stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
-    return f"https://{host}:{cfg.web.port}/"
+    return [portal_url(host, cfg.web.port) for host in hosts]
 
 
 # --- sessions ------------------------------------------------------------
@@ -1492,11 +1543,16 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def run_server(cfg: Config, *, host: str, port: int | None = None, tls: bool = True) -> None:
+class _ThreadingHTTPServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def run_server(cfg: Config, *, host: str | list[str], port: int | None = None, tls: bool = True) -> None:
     """Run the web portal in the foreground until interrupted (SIGINT/SIGTERM).
 
-    ``host`` is taken as given - callers needing the LAN-only bind policy
-    enforced should call :func:`resolve_bind_host` themselves first (kept
+    ``host`` (one address, or several - one listening socket each, sharing
+    sessions) is taken as given - callers needing the LAN-only bind policy
+    enforced should call :func:`resolve_bind_hosts` themselves first (kept
     separate so this function stays testable against ``127.0.0.1``).
     Writes/removes the pidfile (:data:`_PID_FILE`) around the run so
     :func:`stop_server`/:func:`is_server_running` can find it.
@@ -1508,16 +1564,29 @@ def run_server(cfg: Config, *, host: str, port: int | None = None, tls: bool = T
     actual entry point (`lanfence web`) calls this with the default.
     """
 
+    hosts = [host] if isinstance(host, str) else list(host)
+    bind_port = port if port is not None else cfg.web.port
     context = _WebContext(cfg=cfg, sessions=_SessionStore(), throttle=_LoginThrottle())
-    httpd = ThreadingHTTPServer((host, port if port is not None else cfg.web.port), _make_handler(context))
+    handler = _make_handler(context)
+    servers = []
+    for index, address in enumerate(hosts):
+        server_class = _ThreadingHTTPServerV6 if ":" in address else ThreadingHTTPServer
+        try:
+            servers.append(server_class((address, bind_port), handler))
+        except OSError as exc:
+            if index == 0:
+                raise  # the primary LAN address is required
+            log.warning("could not also bind the web portal to %s: %s", address, exc)
+            hosts = [h for h in hosts if h != address]
     if tls:
-        cert_path, key_path = ensure_self_signed_cert(host)
+        cert_path, key_path = ensure_self_signed_cert(hosts)
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
-        httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
+        for httpd in servers:
+            httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
     _write_pid_file()
-    serve_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    serve_thread.start()
+    for httpd in servers:
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
     stop_event = threading.Event()
 
@@ -1529,8 +1598,9 @@ def run_server(cfg: Config, *, host: str, port: int | None = None, tls: bool = T
     try:
         stop_event.wait()
     finally:
-        httpd.shutdown()
-        httpd.server_close()
+        for httpd in servers:
+            httpd.shutdown()
+            httpd.server_close()
         _remove_pid_file()
         signal.signal(signal.SIGTERM, previous_term)
         signal.signal(signal.SIGINT, previous_int)

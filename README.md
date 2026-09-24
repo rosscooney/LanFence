@@ -1319,13 +1319,18 @@ currently running automatically.
 
 **Security posture, by design:**
 
-- **Binds only to this host's own detected LAN address** (found the same
-  way a browser or any other LAN client would resolve "my own address" -
-  never `0.0.0.0` or a public interface), and refuses to start if that
-  can't be confirmed as a private address. A device on your own LAN is
-  exactly the population this whole tool exists to distrust, so the portal
-  is never reachable from anywhere else, including the internet, even if
-  this host also has a public interface.
+- **Binds only to this host's own private LAN addresses** - never
+  `0.0.0.0` or a public address. It finds this host's LAN address (the
+  same way a browser or any other LAN client would resolve "my own
+  address") and refuses to start if that can't be confirmed as private.
+  It then also listens on every other private address on the same
+  interface - if eth0 has several addresses, the portal answers on each
+  (`lanfence web` prints one URL per address). Public addresses are always
+  skipped, as are IPv6 link-local ones, which need a scope ID and don't
+  work in most browser URLs. A device on your own LAN is exactly the
+  population this whole tool exists to distrust, so the portal is never
+  reachable from anywhere else, including the internet, even if this host
+  also has a public interface.
 - **Always HTTPS, via a self-signed certificate generated on first run -
   there is no plain-HTTP mode.** "On your own LAN" doesn't mean
   "trustworthy" - the whole premise of this tool is that other devices on

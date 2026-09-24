@@ -13,6 +13,15 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Changed
+
+- The web portal now listens on every private address of the interface
+  holding the host's LAN address (e.g. all of eth0's addresses), not just
+  the one detected address, with one self-signed certificate covering
+  them all. Public and IPv6 link-local addresses are still never used.
+
 ## [0.6.2] - 2026-09-24
 
 ### Added

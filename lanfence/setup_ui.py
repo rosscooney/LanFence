@@ -588,7 +588,7 @@ def run_setup(path, loaded):
                     typer.echo("Web portal enabled, but no password is set yet - it cannot start until you set one.")
                 else:
                     try:
-                        bind_host = web.resolve_bind_host()
+                        bind_hosts = web.resolve_bind_hosts()
                         firewall = web.detect_active_firewall()
                         if firewall is not None:
                             typer.echo(
@@ -597,16 +597,18 @@ def run_setup(path, loaded):
                                 "portal itself is running (ping/reachability to this host still works)."
                             )
                             if typer.confirm(f"Allow port {web_after.port}/tcp through {firewall} now?", default=True):
-                                _, message = web.allow_port_through_firewall(
-                                    firewall, host=bind_host, port=web_after.port
-                                )
-                                typer.echo(message)
+                                # ufw rules are scoped per address; firewalld's aren't.
+                                for bind_host in bind_hosts if firewall == "ufw" else bind_hosts[:1]:
+                                    _, message = web.allow_port_through_firewall(
+                                        firewall, host=bind_host, port=web_after.port
+                                    )
+                                    typer.echo(message)
                     except web.WebError:
                         pass  # bind host not resolvable yet - the start attempt below will surface this clearly
                     if typer.confirm("Start the web portal now?", default=False):
                         try:
-                            url = web.start_background(path)
-                            typer.echo(f"Web portal starting: {url}")
+                            urls = web.start_background(path)
+                            typer.echo(f"Web portal starting: {', '.join(urls)}")
                             typer.echo(
                                 "This is a convenience start for right now - it won't survive a reboot or "
                                 "restart automatically after a crash; see README for the packaged systemd unit."

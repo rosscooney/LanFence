@@ -55,6 +55,56 @@ def test_resolve_bind_host_accepts_private_address():
         assert web.resolve_bind_host() == "192.168.1.50"
 
 
+
+_IP_JSON = """[
+  {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1"}]},
+  {"ifname": "eth0", "addr_info": [
+    {"family": "inet", "local": "192.168.1.50"},
+    {"family": "inet", "local": "192.168.20.5"},
+    {"family": "inet", "local": "81.2.69.160"},
+    {"family": "inet6", "local": "fd12:3456::50"},
+    {"family": "inet6", "local": "fe80::1234"}
+  ]},
+  {"ifname": "wlan0", "addr_info": [{"family": "inet", "local": "10.9.9.9"}]}
+]"""
+
+
+def test_addresses_on_interface_holding_reads_ip_json():
+    import subprocess
+
+    done = subprocess.CompletedProcess(args=[], returncode=0, stdout=_IP_JSON)
+    with patch("lanfence.web.subprocess.run", return_value=done):
+        assert web._addresses_on_interface_holding("192.168.1.50") == [
+            "192.168.1.50", "192.168.20.5", "81.2.69.160", "fd12:3456::50", "fe80::1234",
+        ]
+
+
+def test_addresses_on_interface_holding_is_empty_without_ip_command():
+    with patch("lanfence.web.subprocess.run", side_effect=FileNotFoundError()):
+        assert web._addresses_on_interface_holding("192.168.1.50") == []
+
+
+def test_resolve_bind_hosts_includes_every_private_address_on_the_interface():
+    import subprocess
+
+    done = subprocess.CompletedProcess(args=[], returncode=0, stdout=_IP_JSON)
+    with patch.object(web, "detect_lan_ip", return_value="192.168.1.50"), \
+         patch("lanfence.web.subprocess.run", return_value=done):
+        hosts = web.resolve_bind_hosts()
+    # public (81.2.69.160) and link-local (fe80::) are skipped; other interfaces aren't included
+    assert hosts == ["192.168.1.50", "192.168.20.5", "fd12:3456::50"]
+
+
+def test_resolve_bind_hosts_falls_back_to_the_detected_address():
+    with patch.object(web, "detect_lan_ip", return_value="192.168.1.50"), \
+         patch("lanfence.web.subprocess.run", side_effect=FileNotFoundError()):
+        assert web.resolve_bind_hosts() == ["192.168.1.50"]
+
+
+def test_portal_url_brackets_ipv6():
+    assert web.portal_url("192.168.1.5", 8080) == "https://192.168.1.5:8080/"
+    assert web.portal_url("fd12::5", 8080) == "https://[fd12::5]:8080/"
+
 def test_resolve_bind_host_rejects_public_address():
     with patch("lanfence.web.detect_lan_ip", return_value="8.8.8.8"):
         with pytest.raises(web.WebError, match="not a private LAN address"):
@@ -261,11 +311,11 @@ def test_start_background_spawns_detached_process_and_returns_url(tmp_path: Path
     config_path.write_text(
         f"web:\n  enabled: true\n  port: 9191\n  password_hash: {password_hash!r}\n  password_salt: {password_salt!r}\n"
     )
-    with patch("lanfence.web.resolve_bind_host", return_value="192.168.1.5"), \
+    with patch("lanfence.web.resolve_bind_hosts", return_value=["192.168.1.5", "10.0.0.5"]), \
          patch("lanfence.web._resolved_log_file", return_value=tmp_path / "web.log"), \
          patch("lanfence.web.subprocess.Popen") as popen_mock:
-        url = web.start_background(config_path)
-    assert url == "https://192.168.1.5:9191/"
+        urls = web.start_background(config_path)
+    assert urls == ["https://192.168.1.5:9191/", "https://10.0.0.5:9191/"]
     popen_mock.assert_called_once()
     args = popen_mock.call_args.args[0]
     assert args[-3:] == ["web", "--config", str(config_path)]
@@ -325,6 +375,23 @@ def test_ensure_self_signed_cert_regenerates_for_a_different_host(tmp_path: Path
     assert host_path.read_text(encoding="utf-8") == "192.168.1.99"
 
 
+
+def test_ensure_self_signed_cert_covers_every_bound_address(tmp_path: Path):
+    import subprocess
+
+    cert_path = tmp_path / "cert.pem"
+    with patch("lanfence.web._resolved_cert_file", return_value=cert_path), \
+         patch("lanfence.web._resolved_key_file", return_value=tmp_path / "key.pem"), \
+         patch("lanfence.web._resolved_cert_host_file", return_value=tmp_path / "cert.host"):
+        web.ensure_self_signed_cert(["192.168.1.50", "192.168.20.5"])
+        first = cert_path.read_bytes()
+        web.ensure_self_signed_cert(["192.168.1.50", "192.168.20.5"])
+        assert cert_path.read_bytes() == first  # reused for the same addresses
+    text = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-noout", "-text"], capture_output=True, text=True, check=True
+    ).stdout
+    assert "192.168.1.50" in text and "192.168.20.5" in text
+
 def test_ensure_self_signed_cert_raises_web_error_when_openssl_missing(tmp_path: Path):
     with patch("lanfence.web._resolved_cert_file", return_value=tmp_path / "cert.pem"), \
          patch("lanfence.web._resolved_key_file", return_value=tmp_path / "key.pem"), \
@@ -371,9 +438,47 @@ def test_run_server_wraps_socket_in_tls_by_default(tmp_path: Path):
         with patch("lanfence.web.threading.Event") as event_cls:
             event_cls.return_value.wait.return_value = None
             web.run_server(cfg, host="127.0.0.1", port=9443)
-    ensure_mock.assert_called_once_with("127.0.0.1")
+    ensure_mock.assert_called_once_with(["127.0.0.1"])
     ssl_context.load_cert_chain.assert_called_once()
     assert fake_httpd.socket == "tls-wrapped-socket"
+
+
+
+def _run_server_with_mocks(hosts, *, v4=None, v6=None):
+    from unittest.mock import MagicMock
+
+    v4 = v4 or MagicMock()
+    v6 = v6 or MagicMock()
+    with patch("lanfence.web.ThreadingHTTPServer", v4), \
+         patch("lanfence.web._ThreadingHTTPServerV6", v6), \
+         patch("lanfence.web._write_pid_file"), patch("lanfence.web._remove_pid_file"), \
+         patch("lanfence.web.threading.Thread"), patch("lanfence.web.signal.signal"), \
+         patch("lanfence.web.threading.Event") as event_cls:
+        event_cls.return_value.wait.return_value = None
+        web.run_server(Config(), host=hosts, port=9443, tls=False)
+    return v4, v6
+
+
+def test_run_server_listens_on_every_address():
+    v4, v6 = _run_server_with_mocks(["192.168.1.50", "192.168.20.5", "fd12::50"])
+    assert [c.args[0] for c in v4.call_args_list] == [("192.168.1.50", 9443), ("192.168.20.5", 9443)]
+    assert [c.args[0] for c in v6.call_args_list] == [("fd12::50", 9443)]
+
+
+def test_run_server_skips_an_extra_address_it_cannot_bind():
+    from unittest.mock import MagicMock
+
+    bound = MagicMock()
+    v4 = MagicMock(side_effect=[bound, OSError("Cannot assign requested address")])
+    _run_server_with_mocks(["192.168.1.50", "192.168.20.5"], v4=v4)
+    bound.shutdown.assert_called_once()  # the primary still served, and was shut down cleanly
+
+
+def test_run_server_fails_if_the_primary_address_cannot_be_bound():
+    from unittest.mock import MagicMock
+
+    with pytest.raises(OSError):
+        _run_server_with_mocks(["192.168.1.50"], v4=MagicMock(side_effect=OSError("in use")))
 
 
 def test_tls_wrapped_server_accepts_real_https_requests(tmp_path: Path):

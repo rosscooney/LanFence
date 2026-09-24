@@ -365,13 +365,13 @@ def test_channel_test_failure_does_not_echo_remote_error(tmp_path):
 
 def test_web_portal_enable_set_password_offers_and_starts(tmp_path):
     path = tmp_path / 'config.yaml'
-    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/') as start_mock, \
-         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+    with patch('lanfence.web.start_background', return_value=['https://192.168.1.5:8080/']) as start_mock, \
+         patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value=None):
         result, _ = run_setup(
             path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n',
         )
-    assert 'Web portal starting: http://192.168.1.5:8080/' in result.output
+    assert 'Web portal starting: https://192.168.1.5:8080/' in result.output
     start_mock.assert_called_once_with(path)
     raw = yaml.safe_load(path.read_text())
     assert raw['web']['enabled'] is True
@@ -382,8 +382,8 @@ def test_web_portal_enable_set_password_offers_and_starts(tmp_path):
 
 def test_web_portal_enable_offers_to_open_firewall_when_active(tmp_path):
     path = tmp_path / 'config.yaml'
-    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/'), \
-         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+    with patch('lanfence.web.start_background', return_value=['https://192.168.1.5:8080/']), \
+         patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value='ufw'), \
          patch('lanfence.web.allow_port_through_firewall', return_value=(True, 'firewall rule added (ufw)')) as allow_mock:
         result, _ = run_setup(
@@ -396,8 +396,8 @@ def test_web_portal_enable_offers_to_open_firewall_when_active(tmp_path):
 
 def test_web_portal_enable_declining_firewall_prompt_skips_it(tmp_path):
     path = tmp_path / 'config.yaml'
-    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/'), \
-         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+    with patch('lanfence.web.start_background', return_value=['https://192.168.1.5:8080/']), \
+         patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value='ufw'), \
          patch('lanfence.web.allow_port_through_firewall') as allow_mock:
         result, _ = run_setup(
@@ -409,8 +409,8 @@ def test_web_portal_enable_declining_firewall_prompt_skips_it(tmp_path):
 
 def test_web_portal_enable_no_firewall_prompt_when_none_detected(tmp_path):
     path = tmp_path / 'config.yaml'
-    with patch('lanfence.web.start_background', return_value='http://192.168.1.5:8080/'), \
-         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+    with patch('lanfence.web.start_background', return_value=['https://192.168.1.5:8080/']), \
+         patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value=None), \
          patch('lanfence.web.allow_port_through_firewall') as allow_mock:
         result, _ = run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n')
@@ -429,7 +429,7 @@ def test_web_portal_enable_without_password_does_not_offer_start(tmp_path):
 def test_web_portal_declining_start_does_not_call_start_background(tmp_path):
     path = tmp_path / 'config.yaml'
     with patch('lanfence.web.start_background') as start_mock, \
-         patch('lanfence.web.resolve_bind_host', return_value='192.168.1.5'), \
+         patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value=None):
         result, _ = run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\nn\nexit\n')
     start_mock.assert_not_called()
@@ -451,6 +451,7 @@ def test_web_portal_disable_stops_running_server(tmp_path):
         result, _ = run_setup(path, '9\n1\nn\nback\nsave\nexit\n')
     assert 'Web portal stopped.' in result.output
     stop_mock.assert_called_once()
+
 
 
 def test_web_portal_password_change_while_running_notes_restart_needed(tmp_path):

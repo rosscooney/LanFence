@@ -3352,12 +3352,14 @@ def test_web_starts_server_when_configured(config_path: Path):
         config_path.read_text() + "web:\n  enabled: true\n  password_hash: 'a'\n  password_salt: 'b'\n"
     )
     with patch("lanfence.web.detect_lan_ip", return_value="192.168.1.20"), \
+         patch("lanfence.web._addresses_on_interface_holding", return_value=["192.168.1.20", "10.0.0.20"]), \
          patch("lanfence.web.run_server") as run_mock:
         result = runner.invoke(app, ["web", "--config", str(config_path)])
     assert result.exit_code == 0
-    assert "192.168.1.20" in result.output
+    assert "https://192.168.1.20:8080/" in result.output
+    assert "https://10.0.0.20:8080/" in result.output
     run_mock.assert_called_once()
-    assert run_mock.call_args.kwargs["host"] == "192.168.1.20"
+    assert run_mock.call_args.kwargs["host"] == ["192.168.1.20", "10.0.0.20"]
 
 
 def test_digest_includes_portal_link_when_web_running(config_path: Path):

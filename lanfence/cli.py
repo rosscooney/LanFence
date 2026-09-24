@@ -2600,8 +2600,9 @@ def web_cmd(config: Optional[Path] = typer.Option(None, "--config", "-c", help="
 
     Configure it first via `lanfence setup`'s Web portal section (enable it
     and set a password) - this command only starts the already-configured
-    server and has no flags of its own. Binds to this host's own detected
-    LAN address only (never 0.0.0.0 or a public interface), and refuses to
+    server and has no flags of its own. Binds to every private address on
+    the interface holding this host's LAN address (never 0.0.0.0 or a
+    public address), and refuses to
     start if the portal isn't enabled or no password has been set yet.
     Runs in the foreground until interrupted (Ctrl+C); see README for
     running it continuously via the packaged systemd unit instead.
@@ -2619,12 +2620,13 @@ def web_cmd(config: Optional[Path] = typer.Option(None, "--config", "-c", help="
         )
         raise typer.Exit(code=2)
     try:
-        host = web.resolve_bind_host()
+        hosts = web.resolve_bind_hosts()
     except web.WebError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(code=1) from exc
-    typer.secho(f"LAN Fence web portal: https://{host}:{cfg.web.port}/", fg="green")
-    web.run_server(cfg, host=host)
+    for host in hosts:
+        typer.secho(f"LAN Fence web portal: {web.portal_url(host, cfg.web.port)}", fg="green")
+    web.run_server(cfg, host=hosts)
 
 
 _IEEE_OUI_CSV_URL = "https://standards-oui.ieee.org/oui/oui.csv"
