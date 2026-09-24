@@ -478,6 +478,7 @@ def run_active_sweep(
     return ScanResult(
         started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,
         mode="active", devices=list(devices_by_mac.values()), events=events, findings=findings, errors=errors,
+        site_name=cfg.site.name, site_location=cfg.site.location,
     )
 
 

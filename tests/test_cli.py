@@ -608,6 +608,8 @@ def test_run_is_an_alias_for_scan(config_path: Path):
     with patch("lanfence.cli.run_active_sweep") as sweep_mock:
         sweep_mock.return_value.findings = []
         sweep_mock.return_value.errors = []
+        sweep_mock.return_value.site_name = None
+        sweep_mock.return_value.site_location = None
         sweep_mock.return_value.to_json.return_value = "{}"
         result = runner.invoke(app, ["run", "--config", str(config_path)])
     assert result.exit_code == 0
@@ -756,6 +758,7 @@ def test_scan_json_output_omits_triage_summary_and_stays_stable(config_path: Pat
     data = json.loads("\n".join(lines[json_start:]))
     assert set(data.keys()) == {
         "started_at", "ended_at", "interface", "subnet", "mode", "devices", "events", "findings", "errors",
+        "site_name", "site_location",
     }
 
 
@@ -2136,6 +2139,28 @@ def test_device_json_output_includes_identity(config_path: Path):
     assert payload["identity"]["category"] == "Unknown"
     assert payload["identity"]["confidence"] > 0
     assert len(payload["identity"]["evidence"]) >= 1
+
+
+def test_device_json_output_includes_site_when_configured(config_path: Path):
+    import json
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    cfg_dict["site"] = {"name": "My Home LAN", "location": "Living room"}
+    config_path.write_text(yaml.safe_dump(cfg_dict))
+
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--format", "json", "--config", str(config_path)])
+    payload = json.loads(result.output)
+    assert payload["site"] == {"name": "My Home LAN", "location": "Living room"}
+
+
+def test_device_json_output_site_defaults_to_null(config_path: Path):
+    import json
+
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--format", "json", "--config", str(config_path)])
+    payload = json.loads(result.output)
+    assert payload["site"] == {"name": None, "location": None}
 
 
 def test_device_metadata_edit_does_not_create_lifecycle_event(config_path: Path):

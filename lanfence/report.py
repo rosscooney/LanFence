@@ -98,6 +98,11 @@ def render_scan_result(result: ScanResult, *, plain: bool = False) -> str:
         return text
 
     console = Console()
+    if result.site_name or result.site_location:
+        site = " ".join(
+            p for p in (result.site_name, f"({result.site_location})" if result.site_location else None) if p
+        )
+        console.print(f"[bold]Site:[/bold] {_rich_escape(site)}")
     if result.errors:
         for err in result.errors:
             console.print(f"[red]error:[/red] {_rich_escape(err)}")
@@ -155,8 +160,11 @@ def _render_findings(console, findings: list[Finding]) -> None:
 
 
 def _plain_summary(result: ScanResult) -> list[str]:
-    lines = [
-        "LAN Fence scan result",
+    lines = ["LAN Fence scan result"]
+    if result.site_name or result.site_location:
+        site = " ".join(p for p in (result.site_name, f"({result.site_location})" if result.site_location else None) if p)
+        lines.append(f"  site:      {site}")
+    lines += [
         f"  interface: {result.interface or '?'}",
         f"  subnet:    {result.subnet or '?'}",
         f"  started:   {format_datetime(result.started_at)}",

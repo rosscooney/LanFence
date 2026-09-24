@@ -435,6 +435,12 @@ class ScanResult(BaseModel):
     ended_at: datetime
     interface: str | None = None
     subnet: str | None = None
+    #: The operator-set site name/location (see
+    #: :class:`lanfence.config.SiteConfig`), so a script consuming JSON
+    #: output from more than one LAN Fence instance can tell them apart -
+    #: purely descriptive, ``None`` when unset.
+    site_name: str | None = None
+    site_location: str | None = None
     mode: Literal["active", "passive", "active+passive"] = "active"
     devices: list[Device] = Field(default_factory=list)
     events: list[DeviceEvent] = Field(default_factory=list)

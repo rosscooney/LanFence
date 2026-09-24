@@ -1789,6 +1789,10 @@ def device(
             # None when never actively inspected (see `lanfence inspect`) -
             # distinct from an inspection that ran and found nothing.
             "inspection": dossier.inspection.model_dump(mode="json") if dossier.inspection else None,
+            # The operator-set site name/location (see SiteConfig) - lets a
+            # script consuming output from more than one LAN Fence instance
+            # tell them apart; both null when unset.
+            "site": {"name": cfg.site.name, "location": cfg.site.location},
         }
         typer.echo(json.dumps(payload, indent=2))
     else:

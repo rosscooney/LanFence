@@ -457,6 +457,29 @@ def test_run_active_sweep_merges_ipv4_and_ipv6_sightings(tmp_path: Path):
     assert result.errors == []
 
 
+def test_run_active_sweep_includes_configured_site_name_and_location(tmp_path: Path):
+    cfg = Config(site={"name": "My Home LAN", "location": "Living room"})
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]):
+        store = DeviceStore(tmp_path / "db.sqlite")
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(), interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+    assert result.site_name == "My Home LAN"
+    assert result.site_location == "Living room"
+
+
+def test_run_active_sweep_site_defaults_to_none(tmp_path: Path):
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]):
+        store = DeviceStore(tmp_path / "db.sqlite")
+        result = run_active_sweep(Config(), store, Allowlist.load(None), SignatureSet.load(), interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+    assert result.site_name is None
+    assert result.site_location is None
+
+
 def test_run_active_sweep_same_mac_dual_stack_retains_both_addresses_one_event(tmp_path: Path):
     """The core address/name-provenance requirement: multiple addresses for
     one MAC in the same sweep must all reach evidence storage, without

@@ -95,6 +95,18 @@ def test_render_scan_result_with_errors_plain(capsys):
     assert "boom" in text
 
 
+def test_render_scan_result_shows_site_line_when_set():
+    result = ScanResult(started_at=_now(), ended_at=_now(), site_name="My Home LAN", site_location="Living room")
+    text = render_scan_result(result, plain=True)
+    assert "site:      My Home LAN (Living room)" in text
+
+
+def test_render_scan_result_omits_site_line_when_unset():
+    result = ScanResult(started_at=_now(), ended_at=_now())
+    text = render_scan_result(result, plain=True)
+    assert "site:" not in text
+
+
 # --- review_status_label ----------------------------------------------------
 
 
