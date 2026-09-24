@@ -13,7 +13,7 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
-## [Unreleased]
+## [0.6.2] - 2026-09-24
 
 ### Added
 
