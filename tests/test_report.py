@@ -545,6 +545,34 @@ def test_render_dossier_compact_shows_classification_and_first_last_seen_and_sta
     assert "Status:     Online" in text
 
 
+def test_render_dossier_compact_shows_identity_summary():
+    from lanfence.identity import DeviceIdentity
+
+    dossier = _dossier_for_report(
+        identity=DeviceIdentity(manufacturer="Sonos", family="Sonos speaker", category="Media Device", confidence=55),
+    )
+    text = render_dossier_compact(dossier)
+    assert "Identity:      Sonos speaker (Media Device, 55% confidence)" in text
+
+
+def test_render_dossier_compact_identity_unknown_without_evidence():
+    text = render_dossier_compact(_dossier_for_report())
+    assert "Identity:      Unknown (no supporting evidence)" in text
+
+
+def test_render_dossier_compact_labels_a_user_set_category_as_the_users():
+    from lanfence.identity import DeviceIdentity
+
+    now = _now()
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now,
+        metadata=DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", category_override="Printer"),
+    )
+    dossier = _dossier_for_report(device=device, identity=DeviceIdentity(category="Computer", confidence=20))
+    text = render_dossier_compact(dossier)
+    assert "(Computer, 20% confidence) - you set category: Printer" in text
+
+
 def test_render_dossier_compact_shows_human_readable_dates_not_raw_isoformat():
     device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=_now(), last_seen=_now())
     dossier = _dossier_for_report(device=device)

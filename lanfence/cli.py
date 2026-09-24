@@ -1989,7 +1989,7 @@ def _run_interactive_review(cfg: Config) -> None:
                         dev, events, now - timedelta(days=30), now=now,
                         default_offline_after_seconds=cfg.scan.offline_grace_seconds,
                         addresses=dossier.addresses, names=dossier.names, services=dossier.services,
-                        classification=dossier.classification,
+                        classification=dossier.classification, identity=dossier.identity,
                     )
                     typer.echo("")
                     continue

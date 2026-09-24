@@ -516,6 +516,22 @@ def _identity_lines(identity: DeviceIdentity, *, escape: bool = False) -> list[s
     return lines
 
 
+def _identity_summary_line(dossier: DeviceDossier) -> str:
+    """One-line Know Your Network identity for the compact review view -
+    the full evidence trail stays in the "Full details" view. A category
+    the operator set is shown as theirs, never passed off as detected."""
+
+    identity = dossier.identity
+    if identity.is_known:
+        line = f"Identity:      {identity.probable_identity} ({identity.category}, {identity.confidence}% confidence)"
+    else:
+        line = "Identity:      Unknown (no supporting evidence)"
+    metadata = dossier.device.metadata
+    if metadata and metadata.category_override:
+        line += f" - you set category: {metadata.category_override}"
+    return line
+
+
 def _inventory_detail_lines(metadata: DeviceMetadata, *, escape: bool = False) -> list[str]:
     """The "Inventory details" block's field lines, shared by the plain-text
     and Rich renders of `render_device_detail` - owner/location keep their
@@ -593,6 +609,7 @@ def render_dossier_compact(
 
     lines.append("")
     lines.extend(_classification_lines(dossier.classification))
+    lines.append(_identity_summary_line(dossier))
 
     lines.append("")
     lines.append(f"First seen: {format_datetime(dossier.device.first_seen)}")
