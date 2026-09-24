@@ -3,7 +3,9 @@
 
 """The device dossier: one consolidated view of everything LAN Fence
 already retains about a single device, plus a conservative, labeled
-"likely device" classification (see :mod:`lanfence.classify`).
+"likely device" classification (see :mod:`lanfence.classify`) and a
+structured, confidence-scored "Know Your Network" identity (see
+:mod:`lanfence.identity`).
 
 This is deliberately a *read* layer, not a new source of truth - every
 field here comes from data :mod:`lanfence.db`/:mod:`lanfence.engine`
@@ -34,6 +36,7 @@ from lanfence.classify import DeviceClassification, classify_device
 from lanfence.db import DeviceStore
 from lanfence.engine import build_device, is_review_needed
 from lanfence.fingerprint import SignatureSet, fingerprint_device
+from lanfence.identity import DeviceIdentity, IdentityEvidence, IdentityRuleSet, infer_identity
 from lanfence.models import AddressEvidence, AdvertisedService, Device, InspectionResult, NameEvidence, Severity
 from lanfence.netutil import is_locally_administered
 from lanfence.sanitize import clean_text
@@ -72,6 +75,10 @@ class DeviceDossier(BaseModel):
     services: list[AdvertisedService] = Field(default_factory=list)
     fingerprint_matches: list[FingerprintMatchInfo] = Field(default_factory=list)
     classification: DeviceClassification = Field(default_factory=DeviceClassification)
+    #: The "Know Your Network" structured identity guess (see
+    #: :mod:`lanfence.identity`) - additive alongside ``classification``
+    #: above, not a replacement for it; see the module docstring.
+    identity: DeviceIdentity = Field(default_factory=DeviceIdentity)
     is_locally_administered_mac: bool = False
     #: The most recent `lanfence inspect` result for this device, if it has
     #: ever been actively inspected - see :mod:`lanfence.active_inspect`.
@@ -116,6 +123,7 @@ def build_device_dossier(
     mac: str,
     *,
     signatures: SignatureSet,
+    identity_rules: IdentityRuleSet,
     vendor_file: Path | str | None = None,
     now: datetime | None = None,
     device: Optional[Device] = None,
@@ -129,6 +137,12 @@ def build_device_dossier(
     fetched a piece (e.g. `lanfence device`, which needs the same evidence
     for its own JSON payload) pass it straight through instead of a second
     database round trip; omitted pieces are fetched fresh here.
+
+    ``identity_rules`` (see :class:`~lanfence.identity.IdentityRuleSet`)
+    drives the ``identity`` field the same way ``signatures`` drives
+    ``fingerprint_matches`` - required, not defaulted, so a caller always
+    makes an explicit choice about which rule set (packaged plus any
+    operator extra file) to score against.
 
     ``inspection`` is tri-state, unlike the other overrides: omit it (the
     default) to look up any persisted `lanfence inspect` result fresh;
@@ -164,12 +178,28 @@ def build_device_dossier(
         for m in matches
     ]
 
+    current_services = [s for s in services if s.status == "current"]
     classification = classify_device(
         vendor=device.vendor,
         hostname=device.hostname,
         fingerprint_categories=[m.category for m in matches],
-        service_labels=[s.service_label for s in services if s.status == "current" and s.service_label],
-        service_types=[s.service_type for s in services if s.status == "current"],
+        service_labels=[s.service_label for s in current_services if s.service_label],
+        service_types=[s.service_type for s in current_services],
+    )
+
+    identity = infer_identity(
+        IdentityEvidence(
+            vendor=device.vendor,
+            hostname=device.hostname,
+            locally_administered=is_locally_administered(mac),
+            fingerprint_categories=frozenset(m.category for m in matches),
+            service_types=tuple(s.service_type for s in current_services),
+            service_labels=tuple(s.service_label for s in current_services if s.service_label),
+            txt_values=tuple(v for s in current_services for v in s.attributes.values()),
+            ssdp_servers=tuple(s.server for s in current_services if s.server),
+            open_ports=frozenset(p.port for p in inspection.open_ports) if inspection else frozenset(),
+        ),
+        identity_rules,
     )
 
     return DeviceDossier(
@@ -179,6 +209,7 @@ def build_device_dossier(
         services=services,
         fingerprint_matches=fingerprint_matches,
         classification=classification,
+        identity=identity,
         is_locally_administered_mac=is_locally_administered(mac),
         inspection=inspection,
     )

@@ -16,11 +16,16 @@ from lanfence.dossier import (
 )
 from lanfence.engine import process_sighting
 from lanfence.fingerprint import SignatureSet
+from lanfence.identity import IdentityRuleSet
 from lanfence.models import AdvertisedService, Device
 
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _identity_rules() -> IdentityRuleSet:
+    return IdentityRuleSet.load()
 
 
 def _device(**overrides):
@@ -59,6 +64,7 @@ def test_build_device_dossier_none_for_never_observed_mac(tmp_path: Path):
     store = DeviceStore(tmp_path / "db.sqlite")
     dossier = build_device_dossier(
         store, Allowlist.load(None), "aa:bb:cc:dd:ee:ff", signatures=SignatureSet.load(),
+        identity_rules=_identity_rules(),
     )
     store.close()
     assert dossier is None
@@ -72,6 +78,7 @@ def test_build_device_dossier_gathers_evidence_and_classification(tmp_path: Path
     )
     dossier = build_device_dossier(
         store, Allowlist.load(None), "b8:27:eb:11:22:33", signatures=SignatureSet.load(),
+        identity_rules=_identity_rules(),
     )
     store.close()
 
@@ -81,6 +88,9 @@ def test_build_device_dossier_gathers_evidence_and_classification(tmp_path: Path
     assert dossier.classification.device_type == "Raspberry Pi"
     assert dossier.classification.confidence == "high"
     assert dossier.is_locally_administered_mac is False
+    assert dossier.identity.family == "Raspberry Pi"
+    assert dossier.identity.category == "Development Board / SBC"
+    assert dossier.identity.confidence > 0
 
 
 def test_build_device_dossier_uses_passed_in_services_for_classification(tmp_path: Path):
@@ -92,7 +102,7 @@ def test_build_device_dossier_uses_passed_in_services_for_classification(tmp_pat
     service = _service()
     dossier = build_device_dossier(
         store, Allowlist.load(None), "00:0e:58:11:22:33", signatures=SignatureSet.load(),
-        services=[service],
+        identity_rules=_identity_rules(), services=[service],
     )
     store.close()
 
@@ -110,7 +120,7 @@ def test_build_device_dossier_reuses_passed_in_device_without_a_second_lookup(tm
     prebuilt = _device(mac="aa:bb:cc:dd:ee:ff", hostname="already-built")
     dossier = build_device_dossier(
         store, Allowlist.load(None), "aa:bb:cc:dd:ee:ff", signatures=SignatureSet.load(),
-        device=prebuilt, addresses=[], names=[], services=[],
+        identity_rules=_identity_rules(), device=prebuilt, addresses=[], names=[], services=[],
     )
     store.close()
     assert dossier is not None

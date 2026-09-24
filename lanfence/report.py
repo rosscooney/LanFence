@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from lanfence.classify import DeviceClassification
 from lanfence.dossier import DeviceDossier, TriageSummary
+from lanfence.identity import DeviceIdentity
 from lanfence.models import (
     AddressEvidence,
     AdvertisedService,
@@ -481,6 +482,51 @@ def _classification_lines(classification: DeviceClassification, *, escape: bool 
     return lines
 
 
+def _identity_lines(identity: DeviceIdentity, *, escape: bool = False) -> list[str]:
+    """Plain-text "Identity" block shared by `render_device_detail` - the
+    "Know Your Network" structured guess (see :mod:`lanfence.identity`),
+    always shown with its confidence and full evidence trail, never as
+    established fact. ``escape`` applies Rich markup escaping for the
+    rich-console render path."""
+
+    esc = _rich_escape if escape else (lambda s: s)
+    if not identity.is_known:
+        return [f"Probable identity: {esc(identity.probable_identity)} (no supporting evidence)"]
+    lines = [
+        f"Probable identity: {esc(identity.probable_identity)}",
+        f"Category:          {esc(identity.category)}",
+        f"Confidence:        {identity.confidence}%",
+    ]
+    if identity.manufacturer:
+        lines.append(f"Manufacturer:      {esc(identity.manufacturer)}")
+    if identity.platform:
+        lines.append(f"Platform:          {esc(identity.platform)}")
+    lines.append("Evidence:")
+    for item in identity.evidence:
+        sign = "+" if item.weight >= 0 else ""
+        lines.append(f"  {sign}{item.weight}  {esc(item.label)}")
+    return lines
+
+
+def _inventory_detail_lines(metadata: DeviceMetadata, *, escape: bool = False) -> list[str]:
+    """The "Inventory details" block's field lines, shared by the plain-text
+    and Rich renders of `render_device_detail` - owner/location keep their
+    original column width for compatibility; the newer Know Your Network
+    asset fields (see :class:`~lanfence.models.DeviceMetadata`) share a
+    second, wider column since "Category override:" is the longest label."""
+
+    esc = _rich_escape if escape else (lambda s: s)
+    return [
+        f"  Owner:      {esc(metadata.owner or 'Not set')}",
+        f"  Location:   {esc(metadata.location or 'Not set')}",
+        f"  Friendly name:      {esc(metadata.friendly_name or 'Not set')}",
+        f"  Asset type:         {esc(metadata.asset_type or 'Not set')}",
+        f"  Category override:  {esc(metadata.category_override or 'Not set')}",
+        f"  Purpose:            {esc(metadata.purpose or 'Not set')}",
+        f"  Notes:              {esc(metadata.notes or 'Not set')}",
+    ]
+
+
 def _dossier_evidence_lines(dossier: DeviceDossier) -> list[str]:
     """Short, source-labeled evidence bullets for the compact review
     dossier - each traces to a specific retained observation (never a
@@ -782,6 +828,7 @@ def render_device_detail(
     addresses: list[AddressEvidence] | None = None, names: list[NameEvidence] | None = None,
     services: list[AdvertisedService] | None = None,
     classification: DeviceClassification | None = None,
+    identity: DeviceIdentity | None = None,
     inspection: InspectionResult | None = None,
 ) -> str:
     """Render ``lanfence device <mac>`` - current (preferred) details, all
@@ -800,6 +847,9 @@ def render_device_detail(
     :mod:`lanfence.classify`) is a conservative, confidence-labeled "likely
     device" guess - omit to skip that line entirely rather than show a
     misleading "Unknown device" for a caller that never computed one.
+    ``identity`` (see :mod:`lanfence.identity`) is the "Know Your Network"
+    structured guess shown alongside it - a different, complementary
+    assessment, not a replacement; omit the same way to skip the section.
     """
 
     trust = f"trusted ({device.allowlist_name})" if device.allowlisted else "untrusted"
@@ -826,11 +876,15 @@ def render_device_detail(
         lines.append("")
         lines.extend(_classification_lines(classification))
 
+    if identity is not None:
+        lines.append("")
+        lines.append("Identity (Know Your Network):")
+        lines.extend(f"  {line}" for line in _identity_lines(identity))
+
     metadata = device.metadata or DeviceMetadata(mac=device.mac)
     lines.append("")
     lines.append("Inventory details (user-provided, not derived from observed traffic):")
-    lines.append(f"  Owner:      {metadata.owner or 'Not set'}")
-    lines.append(f"  Location:   {metadata.location or 'Not set'}")
+    lines.extend(_inventory_detail_lines(metadata))
 
     lines.append("")
     lines.append(
@@ -890,14 +944,12 @@ def render_device_detail(
     if classification is not None:
         console.print(Panel("\n".join(_classification_lines(classification, escape=True)), title="Likely device"))
 
+    if identity is not None:
+        console.print(Panel("\n".join(_identity_lines(identity, escape=True)), title="Identity (Know Your Network)"))
+
     console.print(
         Panel(
-            "\n".join(
-                [
-                    f"Owner:      {_rich_escape(metadata.owner or 'Not set')}",
-                    f"Location:   {_rich_escape(metadata.location or 'Not set')}",
-                ]
-            ),
+            "\n".join(line.strip() for line in _inventory_detail_lines(metadata, escape=True)),
             title="Inventory details (user-provided)",
         )
     )

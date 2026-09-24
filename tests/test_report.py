@@ -222,6 +222,66 @@ def test_render_device_detail_shows_not_set_when_metadata_absent():
     text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
     assert "Owner:      Not set" in text
     assert "Location:   Not set" in text
+    assert "Friendly name:      Not set" in text
+    assert "Asset type:         Not set" in text
+    assert "Category override:  Not set" in text
+    assert "Purpose:            Not set" in text
+    assert "Notes:              Not set" in text
+
+
+def test_render_device_detail_shows_asset_fields_when_set():
+    now = _now()
+    device = Device(
+        mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now,
+        metadata=DeviceMetadata(
+            mac="aa:bb:cc:dd:ee:ff", friendly_name="Boardroom TV", asset_type="Company",
+            category_override="Media Device", purpose="Boardroom display", notes="Mounted on wall",
+        ),
+    )
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Friendly name:      Boardroom TV" in text
+    assert "Asset type:         Company" in text
+    assert "Category override:  Media Device" in text
+    assert "Purpose:            Boardroom display" in text
+    assert "Notes:              Mounted on wall" in text
+
+
+def test_render_device_detail_omits_identity_section_when_not_given():
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
+    assert "Know Your Network" not in text
+
+
+def test_render_device_detail_shows_identity_section_when_given():
+    from lanfence.identity import DeviceIdentity, IdentityEvidenceItem
+
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    identity = DeviceIdentity(
+        category="Phone", manufacturer="Apple", family="iPhone", platform="iOS", confidence=80,
+        evidence=[
+            IdentityEvidenceItem(label="Hostname suggests an iPhone", weight=30),
+            IdentityEvidenceItem(label="Apple vendor OUI", weight=25),
+        ],
+    )
+    text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True, identity=identity)
+    assert "Identity (Know Your Network)" in text
+    assert "Probable identity: Apple iPhone" in text
+    assert "Category:          Phone" in text
+    assert "Confidence:        80%" in text
+    assert "+30  Hostname suggests an iPhone" in text
+
+
+def test_render_device_detail_identity_no_evidence_still_shown():
+    from lanfence.identity import DeviceIdentity
+
+    now = _now()
+    device = Device(mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now)
+    text = render_device_detail(
+        device, [], now - timedelta(days=1), now=now, plain=True, identity=DeviceIdentity(),
+    )
+    assert "Probable identity: Unknown (no supporting evidence)" in text
 
 
 # --- presence_label ----------------------------------------------------

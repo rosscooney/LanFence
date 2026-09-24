@@ -2057,6 +2057,87 @@ def test_device_metadata_json_output_is_additive(config_path: Path):
     assert payload["device"]["metadata"]["location"] is None
 
 
+# --- device metadata: Know Your Network asset/ownership fields --------------
+
+
+def test_device_set_all_asset_fields_at_once(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--friendly-name", "Boardroom TV", "--asset-type", "Company",
+              "--category", "Media Device", "--purpose", "Boardroom display", "--notes", "Mounted on wall",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Friendly name:      Boardroom TV" in show.output
+    assert "Asset type:         Company" in show.output
+    assert "Category override:  Media Device" in show.output
+    assert "Purpose:            Boardroom display" in show.output
+    assert "Notes:              Mounted on wall" in show.output
+
+
+def test_device_clear_asset_fields(config_path: Path):
+    _seed_devices(config_path)
+    runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--friendly-name", "Boardroom TV", "--asset-type", "Company",
+              "--config", str(config_path)],
+    )
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--clear-friendly-name", "--clear-asset-type",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 0
+
+    show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
+    assert "Friendly name:      Not set" in show.output
+    assert "Asset type:         Not set" in show.output
+
+
+def test_device_set_and_clear_same_asset_field_is_contradictory(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--category", "Printer", "--clear-category",
+              "--config", str(config_path)],
+    )
+    assert result.exit_code == 2
+    assert "contradictory" in result.output.lower()
+
+
+def test_device_rejects_invalid_asset_type(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--asset-type", "Not A Real Type", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "must be one of" in result.output.lower()
+
+
+def test_device_rejects_invalid_category_override(config_path: Path):
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--category", "Spaceship", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "must be one of" in result.output.lower()
+
+
+def test_device_json_output_includes_identity(config_path: Path):
+    # aa:bb:cc:dd:ee:ff has vendor "Apple, Inc." (see _seed_devices), which
+    # matches the packaged Apple OUI identity rule - manufacturer only, no
+    # category, since a bare Apple OUI doesn't say what kind of Apple device.
+    _seed_devices(config_path)
+    result = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--format", "json", "--config", str(config_path)])
+    import json
+
+    payload = json.loads(result.output)
+    assert "identity" in payload
+    assert payload["identity"]["manufacturer"] == "Apple"
+    assert payload["identity"]["category"] == "Unknown"
+    assert payload["identity"]["confidence"] > 0
+    assert len(payload["identity"]["evidence"]) >= 1
+
+
 def test_device_metadata_edit_does_not_create_lifecycle_event(config_path: Path):
     _seed_devices(config_path)
     before = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--since", "365d", "--format", "json",

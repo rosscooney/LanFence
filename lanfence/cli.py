@@ -72,8 +72,9 @@ from lanfence.engine import (
 )
 from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.fsutil import atomic_write
+from lanfence.identity import IdentityRuleSet
 from lanfence.logging_config import setup_logging
-from lanfence.models import Finding, ScanResult, format_datetime
+from lanfence.models import ASSET_TYPES, DEVICE_CATEGORIES, Finding, ScanResult, format_datetime
 from lanfence.netutil import normalize_mac
 from lanfence.safe_errors import summarize_error
 from lanfence.report import (
@@ -416,6 +417,7 @@ def scan(
         _warn_not_root("scan")
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
+    identity_rules = IdentityRuleSet.load(cfg.identity_rules_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     apply_self_trust(allowlist, interface=interface or cfg.scan.interface)
 
@@ -462,8 +464,8 @@ def scan(
             inventory = build_inventory(store, allowlist)
             dossiers = [
                 build_device_dossier(
-                    store, allowlist, d.mac, signatures=signatures, vendor_file=cfg.vendor_file,
-                    now=now, device=d,
+                    store, allowlist, d.mac, signatures=signatures, identity_rules=identity_rules,
+                    vendor_file=cfg.vendor_file, now=now, device=d,
                 )
                 for d in inventory
             ]
@@ -1329,6 +1331,7 @@ def allow(
                 if already_known:
                     dossier = build_device_dossier(
                         store, al, norm_mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+                        identity_rules=IdentityRuleSet.load(cfg.identity_rules_file),
                         vendor_file=cfg.vendor_file,
                     )
             if dossier is not None:
@@ -1539,6 +1542,24 @@ def device(
     location: Optional[str] = typer.Option(None, "--location", help="With a MAC: set the location metadata field."),
     clear_owner: bool = typer.Option(False, "--clear-owner", help="Clear the owner metadata field."),
     clear_location: bool = typer.Option(False, "--clear-location", help="Clear the location metadata field."),
+    friendly_name: Optional[str] = typer.Option(
+        None, "--friendly-name", help="With a MAC: set a human-friendly name, e.g. \"Boardroom TV\"."
+    ),
+    clear_friendly_name: bool = typer.Option(False, "--clear-friendly-name", help="Clear the friendly name."),
+    asset_type: Optional[str] = typer.Option(
+        None, "--asset-type",
+        help=f"With a MAC: set the asset type. One of: {', '.join(ASSET_TYPES)}.",
+    ),
+    clear_asset_type: bool = typer.Option(False, "--clear-asset-type", help="Clear the asset type."),
+    category: Optional[str] = typer.Option(
+        None, "--category",
+        help=f"With a MAC: override the inferred category. One of: {', '.join(DEVICE_CATEGORIES)}.",
+    ),
+    clear_category: bool = typer.Option(False, "--clear-category", help="Clear the category override."),
+    purpose: Optional[str] = typer.Option(None, "--purpose", help="With a MAC: set the purpose metadata field."),
+    clear_purpose: bool = typer.Option(False, "--clear-purpose", help="Clear the purpose metadata field."),
+    notes: Optional[str] = typer.Option(None, "--notes", help="With a MAC: set free-text notes."),
+    clear_notes: bool = typer.Option(False, "--clear-notes", help="Clear the notes field."),
     status: Optional[str] = typer.Option(
         None, "--status", help="Without a MAC: filter the list by status: online | offline."
     ),
@@ -1577,11 +1598,16 @@ def device(
     never changes the allowlist, and a policy edit alone never fabricates a
     lifecycle event or fires an alert.
 
-    With `--owner`/`--location` (or their `--clear-*` counterparts), also
-    edits operator-provided inventory
-    metadata - separate from observed hostname, vendor, trust, review, and
-    presence. Any combination of presence and metadata options may be
-    given in one call; an omitted field is left unchanged, and after a
+    With `--owner`/`--location`/`--friendly-name`/`--asset-type`/
+    `--category`/`--purpose`/`--notes` (or their `--clear-*` counterparts),
+    also edits operator-provided inventory metadata - separate from
+    observed hostname, vendor, trust, review, and presence.
+    `--category` overrides LAN Fence's own inferred identity category
+    (see "Identity" in the output below) without discarding the
+    underlying inference; `--asset-type` records who a device belongs to
+    and why it's on the network (Company/Personal/Infrastructure/IoT/
+    Guest/Unknown). Any combination of presence and metadata options may
+    be given in one call; an omitted field is left unchanged, and after a
     successful update the device's resulting details are shown, same as a
     plain `lanfence device <MAC>`. Metadata edits never scan, alert, or
     create a lifecycle event, and never create a device that hasn't
@@ -1627,11 +1653,15 @@ def device(
     if offline_after is not None and clear_offline_after:
         typer.secho("error: --offline-after and --clear-offline-after are contradictory", fg="red", err=True)
         raise typer.Exit(code=2)
-    for field, set_value, clear_flag in (
-        ("owner", owner, clear_owner), ("location", location, clear_location),
+    for set_value, clear_flag, cli_flag in (
+        (owner, clear_owner, "owner"), (location, clear_location, "location"),
+        (friendly_name, clear_friendly_name, "friendly-name"),
+        (asset_type, clear_asset_type, "asset-type"),
+        (category, clear_category, "category"),
+        (purpose, clear_purpose, "purpose"), (notes, clear_notes, "notes"),
     ):
         if set_value is not None and clear_flag:
-            typer.secho(f"error: --{field} and --clear-{field} are contradictory", fg="red", err=True)
+            typer.secho(f"error: --{cli_flag} and --clear-{cli_flag} are contradictory", fg="red", err=True)
             raise typer.Exit(code=2)
 
     try:
@@ -1647,6 +1677,16 @@ def device(
             metadata_updates["owner"] = validate_metadata_value("owner", owner)
         if location is not None:
             metadata_updates["location"] = validate_metadata_value("location", location)
+        if friendly_name is not None:
+            metadata_updates["friendly_name"] = validate_metadata_value("friendly_name", friendly_name)
+        if asset_type is not None:
+            metadata_updates["asset_type"] = validate_metadata_value("asset_type", asset_type)
+        if category is not None:
+            metadata_updates["category_override"] = validate_metadata_value("category_override", category)
+        if purpose is not None:
+            metadata_updates["purpose"] = validate_metadata_value("purpose", purpose)
+        if notes is not None:
+            metadata_updates["notes"] = validate_metadata_value("notes", notes)
     except ValueError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(code=2) from exc
@@ -1654,6 +1694,16 @@ def device(
         metadata_updates["owner"] = None
     if clear_location:
         metadata_updates["location"] = None
+    if clear_friendly_name:
+        metadata_updates["friendly_name"] = None
+    if clear_asset_type:
+        metadata_updates["asset_type"] = None
+    if clear_category:
+        metadata_updates["category_override"] = None
+    if clear_purpose:
+        metadata_updates["purpose"] = None
+    if clear_notes:
+        metadata_updates["notes"] = None
 
     cfg = _load_config(config)
 
@@ -1712,6 +1762,7 @@ def device(
         services = store.advertised_services(mac=norm_mac, now=now)
         dossier = build_device_dossier(
             store, allowlist, norm_mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+            identity_rules=IdentityRuleSet.load(cfg.identity_rules_file),
             vendor_file=cfg.vendor_file, now=now, device=dev, addresses=addresses, names=names, services=services,
         )
 
@@ -1729,6 +1780,10 @@ def device(
             # matching this device, never presented as verified fact.
             "classification": dossier.classification.model_dump(mode="json"),
             "fingerprint_matches": [m.model_dump(mode="json") for m in dossier.fingerprint_matches],
+            # "Know Your Network" structured identity guess - see
+            # lanfence.identity. Additive alongside "classification" above;
+            # never presented as verified fact.
+            "identity": dossier.identity.model_dump(mode="json"),
             # None when never actively inspected (see `lanfence inspect`) -
             # distinct from an inspection that ran and found nothing.
             "inspection": dossier.inspection.model_dump(mode="json") if dossier.inspection else None,
@@ -1738,7 +1793,7 @@ def device(
         render_device_detail(
             dev, events, since_dt, now=now, default_offline_after_seconds=cfg.scan.offline_grace_seconds,
             addresses=addresses, names=names, services=services, classification=dossier.classification,
-            inspection=dossier.inspection,
+            identity=dossier.identity, inspection=dossier.inspection,
         )
 
 
@@ -1829,6 +1884,7 @@ def _run_interactive_review(cfg: Config) -> None:
     allowlist.path = allowlist_path
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
+    identity_rules = IdentityRuleSet.load(cfg.identity_rules_file)
 
     with _open_store(cfg.resolved_db_path()) as store:
         now = utcnow()
@@ -1849,6 +1905,7 @@ def _run_interactive_review(cfg: Config) -> None:
         candidates = [d for d in build_inventory(store, display_allowlist) if is_review_needed(d, now=now)]
         dossiers = [
             build_device_dossier(store, display_allowlist, d.mac, signatures=signatures,
+                                  identity_rules=identity_rules,
                                   vendor_file=cfg.vendor_file, now=now, device=d, inspection=None)
             for d in candidates
         ]

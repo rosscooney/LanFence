@@ -546,6 +546,8 @@ class Config(BaseModel):
     vendor_file: Path | None = None
     #: Extra rogue-device signatures, merged with the packaged ones.
     rogue_signatures_file: Path | None = None
+    #: Extra Know Your Network identity rules, merged with the packaged ones.
+    identity_rules_file: Path | None = None
 
     @classmethod
     def load(cls, path: Path | str | None) -> "Config":
