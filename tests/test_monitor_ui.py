@@ -283,6 +283,21 @@ def test_render_header_shows_progress_percentage_while_scanning():
     assert "scanning now (30%)" in joined
 
 
+def test_render_header_shows_site_name_on_top_line():
+    snap = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0).snapshot(now_monotonic=0.0)
+    text = render_header(_header(site_name="My Home LAN"), snap, width=200, now_monotonic=0.0)
+    line1 = text.renderables[0].plain
+    assert line1.startswith("My Home LAN")
+    assert "Interface: eth0" in line1
+
+
+def test_render_header_omits_site_name_when_unset():
+    snap = MonitorStats(scan_interval_seconds=60.0, passive_enabled=True, now_monotonic=0.0).snapshot(now_monotonic=0.0)
+    text = render_header(_header(), snap, width=200, now_monotonic=0.0)
+    line1 = text.renderables[0].plain
+    assert line1.startswith("Interface: eth0")
+
+
 def test_format_duration():
     assert format_duration(0) == "00:00:00"
     assert format_duration(65) == "00:01:05"

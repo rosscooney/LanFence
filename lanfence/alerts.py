@@ -85,7 +85,25 @@ def send_syslog(findings: list[Finding], cfg: AlertConfig) -> None:
         syslog.closelog()
 
 
-def _format_findings_text(findings: list[Finding], *, heading: str | None) -> str:
+def _site_line(site_name: str | None, site_location: str | None) -> str | None:
+    """The operator-set site label (see :class:`lanfence.config.SiteConfig`),
+    shown at the top of every alert email so a multi-site operator can tell
+    them apart at a glance - ``None`` when neither field is set. Mirrors
+    :func:`lanfence.digest._site_line` (kept as a separate, tiny copy here
+    rather than a cross-import, since alerts/digest formatting is already
+    entirely independent per channel)."""
+
+    if not site_name and not site_location:
+        return None
+    if site_name and site_location:
+        return f"Site: {site_name} ({site_location})"
+    return f"Site: {site_name or site_location}"
+
+
+def _format_findings_text(
+    findings: list[Finding], *, heading: str | None, site_name: str | None = None,
+    site_location: str | None = None,
+) -> str:
     """A multi-line human-readable summary, shared by every text-based channel.
 
     ``finding.evidence`` (the device's name - its allowlist name, when
@@ -99,6 +117,9 @@ def _format_findings_text(findings: list[Finding], *, heading: str | None) -> st
     """
 
     lines: list[str] = []
+    site_line = _site_line(site_name, site_location)
+    if site_line:
+        lines.append(site_line)
     if heading:
         lines.append(f"{heading}: {len(findings)} finding(s)")
         lines.append("")
@@ -170,7 +191,10 @@ def _html_finding_panel(finding: Finding) -> str:
 """
 
 
-def format_findings_html(findings: list[Finding], *, heading: str = "LAN Fence") -> str:
+def format_findings_html(
+    findings: list[Finding], *, heading: str = "LAN Fence", site_name: str | None = None,
+    site_location: str | None = None,
+) -> str:
     """Branded HTML alternative to :func:`_format_findings_text`, sent
     alongside the plain-text body (see :func:`send_email`) - the same
     look and feel as the digest email (:func:`lanfence.digest.format_digest_html`),
@@ -183,11 +207,18 @@ def format_findings_html(findings: list[Finding], *, heading: str = "LAN Fence")
 
     panels = "".join(_html_finding_panel(f) for f in findings)
     colors = branding.COLORS
+    site_text = _site_line(site_name, site_location)
+    site_row = (
+        f'<tr><td style="padding:10px 20px 0;font-size:13px;font-weight:700;">'
+        f"{html.escape(site_text)}</td></tr>"
+        if site_text else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="{branding.EMAIL_BODY_STYLE}">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_TABLE_STYLE}">
+{site_row}
 <tr><td style="padding:24px 20px 0;">
   <table role="presentation" cellpadding="0" cellspacing="0"><tr>
     <td style="padding-right:8px;">
@@ -221,21 +252,27 @@ def _post_json(url: str, payload: dict, *, timeout: float, label: str) -> None:
         log.error("failed to send %s alert: %s", label, summarize_error(exc))
 
 
-def send_email(findings: list[Finding], cfg: AlertConfig) -> None:
+def send_email(
+    findings: list[Finding], cfg: AlertConfig, *, site_name: str | None = None,
+    site_location: str | None = None,
+) -> None:
     if not cfg.email.enabled or not findings:
         return
     if not cfg.email.to_addrs or not cfg.email.from_addr:
         log.warning("email alerts enabled but from_addr/to_addrs not configured; skipping")
         return
 
+    subject_prefix = f"[{site_name}] " if site_name else ""
     msg = EmailMessage()
-    msg["Subject"] = f"LAN Fence: {len(findings)} finding(s) on your network"
+    msg["Subject"] = f"{subject_prefix}LAN Fence: {len(findings)} finding(s) on your network"
     msg["From"] = cfg.email.from_addr
     msg["To"] = ", ".join(cfg.email.to_addrs)
     # Plain text first (the primary/fallback body for text-only clients),
     # HTML as the alternative - same structure as the digest email.
-    msg.set_content(_format_findings_text(findings, heading="LAN Fence"))
-    msg.add_alternative(format_findings_html(findings), subtype="html")
+    msg.set_content(
+        _format_findings_text(findings, heading="LAN Fence", site_name=site_name, site_location=site_location)
+    )
+    msg.add_alternative(format_findings_html(findings, site_name=site_name, site_location=site_location), subtype="html")
     # Content-ID-attached logo, not inline <svg> - see
     # lanfence.digest.send_digest_email's docstring note for why.
     html_part = msg.get_payload()[-1]
@@ -406,7 +443,10 @@ def send_twilio(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore
             )
 
 
-def dispatch(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore | None = None) -> list[Finding]:
+def dispatch(
+    findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore | None = None,
+    site_name: str | None = None, site_location: str | None = None,
+) -> list[Finding]:
     """Send every finding at or above ``cfg.min_severity`` to every enabled
     channel. Returns the findings that were dispatched.
 
@@ -418,13 +458,18 @@ def dispatch(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore | 
     ``DeviceStore`` connection: pass either ``None`` or a ``DeviceStore``
     opened on *that same* (delivery) thread, never the owning thread's
     connection shared across threads.
+
+    ``site_name``/``site_location`` (see :class:`lanfence.config.SiteConfig`)
+    are passed straight through to :func:`send_email` only - the other
+    channels here don't have an equivalent "top of message" convention to
+    put it in.
     """
 
     to_send = findings_to_alert(findings, cfg)
     if not to_send:
         return []
     send_syslog(to_send, cfg)
-    send_email(to_send, cfg)
+    send_email(to_send, cfg, site_name=site_name, site_location=site_location)
     send_webhook(to_send, cfg)
     send_slack(to_send, cfg)
     send_discord(to_send, cfg)

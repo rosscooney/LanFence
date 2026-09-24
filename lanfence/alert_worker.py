@@ -52,8 +52,16 @@ class AlertDeliveryWorker:
     """Runs :func:`lanfence.alerts.dispatch` on a single background daemon
     thread, fed by a bounded queue. One instance per `monitor` process."""
 
-    def __init__(self, db_path: Path | str, *, maxsize: int = _DEFAULT_MAXSIZE) -> None:
+    def __init__(
+        self, db_path: Path | str, *, maxsize: int = _DEFAULT_MAXSIZE,
+        site_name: str | None = None, site_location: str | None = None,
+    ) -> None:
         self._db_path = db_path
+        # Static for the life of this worker (one instance per `monitor`
+        # process) - see lanfence.config.SiteConfig - so it's captured here
+        # once rather than threaded through every submit()/queue item.
+        self._site_name = site_name
+        self._site_location = site_location
         self._queue: "queue.Queue[tuple[list[Finding], AlertConfig] | None]" = queue.Queue(maxsize=maxsize)
         self._dropped = 0
         self._lock = Lock()
@@ -108,7 +116,10 @@ class AlertDeliveryWorker:
                         return
                     findings, cfg = item
                     try:
-                        alerts.dispatch(findings, cfg, store=store)
+                        alerts.dispatch(
+                            findings, cfg, store=store,
+                            site_name=self._site_name, site_location=self._site_location,
+                        )
                     except Exception:  # noqa: BLE001 - a delivery failure must never kill this thread
                         log.exception("unexpected error in background alert delivery")
                 finally:

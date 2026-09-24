@@ -452,7 +452,7 @@ def scan(
         if alert:
             not_snoozed = filter_snoozed(result.findings, store, now=utcnow())
             to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
-            alerts.dispatch(to_send, cfg.alerts, store=store)
+            alerts.dispatch(to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location)
 
         if output_format != "json":
             # First-run/ongoing triage orientation over the *whole* known
@@ -594,7 +594,7 @@ def _emit_findings(
         elif alert_worker is not None:
             alert_worker.submit(to_send, cfg.alerts)
         else:
-            alerts.dispatch(to_send, cfg.alerts, store=store)
+            alerts.dispatch(to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location)
 
 
 class _DropCountingQueue(queue.Queue):
@@ -680,7 +680,9 @@ def monitor(
         max_dhcp_server_findings=cfg.retention.max_dhcp_server_findings,
         max_discovery_rows_per_table=cfg.retention.max_discovery_rows_per_table,
     )
-    alert_worker = AlertDeliveryWorker(cfg.resolved_db_path())
+    alert_worker = AlertDeliveryWorker(
+        cfg.resolved_db_path(), site_name=cfg.site.name, site_location=cfg.site.location,
+    )
 
     iface = interface or cfg.scan.interface or scanner.default_interface()
     net = subnet or cfg.scan.subnet
@@ -700,7 +702,7 @@ def monitor(
         version=__version__, interface=iface or "(auto)", network=net or "(auto)",
         scan_interval_seconds=cfg.scan.scan_interval_seconds, passive=cfg.scan.passive,
         ipv6=cfg.scan.ipv6, dhcp=dhcp_active, mdns=mdns_active, ssdp=ssdp_active,
-        dhcp_server_detection=dhcp_server_active,
+        dhcp_server_detection=dhcp_server_active, site_name=cfg.site.name,
     )
     stats = monitor_ui.MonitorStats(
         scan_interval_seconds=cfg.scan.scan_interval_seconds, passive_enabled=cfg.scan.passive,
@@ -1063,8 +1065,8 @@ def digest(
     with _open_store(cfg.resolved_db_path()) as store:
         digest_obj = build_digest(
             store, allowlist, since=since_dt, until=until, portal_url=portal_url, monitor_running=monitor_running,
-            generated_by_host=generated_by_host, resolve_missing_hostnames=cfg.scan.resolve_hostnames,
-            dns_timeout_seconds=cfg.scan.dns_timeout_seconds,
+            generated_by_host=generated_by_host, site_name=cfg.site.name, site_location=cfg.site.location,
+            resolve_missing_hostnames=cfg.scan.resolve_hostnames, dns_timeout_seconds=cfg.scan.dns_timeout_seconds,
         )
         events = store.events_since(since_dt) if verbose else []
         devices_by_mac = {d.mac: d for d in store.all_devices()} if verbose else {}

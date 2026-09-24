@@ -115,6 +115,8 @@ def build_digest(
     portal_url: str | None = None,
     monitor_running: bool | None = None,
     generated_by_host: str | None = None,
+    site_name: str | None = None,
+    site_location: str | None = None,
     resolve_missing_hostnames: bool = False,
     dns_timeout_seconds: float = 1.0,
 ) -> Digest:
@@ -126,10 +128,11 @@ def build_digest(
     requirements. Pure read: never writes to the database, never changes
     trust/review/presence state, and never touches alert-dispatch cooldowns.
 
-    ``portal_url``/``monitor_running``/``generated_by_host`` are passed
-    straight through onto the matching ``Digest`` fields - this function
-    never computes any of them itself (a pidfile check or
-    ``socket.gethostname()`` isn't a database read; see
+    ``portal_url``/``monitor_running``/``generated_by_host``/``site_name``/
+    ``site_location`` are passed straight through onto the matching
+    ``Digest`` fields - this function never computes any of them itself (a
+    pidfile check, ``socket.gethostname()``, or reading ``Config.site``
+    isn't a database read; see
     :func:`lanfence.web.build_portal_url`/:mod:`lanfence.monitor_status`).
 
     ``resolve_missing_hostnames`` (off by default, so any other caller's
@@ -187,6 +190,8 @@ def build_digest(
         portal_url=portal_url,
         monitor_running=monitor_running,
         generated_by_host=generated_by_host,
+        site_name=site_name,
+        site_location=site_location,
     )
 
 
@@ -220,10 +225,26 @@ def monitor_status_line(digest: Digest) -> str | None:
     return f"Monitor: {'running' if digest.monitor_running else 'not running'}"
 
 
+def _site_line(site_name: str | None, site_location: str | None) -> str | None:
+    """The operator-set site label (see :class:`lanfence.config.SiteConfig`),
+    shown at the top of every email so a multi-site operator can tell them
+    apart at a glance - ``None`` when neither field is set."""
+
+    if not site_name and not site_location:
+        return None
+    if site_name and site_location:
+        return f"Site: {site_name} ({site_location})"
+    return f"Site: {site_name or site_location}"
+
+
 def format_digest_text(digest: Digest) -> str:
     """Readable plain-text body shared by email and every text-based channel."""
 
-    lines = [
+    lines = []
+    site_line = _site_line(digest.site_name, digest.site_location)
+    if site_line:
+        lines.append(site_line)
+    lines += [
         f"LAN Fence digest - {format_datetime(digest.window_start)} to {format_datetime(digest.window_end)}",
         f"Generated: {format_datetime(digest.generated_at)}"
         + (f"  ·  Host: {digest.generated_by_host}" if digest.generated_by_host else ""),
@@ -309,6 +330,12 @@ def format_digest_html(digest: Digest) -> str:
     """
 
     colors = branding.COLORS
+    site_text = _site_line(digest.site_name, digest.site_location)
+    site_row = (
+        f'<tr><td style="padding:10px 20px 0;font-size:13px;font-weight:700;">'
+        f"{html.escape(site_text)}</td></tr>"
+        if site_text else ""
+    )
     portal_line = (
         f'<a href="{html.escape(digest.portal_url)}" style="color:{colors["accent2"]};">'
         f"{html.escape(digest.portal_url)}</a>"
@@ -327,6 +354,7 @@ def format_digest_html(digest: Digest) -> str:
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="{_EMAIL_BODY_STYLE}">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_EMAIL_TABLE_STYLE}">
+{site_row}
 <tr><td style="padding:24px 20px 0;">
   <table role="presentation" cellpadding="0" cellspacing="0"><tr>
     <td style="padding-right:8px;">
@@ -371,8 +399,9 @@ def format_digest_html(digest: Digest) -> str:
 
 
 def _digest_summary_line(digest: Digest) -> str:
+    prefix = f"[{digest.site_name}] " if digest.site_name else ""
     return (
-        f"LAN Fence digest: {digest.activity.new_device_count} new, "
+        f"{prefix}LAN Fence digest: {digest.activity.new_device_count} new, "
         f"{digest.needs_review.total_count} need review, "
         f"{digest.missing_always_on.total_count} always-on device(s) missing"
     )

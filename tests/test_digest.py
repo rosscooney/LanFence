@@ -7,6 +7,7 @@ from unittest.mock import patch
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
+from lanfence.models import Digest
 from lanfence.digest import (
     build_digest,
     dispatch_digest,
@@ -366,6 +367,45 @@ def test_digest_generated_by_host_shown_in_text_and_html(tmp_path: Path):
     assert digest.generated_by_host == "funguy-fortress"
     assert "Host: funguy-fortress" in format_digest_text(digest)
     assert "host funguy-fortress" in format_digest_html(digest)
+
+
+def test_digest_site_defaults_to_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(store, Allowlist.load(None), since=now - timedelta(hours=1), until=now)
+    assert digest.site_name is None
+    assert digest.site_location is None
+    assert "Site:" not in format_digest_text(digest)
+    assert "Site:" not in format_digest_html(digest)
+
+
+def test_digest_site_name_and_location_shown_at_top_of_text_and_html(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        now = _now()
+        digest = build_digest(
+            store, Allowlist.load(None), since=now - timedelta(hours=1), until=now,
+            site_name="My Home LAN", site_location="Living room",
+        )
+    text = format_digest_text(digest)
+    assert text.splitlines()[0] == "Site: My Home LAN (Living room)"
+    assert "Site: My Home LAN (Living room)" in format_digest_html(digest)
+
+
+def test_digest_site_name_only_omits_parentheses():
+    from lanfence.digest import _site_line
+
+    assert _site_line("My Home LAN", None) == "Site: My Home LAN"
+    assert _site_line(None, "Living room") == "Site: Living room"
+    assert _site_line(None, None) is None
+
+
+def test_digest_summary_line_prefixes_site_name():
+    from lanfence.digest import _digest_summary_line
+
+    digest = Digest(
+        generated_at=_now(), window_start=_now() - timedelta(hours=1), window_end=_now(), site_name="My Home LAN",
+    )
+    assert _digest_summary_line(digest).startswith("[My Home LAN] LAN Fence digest:")
 
 
 def test_digest_webhook_payload_includes_portal_url(tmp_path: Path):

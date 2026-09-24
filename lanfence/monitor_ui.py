@@ -129,6 +129,10 @@ class HeaderInfo:
     ssdp: bool
     dhcp_server_detection: bool
     quit_key_enabled: bool = False
+    #: The operator-set site name (see :class:`lanfence.config.SiteConfig`),
+    #: so a multi-site operator can tell one `monitor` session from another
+    #: at a glance. ``None`` when unset - purely descriptive.
+    site_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -325,7 +329,10 @@ def _one_line(text: str, *, width: int, style: str = "") -> Text:
 
 def render_header(header: HeaderInfo, snap: MonitorSnapshot, *, width: int, now_monotonic: float) -> Group:
     compact = width < 70
-    parts = [
+    parts = []
+    if header.site_name:
+        parts.append(_safe(header.site_name, max_len=48))
+    parts += [
         f"Interface: {_safe(header.interface, max_len=32)}",
         f"Network: {_safe(header.network, max_len=32)}",
         f"Running: {format_duration(snap.elapsed_seconds)}",

@@ -18,7 +18,7 @@ def test_submit_delivers_in_the_background_not_on_the_caller_thread(tmp_path: Pa
     calls = []
     release = threading.Event()
 
-    def fake_dispatch(findings, cfg, *, store=None):
+    def fake_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
         calls.append((findings, threading.current_thread()))
         release.set()
         return findings
@@ -40,7 +40,7 @@ def test_submit_never_blocks_when_queue_is_full(tmp_path: Path):
     block = threading.Event()
     started = threading.Event()
 
-    def blocking_dispatch(findings, cfg, *, store=None):
+    def blocking_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
         started.set()
         block.wait(timeout=5.0)
         return findings
@@ -86,7 +86,7 @@ def test_dropped_counter_only_increments_on_overflow(tmp_path: Path):
 def test_delivery_exception_does_not_kill_the_worker_thread(tmp_path: Path):
     calls = []
 
-    def flaky_dispatch(findings, cfg, *, store=None):
+    def flaky_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("simulated transport failure")
@@ -120,7 +120,7 @@ def test_worker_uses_its_own_devicestore_connection_not_the_callers(tmp_path: Pa
     db_path = tmp_path / "db.sqlite"
     seen_stores = []
 
-    def capturing_dispatch(findings, cfg, *, store=None):
+    def capturing_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
         seen_stores.append(store)
         return findings
 

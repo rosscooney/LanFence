@@ -538,6 +538,14 @@ class Digest(BaseModel):
     #: itself, for the same presentation-vs-database-read reason as
     #: ``portal_url``/``monitor_running`` below.
     generated_by_host: str | None = None
+    #: The operator-set site name/location (see
+    #: :class:`lanfence.config.SiteConfig`), so a digest is self-identifying
+    #: when you run more than one LAN Fence instance - purely descriptive,
+    #: ``None`` when unset. Set by the caller (`lanfence digest`), never
+    #: computed inside :func:`lanfence.digest.build_digest` itself, for the
+    #: same reason as ``generated_by_host`` above.
+    site_name: str | None = None
+    site_location: str | None = None
     window_start: datetime
     window_end: datetime
 

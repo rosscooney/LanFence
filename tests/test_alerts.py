@@ -49,6 +49,22 @@ def test_format_findings_text_lists_full_evidence_not_just_mac():
     assert "Location: Home office" in text
 
 
+def test_format_findings_text_no_site_by_default():
+    text = alerts._format_findings_text([_finding()], heading="LAN Fence")
+    assert "Site:" not in text
+
+
+def test_format_findings_text_shows_site_at_top():
+    text = alerts._format_findings_text([_finding()], heading="LAN Fence", site_name="My Home LAN", site_location="Living room")
+    assert text.splitlines()[0] == "Site: My Home LAN (Living room)"
+
+
+def test_site_line_omits_parentheses_with_only_one_field():
+    assert alerts._site_line("My Home LAN", None) == "Site: My Home LAN"
+    assert alerts._site_line(None, "Living room") == "Site: Living room"
+    assert alerts._site_line(None, None) is None
+
+
 def test_format_findings_text_no_heading():
     text = alerts._format_findings_text([_finding()], heading=None)
     assert "LAN Fence:" not in text
@@ -142,6 +158,16 @@ def test_format_findings_html_contains_branding_and_finding():
     assert 'src="cid:lanfence-logo"' in html_body
 
 
+def test_format_findings_html_shows_site_name_and_location():
+    html_body = alerts.format_findings_html([_finding()], site_name="My Home LAN", site_location="Living room")
+    assert "Site: My Home LAN (Living room)" in html_body
+
+
+def test_format_findings_html_no_site_by_default():
+    html_body = alerts.format_findings_html([_finding()])
+    assert "Site:" not in html_body
+
+
 def test_format_findings_html_handles_finding_with_no_mac():
     finding = Finding(
         mac=None, title="Unexpected DHCP server observed", severity="medium",
@@ -220,6 +246,34 @@ def test_send_email_sends_when_configured():
     sent_msg = smtp_instance.send_message.call_args.args[0]
     assert sent_msg["From"] == "lanfence@example.com"
     assert sent_msg["To"] == "me@example.com"
+
+
+def test_send_email_prefixes_subject_with_site_name():
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+
+    with patch("lanfence.alerts.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        alerts.send_email([_finding()], cfg, site_name="My Home LAN", site_location="Living room")
+    sent_msg = instance.send_message.call_args.args[0]
+    assert sent_msg["Subject"].startswith("[My Home LAN] LAN Fence:")
+    text_part = next(part for part in sent_msg.walk() if part.get_content_type() == "text/plain")
+    assert text_part.get_content().splitlines()[0] == "Site: My Home LAN (Living room)"
+
+
+def test_send_email_no_site_prefix_by_default():
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+
+    with patch("lanfence.alerts.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        alerts.send_email([_finding()], cfg)
+    sent_msg = instance.send_message.call_args.args[0]
+    assert sent_msg["Subject"] == "LAN Fence: 1 finding(s) on your network"
 
 
 def test_send_email_is_multipart_with_html_alternative():
