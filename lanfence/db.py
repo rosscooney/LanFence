@@ -182,6 +182,11 @@ CREATE TABLE IF NOT EXISTS device_metadata (
     mac TEXT PRIMARY KEY,
     owner TEXT,
     location TEXT,
+    friendly_name TEXT,
+    asset_type TEXT,
+    purpose TEXT,
+    notes TEXT,
+    category_override TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -391,6 +396,16 @@ _MIGRATED_COLUMNS: dict[str, dict[str, str]] = {
         "seen_via_ipv6": "seen_via_ipv6 INTEGER NOT NULL DEFAULT 0",
         "last_interface": "last_interface TEXT",
         "ipv4_subnet": "ipv4_subnet TEXT",
+    },
+    # Know Your Network's ownership/asset fields (see DeviceMetadata) - an
+    # existing device_metadata row keeps its owner/location untouched and
+    # simply gets these new columns as NULL until the operator sets them.
+    "device_metadata": {
+        "friendly_name": "friendly_name TEXT",
+        "asset_type": "asset_type TEXT",
+        "purpose": "purpose TEXT",
+        "notes": "notes TEXT",
+        "category_override": "category_override TEXT",
     },
 }
 
@@ -945,22 +960,32 @@ class DeviceStore:
             availability_alerted=alerted, updated_at=updated_at,
         )
 
+    #: Every column on ``device_metadata`` other than ``mac``/``updated_at``
+    #: - drives :meth:`get_device_metadata`/``device_metadata_for_macs``/
+    #: ``update_device_metadata`` so a new field is added in one place
+    #: rather than four. Order matches the column order in ``_SCHEMA``.
+    _METADATA_FIELDS: tuple[str, ...] = (
+        "owner", "location", "friendly_name", "asset_type", "purpose", "notes", "category_override",
+    )
+
+    def _row_to_metadata(self, mac: str, row: sqlite3.Row | None) -> DeviceMetadata:
+        if row is None:
+            return DeviceMetadata(mac=mac)
+        values = {field_name: row[field_name] for field_name in self._METADATA_FIELDS}
+        return DeviceMetadata(mac=mac, updated_at=_parse_dt(row["updated_at"]), **values)
+
     def get_device_metadata(self, mac: str) -> DeviceMetadata:
         """Operator-provided metadata for ``mac`` - every field ``None`` if
         never set. Separate from trust/review/presence and from observed
         hostname/vendor."""
 
         mac = normalize_mac(mac)
+        columns = ", ".join(self._METADATA_FIELDS)
         row = self._conn.execute(
-            "SELECT owner, location, updated_at FROM device_metadata WHERE mac = ?",
+            f"SELECT {columns}, updated_at FROM device_metadata WHERE mac = ?",
             (mac,),
         ).fetchone()
-        if row is None:
-            return DeviceMetadata(mac=mac)
-        return DeviceMetadata(
-            mac=mac, owner=row["owner"],
-            location=row["location"], updated_at=_parse_dt(row["updated_at"]),
-        )
+        return self._row_to_metadata(mac, row)
 
     def device_metadata_for_macs(self, macs: list[str]) -> dict[str, DeviceMetadata]:
         """Metadata for several MACs in one query - used by
@@ -973,18 +998,12 @@ class DeviceStore:
             return {}
         normalized = [normalize_mac(m) for m in macs]
         placeholders = ",".join("?" * len(normalized))
+        columns = ", ".join(self._METADATA_FIELDS)
         rows = self._conn.execute(
-            f"SELECT mac, owner, location, updated_at FROM device_metadata "
-            f"WHERE mac IN ({placeholders})",
+            f"SELECT mac, {columns}, updated_at FROM device_metadata WHERE mac IN ({placeholders})",
             normalized,
         ).fetchall()
-        return {
-            row["mac"]: DeviceMetadata(
-                mac=row["mac"], owner=row["owner"],
-                location=row["location"], updated_at=_parse_dt(row["updated_at"]),
-            )
-            for row in rows
-        }
+        return {row["mac"]: self._row_to_metadata(row["mac"], row) for row in rows}
 
     def update_device_metadata(
         self,
@@ -993,13 +1012,18 @@ class DeviceStore:
         updated_at: datetime,
         owner: str | None | object = _UNSET,
         location: str | None | object = _UNSET,
+        friendly_name: str | None | object = _UNSET,
+        asset_type: str | None | object = _UNSET,
+        purpose: str | None | object = _UNSET,
+        notes: str | None | object = _UNSET,
+        category_override: str | None | object = _UNSET,
     ) -> DeviceMetadata:
         """Apply any combination of metadata field changes atomically.
 
-        Each of ``owner``/``location`` is tri-state: omitted (the
-        ``_UNSET`` default) leaves that field unchanged, ``None`` clears
-        it, and a string sets it (already validated/sanitized by the
-        caller - see ``lanfence device``'s CLI options). Never creates a
+        Each field is tri-state: omitted (the ``_UNSET`` default) leaves it
+        unchanged, ``None`` clears it, and a string sets it (already
+        validated/sanitised by the caller - see ``lanfence device``'s CLI
+        options and :mod:`lanfence.device_metadata`). Never creates a
         ``devices`` row - metadata can exist for a MAC with no observation
         history without implying one now exists. A no-op request (the
         merged result is identical to what's already stored) does not
@@ -1009,18 +1033,27 @@ class DeviceStore:
 
         mac = normalize_mac(mac)
         current = self.get_device_metadata(mac)
-        new_owner = current.owner if owner is _UNSET else owner
-        new_location = current.location if location is _UNSET else location
+        requested = {
+            "owner": owner, "location": location, "friendly_name": friendly_name,
+            "asset_type": asset_type, "purpose": purpose, "notes": notes,
+            "category_override": category_override,
+        }
+        merged = {
+            field_name: getattr(current, field_name) if value is _UNSET else value
+            for field_name, value in requested.items()
+        }
 
-        if (new_owner, new_location) == (current.owner, current.location):
+        if all(merged[field_name] == getattr(current, field_name) for field_name in self._METADATA_FIELDS):
             return current
 
+        columns = ", ".join(self._METADATA_FIELDS)
+        placeholders = ", ".join("?" * len(self._METADATA_FIELDS))
+        assignments = ", ".join(f"{field_name} = excluded.{field_name}" for field_name in self._METADATA_FIELDS)
         self._conn.execute(
-            "INSERT INTO device_metadata (mac, owner, location, updated_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(mac) DO UPDATE SET owner = excluded.owner, "
-            "location = excluded.location, updated_at = excluded.updated_at",
-            (mac, new_owner, new_location, _iso(updated_at)),
+            f"INSERT INTO device_metadata (mac, {columns}, updated_at) "
+            f"VALUES (?, {placeholders}, ?) "
+            f"ON CONFLICT(mac) DO UPDATE SET {assignments}, updated_at = excluded.updated_at",
+            (mac, *(merged[field_name] for field_name in self._METADATA_FIELDS), _iso(updated_at)),
         )
         self._conn.commit()
         return self.get_device_metadata(mac)

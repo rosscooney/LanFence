@@ -23,7 +23,50 @@ def test_get_device_metadata_defaults_to_unset(tmp_path: Path):
     assert meta.mac == "aa:bb:cc:dd:ee:ff"
     assert meta.owner is None
     assert meta.location is None
+    assert meta.friendly_name is None
+    assert meta.asset_type is None
+    assert meta.purpose is None
+    assert meta.notes is None
+    assert meta.category_override is None
     assert meta.updated_at is None
+
+
+def test_device_metadata_table_migration_adds_asset_columns(tmp_path: Path):
+    """A database created before Know Your Network's asset fields (only
+    owner/location on device_metadata) gets the new columns idempotently,
+    without losing an existing owner/location value."""
+
+    db_path = tmp_path / "db.sqlite"
+    t0 = _now()
+    with DeviceStore(db_path) as store:
+        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice")
+        # Simulate a pre-feature database by rebuilding device_metadata
+        # without the new columns, preserving the pre-existing row.
+        store._conn.executescript(
+            """
+            CREATE TABLE device_metadata_old (
+                mac TEXT PRIMARY KEY, owner TEXT, location TEXT, updated_at TEXT NOT NULL
+            );
+            INSERT INTO device_metadata_old SELECT mac, owner, location, updated_at FROM device_metadata;
+            DROP TABLE device_metadata;
+            ALTER TABLE device_metadata_old RENAME TO device_metadata;
+            """
+        )
+        store._conn.commit()
+
+    with DeviceStore(db_path) as store:  # re-opening should add the missing columns
+        meta = store.get_device_metadata("aa:bb:cc:dd:ee:ff")
+        assert meta.owner == "Alice"  # pre-existing value preserved
+        assert meta.friendly_name is None
+        assert meta.asset_type is None
+
+        # And the new columns are genuinely writable now, not just readable.
+        updated = store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", updated_at=_now(), friendly_name="Boardroom TV", asset_type="Company",
+        )
+        assert updated.friendly_name == "Boardroom TV"
+        assert updated.asset_type == "Company"
+        assert updated.owner == "Alice"  # untouched by the asset-field update
 
 
 def test_device_metadata_for_macs_empty_list_returns_empty_dict(tmp_path: Path):
@@ -109,6 +152,51 @@ def test_update_device_metadata_persists_across_reopen(tmp_path: Path):
         meta = store.get_device_metadata("aa:bb:cc:dd:ee:ff")
 
     assert meta.owner == "Alice"
+
+
+# --- Know Your Network asset/ownership fields -------------------------------
+
+
+def test_update_device_metadata_sets_all_asset_fields_at_once(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        result = store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", updated_at=_now(), owner="Operations", friendly_name="Boardroom TV",
+            asset_type="Company", purpose="Boardroom display", notes="Wall-mounted, HDMI 2",
+            category_override="Media Device",
+        )
+
+    assert result.owner == "Operations"
+    assert result.friendly_name == "Boardroom TV"
+    assert result.asset_type == "Company"
+    assert result.purpose == "Boardroom display"
+    assert result.notes == "Wall-mounted, HDMI 2"
+    assert result.category_override == "Media Device"
+
+
+def test_update_device_metadata_asset_fields_independent_of_owner_location(tmp_path: Path):
+    """Setting an asset field must not disturb owner/location, and vice
+    versa - each field is its own independent tri-state slot."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice", location="Office")
+        result = store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", updated_at=t0 + timedelta(minutes=5), friendly_name="Alice's Laptop",
+        )
+
+    assert result.owner == "Alice"
+    assert result.location == "Office"
+    assert result.friendly_name == "Alice's Laptop"
+
+
+def test_update_device_metadata_clears_category_override_with_explicit_none(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, category_override="Printer")
+        t1 = t0 + timedelta(minutes=5)
+        result = store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t1, category_override=None)
+
+    assert result.category_override is None
 
 
 # --- model validation -----------------------------------------------------
