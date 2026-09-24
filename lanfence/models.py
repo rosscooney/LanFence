@@ -39,6 +39,41 @@ PresencePolicyName = Literal["unspecified", "intermittent", "always-on"]
 #: than any one device - see :attr:`Finding.mac` being optional.
 FindingKind = Literal["security", "lifecycle", "availability", "network_service"]
 
+#: The device-category taxonomy used by the identity engine
+#: (:mod:`lanfence.identity`) and an operator's own category override (see
+#: :attr:`DeviceMetadata.category_override`). Deliberately a closed,
+#: coarse-grained list rather than open free text - "extend later" means
+#: adding another entry here, not inventing a new shape of data. "Unknown"
+#: is a real category, not an error state: plenty of genuinely-unidentified
+#: devices belong on a network without LAN Fence pretending otherwise.
+DeviceCategory = Literal[
+    "Computer",
+    "Phone",
+    "Tablet",
+    "Server",
+    "Network Infrastructure",
+    "Printer",
+    "Camera",
+    "Smart Home / IoT",
+    "Media Device",
+    "Storage / NAS",
+    "Virtual Machine",
+    "Development Board / SBC",
+    "Unknown",
+]
+DEVICE_CATEGORIES: tuple[str, ...] = (
+    "Computer", "Phone", "Tablet", "Server", "Network Infrastructure", "Printer", "Camera",
+    "Smart Home / IoT", "Media Device", "Storage / NAS", "Virtual Machine", "Development Board / SBC", "Unknown",
+)
+
+#: Who a device belongs to and why it's on the network, set by the
+#: operator (see :attr:`DeviceMetadata.asset_type`) - entirely separate
+#: from the identity engine's *inferred* category above. A phone (category)
+#: can be Company-owned, Personal/BYOD, or a Guest's; the two questions are
+#: independent.
+AssetType = Literal["Company", "Personal / BYOD", "Infrastructure", "IoT", "Guest", "Unknown"]
+ASSET_TYPES: tuple[str, ...] = ("Company", "Personal / BYOD", "Infrastructure", "IoT", "Guest", "Unknown")
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -82,17 +117,40 @@ AddressAssociationKind = Literal["observed", "lease_reported"]
 
 class DeviceMetadata(BaseModel):
     """Operator-provided inventory context for one device - who's
-    responsible for it and where it is. Entirely separate from observed
-    hostname/vendor, trust, review state, and presence policy: nothing
-    here is verified, detected, or authenticated - ``owner`` is a
-    responsibility label, not an authenticated identity, and ``location``
-    is whatever the operator typed in, not a detected physical position.
-    ``updated_at`` is ``None`` for a MAC with no metadata set yet (every
-    field unset)."""
+    responsible for it, where it is, and what kind of asset it is.
+    Entirely separate from observed hostname/vendor, trust, review state,
+    and presence policy: nothing here is verified, detected, or
+    authenticated - ``owner`` is a responsibility label, not an
+    authenticated identity, and ``location`` is whatever the operator
+    typed in, not a detected physical position. ``updated_at`` is
+    ``None`` for a MAC with no metadata set yet (every field unset).
+
+    ``category_override`` and ``asset_type`` are the user-assigned half of
+    "Know Your Network": a category the operator has explicitly chosen for
+    this device, which always takes precedence over the identity engine's
+    own inferred category (see :mod:`lanfence.identity`) when displaying or
+    filtering by category - but the underlying inferred identity is never
+    discarded or silently altered just because one device was corrected.
+    """
 
     mac: str
     owner: str | None = None
     location: str | None = None
+    #: A short, human-chosen display name for this device (e.g. "Boardroom
+    #: TV") - distinct from the allowlist's trusted name and from any
+    #: observed hostname, and shown in preference to both when set.
+    friendly_name: str | None = None
+    #: What kind of asset this is (Company/Personal/Infrastructure/IoT/
+    #: Guest) - see :data:`AssetType`. Independent of category: a phone can
+    #: be Company-owned or a guest's.
+    asset_type: AssetType | None = None
+    purpose: str | None = None
+    notes: str | None = None
+    #: The operator's own correction of the identity engine's inferred
+    #: category (see :data:`DeviceCategory`) - ``None`` means "trust the
+    #: inferred category". Never fed back into the fingerprint rules
+    #: themselves; it only overrides the *display* for this one device.
+    category_override: DeviceCategory | None = None
     updated_at: datetime | None = None
 
     @field_validator("mac")
@@ -100,10 +158,15 @@ class DeviceMetadata(BaseModel):
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("owner", "location")
+    @field_validator("owner", "location", "friendly_name", "purpose")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None
+
+    @field_validator("notes")
+    @classmethod
+    def _clean_notes(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=2000) if value is not None else None
 
 
 class Device(BaseModel):

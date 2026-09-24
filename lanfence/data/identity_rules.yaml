@@ -1,0 +1,322 @@
+# Copyright (c) 2026-present Stable State Consulting Ltd
+# SPDX-License-Identifier: MIT
+#
+# Starter identity rules for LAN Fence's "Know Your Network" identity engine
+# (see lanfence/identity.py). Each rule is one weighted piece of evidence:
+# it fires when every condition under `when` is satisfied, and contributes
+# `weight` points towards whichever of manufacturer/category/family/platform
+# it asserts. A device's final confidence is the sum of the weights of every
+# rule that agrees with the winning identity, minus the weight of any rule
+# that disagreed (see infer_identity's docstring) - never a single-signal
+# guess.
+#
+# This is a representative starter set, not an exhaustive database - see
+# README.md's "Know Your Network" section for how to extend it with a
+# private `identity_rules_file` without touching this packaged file.
+
+rules:
+  # --- Apple devices --------------------------------------------------------
+
+  - id: apple_vendor_oui
+    weight: 25
+    when:
+      vendor_contains: ["apple, inc", "apple inc"]
+    manufacturer: "Apple"
+    label: "Apple vendor OUI"
+
+  - id: apple_iphone_hostname
+    weight: 30
+    when:
+      hostname_regex: "iphone"
+    manufacturer: "Apple"
+    category: "Phone"
+    family: "iPhone"
+    platform: "iOS"
+    label: "Hostname suggests an iPhone"
+
+  - id: apple_ipad_hostname
+    weight: 30
+    when:
+      hostname_regex: "ipad"
+    manufacturer: "Apple"
+    category: "Tablet"
+    family: "iPad"
+    platform: "iPadOS"
+    label: "Hostname suggests an iPad"
+
+  - id: apple_mac_hostname
+    weight: 30
+    when:
+      hostname_regex: "macbook|imac|mac[\\s-]?mini|mac[\\s-]?studio"
+    manufacturer: "Apple"
+    category: "Computer"
+    family: "Mac"
+    platform: "macOS"
+    label: "Hostname suggests a Mac"
+
+  - id: apple_tv_hostname
+    weight: 25
+    when:
+      hostname_regex: "appletv|apple-tv"
+    manufacturer: "Apple"
+    category: "Media Device"
+    family: "Apple TV"
+    platform: "tvOS"
+    label: "Hostname suggests an Apple TV"
+
+  - id: apple_airplay_service
+    weight: 10
+    when:
+      service_type_contains: ["_airplay._tcp", "_raop._tcp"]
+    label: "Advertises AirPlay (_airplay._tcp/_raop._tcp)"
+
+  - id: apple_companion_link_service
+    weight: 15
+    when:
+      service_type_contains: ["_companion-link._tcp"]
+    label: "Advertises Apple companion-link (paired with an Apple device)"
+
+  - id: apple_homekit_service
+    weight: 15
+    when:
+      service_type_contains: ["_hap._tcp"]
+    category: "Smart Home / IoT"
+    label: "Advertises HomeKit accessory protocol (_hap._tcp)"
+
+  # --- Windows computers ------------------------------------------------
+
+  - id: windows_default_hostname
+    weight: 20
+    when:
+      hostname_regex: "^(desktop|laptop)-[a-z0-9]+$"
+    category: "Computer"
+    platform: "Windows"
+    label: "Hostname matches Windows's default computer-name pattern"
+
+  - id: windows_vendor_dell
+    weight: 15
+    when:
+      vendor_contains: ["dell inc"]
+    manufacturer: "Dell"
+    category: "Computer"
+    label: "Vendor OUI: Dell"
+
+  - id: windows_vendor_hp
+    weight: 15
+    when:
+      # HP also makes printers under the same registered OUI name, so
+      # (unlike Dell/Lenovo below) this asserts manufacturer only - let
+      # the IPP service rule or a hostname pattern decide the category.
+      vendor_contains: ["hewlett packard", "hp inc"]
+    manufacturer: "HP"
+    label: "Vendor OUI: HP"
+
+  - id: windows_vendor_lenovo
+    weight: 15
+    when:
+      vendor_contains: ["lenovo"]
+    manufacturer: "Lenovo"
+    category: "Computer"
+    label: "Vendor OUI: Lenovo"
+
+  - id: windows_smb_service
+    weight: 10
+    when:
+      service_type_contains: ["_smb._tcp"]
+    platform: "Windows"
+    label: "Advertises SMB file sharing (_smb._tcp)"
+
+  # --- Linux computers and servers ---------------------------------------
+
+  - id: linux_ssh_service
+    weight: 10
+    when:
+      service_type_contains: ["_ssh._tcp"]
+    platform: "Linux"
+    label: "Advertises SSH (_ssh._tcp)"
+
+  - id: linux_workstation_service
+    weight: 10
+    when:
+      service_type_contains: ["_workstation._tcp"]
+    category: "Computer"
+    platform: "Linux"
+    label: "Advertises a Linux workstation service (_workstation._tcp)"
+
+  # --- Raspberry Pi / single-board computers -----------------------------
+
+  - id: raspberry_pi_fingerprint
+    weight: 40
+    when:
+      fingerprint_category: ["raspberry_pi"]
+    manufacturer: "Raspberry Pi Foundation"
+    category: "Development Board / SBC"
+    family: "Raspberry Pi"
+    label: "Vendor OUI identifies Raspberry Pi hardware"
+
+  - id: raspberry_pi_hostname
+    weight: 15
+    when:
+      hostname_regex: "raspberrypi|^pi[0-9]*$"
+    category: "Development Board / SBC"
+    family: "Raspberry Pi"
+    platform: "Linux"
+    label: "Hostname suggests a Raspberry Pi"
+
+  - id: orange_pi_fingerprint
+    weight: 35
+    when:
+      fingerprint_category: ["orange_pi"]
+    category: "Development Board / SBC"
+    family: "Orange Pi"
+    label: "Vendor OUI identifies Orange Pi hardware"
+
+  # --- Synology / QNAP NAS ------------------------------------------------
+
+  - id: synology_vendor
+    weight: 30
+    when:
+      vendor_contains: ["synology"]
+    manufacturer: "Synology"
+    category: "Storage / NAS"
+    platform: "DiskStation Manager"
+    label: "Vendor OUI: Synology"
+
+  - id: synology_hostname
+    weight: 15
+    when:
+      hostname_regex: "diskstation|synology"
+    manufacturer: "Synology"
+    category: "Storage / NAS"
+    label: "Hostname suggests a Synology NAS"
+
+  - id: qnap_vendor
+    weight: 30
+    when:
+      vendor_contains: ["qnap"]
+    manufacturer: "QNAP"
+    category: "Storage / NAS"
+    platform: "QTS"
+    label: "Vendor OUI: QNAP"
+
+  - id: nas_afp_service
+    weight: 10
+    when:
+      service_type_contains: ["_afpovertcp._tcp"]
+    category: "Storage / NAS"
+    label: "Advertises Apple Filing Protocol (_afpovertcp._tcp), common on NAS devices"
+
+  # --- Printers ------------------------------------------------------------
+
+  - id: printer_ipp_service
+    weight: 30
+    when:
+      service_type_contains: ["_ipp._tcp", "_ipps._tcp"]
+    category: "Printer"
+    label: "Advertises IPP printing (_ipp._tcp/_ipps._tcp)"
+
+  - id: printer_vendor
+    weight: 15
+    when:
+      # Deliberately excludes vendors that also make computers under the
+      # same registered OUI name (e.g. HP) - those are identified as
+      # printers far more reliably by the IPP service rule above.
+      vendor_contains: ["canon", "epson", "brother industries", "xerox", "kyocera", "lexmark"]
+    category: "Printer"
+    label: "Vendor OUI matches a known printer manufacturer"
+
+  # --- Smart TVs and media devices ---------------------------------------
+
+  - id: media_vendor
+    weight: 20
+    when:
+      vendor_contains: ["samsung electronics", "lg electronics", "vizio", "roku", "sony corporation", "tcl"]
+    category: "Media Device"
+    label: "Vendor OUI matches a known TV/media-device manufacturer"
+
+  - id: media_renderer_service
+    weight: 20
+    when:
+      service_type_contains: ["mediarenderer"]
+    category: "Media Device"
+    label: "Advertises a UPnP MediaRenderer service"
+
+  - id: cast_service
+    weight: 15
+    when:
+      service_label: ["cast"]
+    manufacturer: "Google"
+    category: "Media Device"
+    family: "Chromecast"
+    label: "Advertises a Google Cast service"
+
+  - id: sonos_vendor
+    weight: 35
+    when:
+      vendor_contains: ["sonos"]
+    manufacturer: "Sonos"
+    category: "Media Device"
+    family: "Sonos speaker"
+    label: "Vendor OUI: Sonos"
+
+  # --- IP cameras ----------------------------------------------------------
+
+  - id: camera_hostname
+    weight: 20
+    when:
+      hostname_regex: "cam(era)?[-_]?[0-9]*$|ipcam"
+    category: "Camera"
+    label: "Hostname suggests a camera"
+
+  - id: camera_rtsp_port
+    weight: 15
+    when:
+      open_port_in: [554]
+    category: "Camera"
+    label: "Has an open RTSP port (554) from a previous explicit inspection"
+
+  - id: camera_chipset_fingerprint
+    weight: 15
+    when:
+      fingerprint_category: ["allwinner_sbc_or_camera", "hisilicon_camera_soc"]
+    category: "Camera"
+    label: "Vendor OUI matches a common IP-camera chipset"
+
+  # --- Network infrastructure ----------------------------------------------
+
+  - id: gateway_upnp_service
+    weight: 35
+    when:
+      service_type_contains: ["internetgatewaydevice"]
+    category: "Network Infrastructure"
+    family: "Router / gateway"
+    label: "Advertises itself as a UPnP Internet Gateway Device"
+
+  - id: infrastructure_ssdp_server
+    weight: 15
+    when:
+      ssdp_server_contains: ["router", "gateway", "access point"]
+    category: "Network Infrastructure"
+    label: "SSDP server banner identifies network infrastructure"
+
+  - id: infrastructure_vendor
+    weight: 15
+    when:
+      vendor_contains: ["ubiquiti", "netgear", "tp-link", "mikrotik", "cisco", "arista networks", "juniper"]
+    category: "Network Infrastructure"
+    label: "Vendor OUI matches a known network-infrastructure manufacturer"
+
+  # --- Virtual machines and gadgets ---------------------------------------
+
+  - id: virtual_machine_vendor
+    weight: 30
+    when:
+      vendor_contains: ["vmware", "virtualbox", "qemu", "xensource", "microsoft hyper-v"]
+    category: "Virtual Machine"
+    label: "Vendor OUI matches a known hypervisor's virtual-NIC range"
+
+  - id: locally_administered_low_confidence
+    weight: 5
+    when:
+      locally_administered: true
+    label: "Locally administered (randomised/spoofed) MAC - no vendor OUI to go on"
