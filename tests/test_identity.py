@@ -308,6 +308,16 @@ def test_probable_identity_combines_manufacturer_and_family():
     assert identity.probable_identity == "Apple iPhone"
 
 
+
+def test_probable_identity_does_not_repeat_a_manufacturer_the_family_already_names():
+    assert DeviceIdentity(manufacturer="Apple", family="Apple TV").probable_identity == "Apple TV"
+    assert DeviceIdentity(manufacturer="Sonos", family="Sonos speaker").probable_identity == "Sonos speaker"
+    assert (
+        DeviceIdentity(manufacturer="Raspberry Pi Foundation", family="Raspberry Pi").probable_identity
+        == "Raspberry Pi"
+    )
+    assert DeviceIdentity(manufacturer="Google", family="Chromecast").probable_identity == "Google Chromecast"
+
 def test_probable_identity_falls_back_to_manufacturer_only():
     identity = DeviceIdentity(manufacturer="Synology", category="Storage / NAS", confidence=50)
     assert identity.probable_identity == "Synology"

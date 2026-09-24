@@ -122,10 +122,14 @@ class DeviceIdentity(BaseModel):
         iPhone" - manufacturer plus family when both are known, falling
         back to whichever is available, and finally the bare category."""
 
-        parts = [p for p in (self.manufacturer, self.family) if p]
-        if parts:
-            return " ".join(parts)
-        return self.category
+        if self.manufacturer and self.family:
+            # A family that already names its maker ("Apple TV", "Sonos
+            # speaker", "Raspberry Pi") would otherwise read "Apple Apple TV".
+            maker_word = self.manufacturer.split()[0].casefold()
+            if self.family.casefold().startswith(maker_word):
+                return self.family
+            return f"{self.manufacturer} {self.family}"
+        return self.manufacturer or self.family or self.category
 
 
 # --- rule set (YAML-driven, no hard-coded fingerprints in application code) -
