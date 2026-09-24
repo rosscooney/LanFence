@@ -16,7 +16,7 @@ from lanfence.dossier import (
 )
 from lanfence.engine import process_sighting
 from lanfence.fingerprint import SignatureSet
-from lanfence.identity import IdentityRuleSet
+from lanfence.identity import DeviceIdentity, IdentityRuleSet
 from lanfence.models import AdvertisedService, Device
 
 
@@ -135,6 +135,36 @@ def test_label_falls_back_to_allowlist_name_then_hostname_then_mac():
     assert _dossier(device=_device(allowlist_name="My Laptop", hostname="host")).label == "My Laptop"
     assert _dossier(device=_device(hostname="host")).label == "host"
     assert _dossier(device=_device()).label == "aa:bb:cc:dd:ee:ff"
+
+
+def test_label_prefers_friendly_name_over_hostname_but_not_allowlist_name():
+    from lanfence.models import DeviceMetadata
+
+    metadata = DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", friendly_name="Boardroom TV")
+    assert _dossier(device=_device(hostname="host", metadata=metadata)).label == "Boardroom TV"
+    assert (
+        _dossier(device=_device(allowlist_name="My TV", hostname="host", metadata=metadata)).label == "My TV"
+    )
+
+
+# --- DeviceDossier.effective_category ---------------------------------------
+
+
+def test_effective_category_falls_back_to_identity_category():
+    dossier = _dossier(identity=DeviceIdentity(category="Media Device", confidence=20))
+    assert dossier.effective_category == "Media Device"
+
+
+def test_effective_category_prefers_user_override():
+    from lanfence.models import DeviceMetadata
+
+    metadata = DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", category_override="Printer")
+    dossier = _dossier(
+        device=_device(metadata=metadata), identity=DeviceIdentity(category="Media Device", confidence=20),
+    )
+    assert dossier.effective_category == "Printer"
+    # the underlying inference is retained, not discarded
+    assert dossier.identity.category == "Media Device"
 
 
 def test_observed_services_summary_dedupes_and_skips_non_current():

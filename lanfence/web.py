@@ -61,16 +61,19 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from lanfence import branding
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config, expand_operator_path
 from lanfence.db import DeviceStore
 from lanfence.device_metadata import METADATA_LIMITS, validate_metadata_value
-from lanfence.engine import apply_self_trust, build_device, build_inventory
+from lanfence.dossier import DeviceDossier, build_device_dossier
+from lanfence.engine import apply_self_trust, build_inventory, is_review_needed
+from lanfence.fingerprint import SignatureSet
+from lanfence.identity import IdentityRuleSet
 from lanfence.logging_config import get_logger
-from lanfence.models import Device, utcnow
+from lanfence.models import ASSET_TYPES, DEVICE_CATEGORIES, Device, utcnow
 from lanfence.netutil import normalize_mac
 
 log = get_logger("web")
@@ -702,43 +705,77 @@ def _ip_sort_key(ip: str | None) -> tuple[int, object]:
         return (1, ip)
 
 
+def _dossier_owner(dossier: DeviceDossier) -> str:
+    metadata = dossier.device.metadata
+    return (metadata.owner if metadata else None) or ""
+
+
+def _dossier_asset_type(dossier: DeviceDossier) -> str:
+    metadata = dossier.device.metadata
+    return (metadata.asset_type if metadata else None) or ""
+
+
 #: Column key -> (header label, sort key function). Order here is the
 #: table's column order. Every sort key is on the same text actually shown
 #: in that column (e.g. "trusted"/"untrusted", not the raw boolean), so
-#: sorting always matches what you see.
+#: sorting always matches what you see. Operates on a
+#: :class:`~lanfence.dossier.DeviceDossier`, not a bare
+#: :class:`~lanfence.models.Device`, so the identity/category/confidence
+#: columns below have something to show and sort on.
 _DEVICE_LIST_COLUMNS: dict[str, tuple[str, object]] = {
-    "name": ("Name", lambda d: (d.allowlist_name or d.hostname or "").casefold()),
-    "mac": ("MAC", lambda d: d.mac),
-    "ip": ("IP", lambda d: _ip_sort_key(d.ip)),
-    "vendor": ("Vendor", lambda d: (d.vendor or "").casefold()),
-    "status": ("Status", lambda d: d.status),
-    "trust": ("Trust", lambda d: "trusted" if d.allowlisted else "untrusted"),
+    "name": ("Name", lambda dos: dos.label.casefold()),
+    "mac": ("MAC", lambda dos: dos.device.mac),
+    "category": ("Category", lambda dos: dos.effective_category.casefold()),
+    "owner": ("Owner", lambda dos: _dossier_owner(dos).casefold()),
+    "asset_type": ("Asset type", lambda dos: _dossier_asset_type(dos).casefold()),
+    "ip": ("IP", lambda dos: _ip_sort_key(dos.device.ip)),
+    "vendor": ("Vendor", lambda dos: (dos.device.vendor or "").casefold()),
+    "status": ("Status", lambda dos: dos.device.status),
+    "trust": ("Trust", lambda dos: "trusted" if dos.device.allowlisted else "untrusted"),
+    "confidence": ("Confidence", lambda dos: dos.identity.confidence),
+    "last_seen": ("Last seen", lambda dos: dos.device.last_seen),
 }
 _DEFAULT_SORT = "mac"
 
 
-def _render_device_list(devices: list[Device], *, sort: str = _DEFAULT_SORT, direction: str = "asc") -> str:
+def _render_device_list(
+    dossiers: list[DeviceDossier], *, sort: str = _DEFAULT_SORT, direction: str = "asc",
+    has_any_devices: bool = True, extra_query: str = "",
+) -> str:
     if sort not in _DEVICE_LIST_COLUMNS:
         sort = _DEFAULT_SORT
     if direction not in ("asc", "desc"):
         direction = "asc"
     key_fn = _DEVICE_LIST_COLUMNS[sort][1]
-    ordered = sorted(devices, key=key_fn, reverse=(direction == "desc"))
+    ordered = sorted(dossiers, key=key_fn, reverse=(direction == "desc"))
 
-    if not devices:
-        rows = '<tr><td colspan="6" class="muted">No devices in the database yet - run `lanfence scan` first.</td></tr>'
+    column_count = len(_DEVICE_LIST_COLUMNS)
+    if not dossiers:
+        empty_message = (
+            "No devices in the database yet - run `lanfence scan` first."
+            if not has_any_devices else "No devices match the current filters."
+        )
+        rows = f'<tr><td colspan="{column_count}" class="muted">{empty_message}</td></tr>'
     else:
         rows = ""
-        for device in ordered:
-            label = html.escape(device.allowlist_name or device.hostname or "[unknown]")
+        for dossier in ordered:
+            device = dossier.device
+            label = html.escape(dossier.label)
+            identity = dossier.identity
+            confidence = f"{identity.confidence}%" if identity.is_known else "-"
             rows += (
                 "<tr>"
                 f'<td><a href="/device/{html.escape(device.mac)}">{label}</a></td>'
                 f"<td><code>{html.escape(device.mac)}</code></td>"
+                f"<td>{html.escape(dossier.effective_category)}</td>"
+                f"<td>{html.escape(_dossier_owner(dossier) or 'Not set')}</td>"
+                f"<td>{html.escape(_dossier_asset_type(dossier) or 'Not set')}</td>"
                 f"<td>{html.escape(_ip_display(device))}</td>"
                 f"<td>{html.escape(device.vendor or '[unknown]')}</td>"
                 f"<td>{_status_badge(device)}</td>"
                 f"<td>{_trust_badge(device)}</td>"
+                f"<td>{confidence}</td>"
+                f"<td>{html.escape(device.last_seen.strftime('%Y-%m-%d %H:%M'))}</td>"
                 "</tr>"
             )
 
@@ -747,10 +784,11 @@ def _render_device_list(devices: list[Device], *, sort: str = _DEFAULT_SORT, dir
         is_active = key == sort
         next_dir = "desc" if is_active and direction == "asc" else "asc"
         indicator = (" &#9650;" if direction == "asc" else " &#9660;") if is_active else ""
-        headers += f'<th><a href="/?sort={key}&amp;dir={next_dir}">{html.escape(label)}{indicator}</a></th>'
+        headers += (
+            f'<th><a href="/?sort={key}&amp;dir={next_dir}{extra_query}">{html.escape(label)}{indicator}</a></th>'
+        )
 
     body = f"""
-<h1>Devices</h1>
 <div class="table-scroll panel" style="padding:0">
 <table>
 <thead><tr>{headers}</tr></thead>
@@ -759,6 +797,162 @@ def _render_device_list(devices: list[Device], *, sort: str = _DEFAULT_SORT, dir
 </div>
 """
     return body
+
+
+#: Query parameter name -> default value, for the inventory filters below -
+#: shared between parsing the incoming request and building "preserve the
+#: current filters" links (sort headers, overview counts).
+_FILTER_PARAMS: tuple[str, ...] = (
+    "trust", "status", "category", "asset_type", "owner", "unknown", "review", "q",
+)
+
+
+def _parse_filters(query: dict[str, list[str]]) -> dict[str, str]:
+    return {name: query.get(name, [""])[0] for name in _FILTER_PARAMS}
+
+
+def _filters_query_string(filters: dict[str, str]) -> str:
+    """The current filters as a ``&amp;name=value`` suffix (HTML-escaped,
+    empty values omitted) - appended to sort/pagination links so applying a
+    filter is never silently lost by clicking a column header."""
+
+    parts = [f"{name}={quote(value)}" for name, value in filters.items() if value]
+    return "".join(f"&amp;{part}" for part in parts)
+
+
+def _filter_dossiers(dossiers: list[DeviceDossier], filters: dict[str, str], *, now: datetime) -> list[DeviceDossier]:
+    """Apply the inventory's filter/search controls (see
+    :func:`_render_filter_form`) - every filter is independent and
+    combines with AND, matching what the controls visually suggest."""
+
+    owner_needle = filters["owner"].strip().casefold()
+    q_needle = filters["q"].strip().casefold()
+    out = []
+    for dossier in dossiers:
+        device = dossier.device
+        if filters["trust"] == "trusted" and not device.allowlisted:
+            continue
+        if filters["trust"] == "untrusted" and device.allowlisted:
+            continue
+        if filters["status"] and device.status != filters["status"]:
+            continue
+        if filters["category"] and dossier.effective_category != filters["category"]:
+            continue
+        if filters["asset_type"] and _dossier_asset_type(dossier) != filters["asset_type"]:
+            continue
+        if owner_needle and owner_needle not in _dossier_owner(dossier).casefold():
+            continue
+        if filters["unknown"] == "1" and dossier.identity.is_known:
+            continue
+        if filters["review"] == "1" and not is_review_needed(device, now=now):
+            continue
+        if q_needle:
+            haystack = " ".join(
+                [dossier.label, device.mac, device.ip or "", _dossier_owner(dossier), device.vendor or ""]
+            ).casefold()
+            if q_needle not in haystack:
+                continue
+        out.append(dossier)
+    return out
+
+
+def _render_filter_form(filters: dict[str, str], *, sort: str, direction: str) -> str:
+    def _option(value: str, current: str) -> str:
+        selected = " selected" if value == current else ""
+        return f'<option value="{html.escape(value)}"{selected}>{html.escape(value or "Any")}</option>'
+
+    trust_options = "".join(_option(v, filters["trust"]) for v in ("", "trusted", "untrusted"))
+    status_options = "".join(_option(v, filters["status"]) for v in ("", "online", "offline"))
+    category_options = "".join(_option(v, filters["category"]) for v in ("",) + DEVICE_CATEGORIES)
+    asset_type_options = "".join(_option(v, filters["asset_type"]) for v in ("",) + ASSET_TYPES)
+    unknown_checked = " checked" if filters["unknown"] == "1" else ""
+    review_checked = " checked" if filters["review"] == "1" else ""
+
+    return f"""
+<form class="stack" method="get" action="/" style="flex-direction:row;flex-wrap:wrap;gap:0.75rem;align-items:end">
+<input type="hidden" name="sort" value="{html.escape(sort)}">
+<input type="hidden" name="dir" value="{html.escape(direction)}">
+<div>
+<label for="q">Search</label>
+<input type="text" id="q" name="q" value="{html.escape(filters['q'])}" placeholder="name, MAC, IP, owner, vendor...">
+</div>
+<div>
+<label for="trust">Trust</label>
+<select id="trust" name="trust">{trust_options}</select>
+</div>
+<div>
+<label for="status">Status</label>
+<select id="status" name="status">{status_options}</select>
+</div>
+<div>
+<label for="category">Category</label>
+<select id="category" name="category">{category_options}</select>
+</div>
+<div>
+<label for="asset_type">Asset type</label>
+<select id="asset_type" name="asset_type">{asset_type_options}</select>
+</div>
+<div>
+<label for="owner">Owner</label>
+<input type="text" id="owner" name="owner" value="{html.escape(filters['owner'])}">
+</div>
+<div>
+<label><input type="checkbox" name="unknown" value="1"{unknown_checked}> Unknown identity</label>
+</div>
+<div>
+<label><input type="checkbox" name="review" value="1"{review_checked}> Needs review</label>
+</div>
+<button class="btn" type="submit">Filter</button>
+<a class="btn" href="/">Clear</a>
+</form>
+"""
+
+
+def _render_network_overview(dossiers: list[DeviceDossier], *, now: datetime) -> str:
+    """The "Know Your Network" orientation panel on the index page - plain
+    counts and attention items, deliberately not a security/risk score
+    (see the feature's own scope control). Counts are clickable links that
+    apply the matching inventory filter, not a separate view."""
+
+    total = len(dossiers)
+    by_asset_type: dict[str, int] = {}
+    for dossier in dossiers:
+        key = _dossier_asset_type(dossier) or "Unknown"
+        by_asset_type[key] = by_asset_type.get(key, 0) + 1
+
+    count_parts = [f"{total} devices"]
+    for asset_type in (*ASSET_TYPES, "Unknown"):
+        count = by_asset_type.get(asset_type, 0)
+        if count and asset_type != "Unknown":
+            count_parts.append(f'<a href="/?asset_type={quote(asset_type)}">{count} {html.escape(asset_type)}</a>')
+    unset_count = by_asset_type.get("Unknown", 0)
+    if unset_count:
+        count_parts.append(f"{unset_count} with no asset type set")
+
+    needs_review = sum(1 for d in dossiers if is_review_needed(d.device, now=now))
+    unknown_identity = sum(1 for d in dossiers if not d.identity.is_known)
+    uncertain_identity = sum(1 for d in dossiers if d.identity.is_known and d.identity.confidence < 50)
+    no_owner = sum(1 for d in dossiers if not _dossier_owner(d))
+
+    attention_parts = []
+    if needs_review:
+        attention_parts.append(f'<a href="/?review=1">{needs_review} device(s) need review</a>')
+    if unknown_identity:
+        attention_parts.append(f'<a href="/?unknown=1">{unknown_identity} device(s) have unknown identities</a>')
+    if uncertain_identity:
+        attention_parts.append(f"{uncertain_identity} device(s) have uncertain identities")
+    if no_owner:
+        attention_parts.append(f"{no_owner} device(s) have no owner")
+
+    attention_html = (
+        f"<p>{' &middot; '.join(attention_parts)}</p>" if attention_parts else '<p class="muted">Nothing needs attention right now.</p>'
+    )
+
+    return f"""
+<h2>Know Your Network</h2>
+<p>{' &middot; '.join(count_parts)}</p>
+{attention_html}
+"""
 
 
 def _flash(message: str | None, *, error: bool = False) -> str:
@@ -794,7 +988,67 @@ def _metadata_field_html(field: str, label: str, value: str | None) -> str:
 """
 
 
-def _render_device_detail(device: Device, *, message: str | None = None, error: str | None = None) -> str:
+def _metadata_select_html(field: str, label: str, value: str | None, choices: tuple[str, ...]) -> str:
+    """A fixed-choice metadata field (``asset_type``/``category_override`` -
+    see :data:`lanfence.device_metadata.METADATA_CHOICES`) as a ``<select>``
+    rather than free text, so the browser can only submit one of the
+    allowed values. An empty first option clears the field."""
+
+    options = ['<option value="">Not set</option>']
+    for choice in choices:
+        selected = " selected" if choice == value else ""
+        options.append(f'<option value="{html.escape(choice)}"{selected}>{html.escape(choice)}</option>')
+    return f"""
+<div>
+<label for="{field}">{label}</label>
+<select id="{field}" name="{field}">{"".join(options)}</select>
+</div>
+"""
+
+
+def _identity_evidence_html(dossier: DeviceDossier) -> str:
+    """The "Why this identity?" disclosure - every rule that contributed to
+    the current guess, positive or negative (see :mod:`lanfence.identity`).
+    A plain ``<details>`` element rather than JavaScript - it works with no
+    client-side script, matching this portal's stdlib-only design."""
+
+    if not dossier.identity.evidence:
+        return '<p class="muted">No supporting evidence.</p>'
+    items = "".join(
+        f"<li>{'+' if item.weight >= 0 else ''}{item.weight}&nbsp; {html.escape(item.label)}</li>"
+        for item in dossier.identity.evidence
+    )
+    return f"""
+<details>
+<summary>Why this identity?</summary>
+<ul>{items}</ul>
+</details>
+"""
+
+
+def _identity_section_html(dossier: DeviceDossier) -> str:
+    identity = dossier.identity
+    if not identity.is_known:
+        return f"""
+<h2>Identity (Know Your Network)</h2>
+<p>Probable identity: <strong>{html.escape(identity.probable_identity)}</strong> (no supporting evidence)</p>
+"""
+    manufacturer_line = f"<p>Manufacturer: {html.escape(identity.manufacturer)}</p>" if identity.manufacturer else ""
+    platform_line = f"<p>Platform: {html.escape(identity.platform)}</p>" if identity.platform else ""
+    return f"""
+<h2>Identity (Know Your Network)</h2>
+<p>Probable identity: <strong>{html.escape(identity.probable_identity)}</strong></p>
+<p>Category: {html.escape(identity.category)}</p>
+<p>Confidence: {identity.confidence}%</p>
+{manufacturer_line}
+{platform_line}
+{_identity_evidence_html(dossier)}
+<p class="muted">A labelled inference from evidence LAN Fence has observed - not a verified fact.</p>
+"""
+
+
+def _render_device_detail(dossier: DeviceDossier, *, message: str | None = None, error: str | None = None) -> str:
+    device = dossier.device
     metadata = device.metadata
     trust_section = ""
     if device.allowlisted:
@@ -829,14 +1083,24 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 </form>
 """
 
+    def _value(field: str) -> str | None:
+        return getattr(metadata, field) if metadata else None
+
     metadata_fields = "".join(
-        _metadata_field_html(field, label, getattr(metadata, field) if metadata else None)
-        for field, label in (("owner", "Owner"), ("location", "Location"))
+        _metadata_field_html(field, label, _value(field))
+        for field, label in (
+            ("friendly_name", "Friendly name"), ("owner", "Owner"), ("location", "Location"),
+            ("purpose", "Purpose"), ("notes", "Notes"),
+        )
+    )
+    metadata_fields += _metadata_select_html("asset_type", "Asset type", _value("asset_type"), ASSET_TYPES)
+    metadata_fields += _metadata_select_html(
+        "category_override", "Category (override)", _value("category_override"), DEVICE_CATEGORIES
     )
 
     body = f"""
 <p><a href="/">&larr; All devices</a></p>
-<h1>{html.escape(device.allowlist_name or device.hostname or device.mac)}</h1>
+<h1>{html.escape(dossier.label)}</h1>
 {_flash(message)}
 {_flash(error, error=True)}
 <div class="panel">
@@ -846,6 +1110,9 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 {html.escape(device.vendor or '[unknown]')} &middot;
 {_status_badge(device)} {_trust_badge(device)}
 </p>
+</div>
+<div class="panel">
+{_identity_section_html(dossier)}
 </div>
 <div class="panel">
 {trust_section}
@@ -972,13 +1239,41 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             query = parse_qs(urlsplit(self.path).query)
             sort = query.get("sort", [_DEFAULT_SORT])[0]
             direction = query.get("dir", ["asc"])[0]
+            filters = _parse_filters(query)
+            now = utcnow()
+            signatures = SignatureSet.load(context.cfg.rogue_signatures_file)
+            identity_rules = IdentityRuleSet.load(context.cfg.identity_rules_file)
             with DeviceStore(context.cfg.resolved_db_path()) as store:
                 allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
                 apply_self_trust(allowlist, interface=context.cfg.scan.interface)
-                devices = build_inventory(store, allowlist)
-            self._send(
-                HTTPStatus.OK,
-                _page(title="Devices", body=_render_device_list(devices, sort=sort, direction=direction), authed=True),
+                inventory = build_inventory(store, allowlist)
+                dossiers = [
+                    build_device_dossier(
+                        store, allowlist, d.mac, signatures=signatures, identity_rules=identity_rules,
+                        vendor_file=context.cfg.vendor_file, now=now, device=d,
+                    )
+                    for d in inventory
+                ]
+            filtered = _filter_dossiers(dossiers, filters, now=now)
+            extra_query = _filters_query_string(filters)
+            body = f"""
+<h1>Devices</h1>
+<div class="panel">
+{_render_network_overview(dossiers, now=now)}
+</div>
+<div class="panel">
+{_render_filter_form(filters, sort=sort, direction=direction)}
+</div>
+{_render_device_list(filtered, sort=sort, direction=direction, has_any_devices=bool(dossiers), extra_query=extra_query)}
+"""
+            self._send(HTTPStatus.OK, _page(title="Devices", body=body, authed=True))
+
+        def _load_dossier(self, store: DeviceStore, allowlist: Allowlist, mac: str) -> DeviceDossier | None:
+            return build_device_dossier(
+                store, allowlist, mac,
+                signatures=SignatureSet.load(context.cfg.rogue_signatures_file),
+                identity_rules=IdentityRuleSet.load(context.cfg.identity_rules_file),
+                vendor_file=context.cfg.vendor_file,
             )
 
         def _handle_device_get(self, raw_mac: str) -> None:
@@ -990,13 +1285,13 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             with DeviceStore(context.cfg.resolved_db_path()) as store:
                 allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
                 apply_self_trust(allowlist, interface=context.cfg.scan.interface)
-                device = build_device(store, allowlist, mac)
-            if device is None:
+                dossier = self._load_dossier(store, allowlist, mac)
+            if dossier is None:
                 self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
                 return
             self._send(
                 HTTPStatus.OK,
-                _page(title=device.allowlist_name or mac, body=_render_device_detail(device), authed=True),
+                _page(title=dossier.device.allowlist_name or mac, body=_render_device_detail(dossier), authed=True),
             )
 
         def _handle_device_post(self, raw_mac: str) -> None:
@@ -1031,7 +1326,10 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             elif action == "metadata":
                 updates: dict[str, str | None] = {}
                 try:
-                    for field in ("owner", "location"):
+                    for field in (
+                        "friendly_name", "owner", "location", "asset_type", "category_override",
+                        "purpose", "notes",
+                    ):
                         raw_value = form.get(field, "").strip()
                         updates[field] = validate_metadata_value(field, raw_value) if raw_value else None
                     with DeviceStore(context.cfg.resolved_db_path()) as store:
@@ -1048,15 +1346,15 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             with DeviceStore(context.cfg.resolved_db_path()) as store:
                 allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
                 apply_self_trust(allowlist, interface=context.cfg.scan.interface)
-                device = build_device(store, allowlist, mac)
-            if device is None:
+                dossier = self._load_dossier(store, allowlist, mac)
+            if dossier is None:
                 self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
                 return
             self._send(
                 HTTPStatus.OK,
                 _page(
-                    title=device.allowlist_name or mac,
-                    body=_render_device_detail(device, message=message, error=error),
+                    title=dossier.device.allowlist_name or mac,
+                    body=_render_device_detail(dossier, message=message, error=error),
                     authed=True,
                 ),
             )

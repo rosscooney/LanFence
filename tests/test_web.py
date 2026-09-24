@@ -19,6 +19,7 @@ from lanfence import web
 from lanfence.allowlist import Allowlist
 from lanfence.config import Config
 from lanfence.db import DeviceStore
+from lanfence.dossier import DeviceDossier
 from lanfence.models import Device
 
 
@@ -600,7 +601,7 @@ def test_device_list_and_detail_show_both_ipv4_and_ipv6(running_portal):
     with DeviceStore(cfg.resolved_db_path()) as store:
         store.record_address_evidence(
             mac="aa:bb:cc:dd:ee:ff", ip="fe80::abcd", interface="eth0",
-            source="ipv6_nd", kind="direct", seen_at=datetime.now(timezone.utc),
+            source="ipv6_nd", kind="observed", seen_at=datetime.now(timezone.utc),
         )
     opener = _opener()
     opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
@@ -625,6 +626,151 @@ def test_metadata_rejects_overlong_value(running_portal):
     assert "must be at most" in body
 
 
+# --- Know Your Network: asset metadata, identity, inventory filtering ------
+
+
+def test_metadata_edit_sets_asset_fields(running_portal):
+    base_url, cfg = running_portal
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    data = urllib.parse.urlencode(
+        {
+            "action": "metadata", "owner": "", "location": "", "friendly_name": "Boardroom TV",
+            "asset_type": "Company", "category_override": "Media Device", "purpose": "Boardroom display",
+            "notes": "Mounted on wall",
+        }
+    ).encode()
+    resp = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data)
+    body = resp.read().decode()
+    assert "Details saved" in body
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        metadata = store.get_device_metadata("aa:bb:cc:dd:ee:ff")
+    assert metadata.friendly_name == "Boardroom TV"
+    assert metadata.asset_type == "Company"
+    assert metadata.category_override == "Media Device"
+    assert metadata.purpose == "Boardroom display"
+    assert metadata.notes == "Mounted on wall"
+
+
+def test_metadata_rejects_invalid_asset_type(running_portal):
+    base_url, _ = running_portal
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    data = urllib.parse.urlencode({"action": "metadata", "asset_type": "Not A Real Type"}).encode()
+    resp = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data)
+    body = resp.read().decode()
+    assert "must be one of" in body
+
+
+def test_device_page_shows_identity_section(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname="Ross-iPhone", vendor="Apple, Inc.",
+            seen_at=datetime.now(timezone.utc),
+        )
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "Identity (Know Your Network)" in body
+    assert "Apple iPhone" in body
+    assert "Why this identity?" in body
+    assert "Hostname suggests an iPhone" in body
+
+
+def test_index_shows_network_overview_panel(running_portal):
+    base_url, _ = running_portal
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/").read().decode()
+    assert "Know Your Network" in body
+    assert "1 devices" in body
+
+
+def test_index_asset_type_filter_narrows_list(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=datetime.now(timezone.utc))
+        store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc), asset_type="Company",
+        )
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/?asset_type=Company").read().decode()
+    assert "aa:bb:cc:dd:ee:ff" in body
+    assert "11:22:33:44:55:66" not in body
+
+
+def test_index_search_matches_owner(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=datetime.now(timezone.utc))
+        store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc), owner="Alice")
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/?q=Alice").read().decode()
+    assert "aa:bb:cc:dd:ee:ff" in body
+    assert "11:22:33:44:55:66" not in body
+
+
+def test_index_review_filter(running_portal):
+    # aa:bb:cc:dd:ee:ff (seeded by running_portal) stays in its default,
+    # never-reviewed "pending" state - is_review_needed() is true for it.
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.observe(mac="11:22:33:44:55:66", ip="10.0.0.6", hostname=None, vendor=None, seen_at=datetime.now(timezone.utc))
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    allowlist.path = cfg.resolved_allowlist_file()
+    allowlist.add("11:22:33:44:55:66", "Trusted Thing")
+    allowlist.save()
+
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/?review=1").read().decode()
+    assert "aa:bb:cc:dd:ee:ff" in body
+    assert "11:22:33:44:55:66" not in body
+
+
+# --- inventory filtering (pure function) ------------------------------------
+
+
+def test_filter_dossiers_by_trust_and_category():
+    from lanfence.dossier import DeviceDossier
+    from lanfence.identity import DeviceIdentity
+
+    now = datetime.now(timezone.utc)
+    trusted = DeviceDossier(
+        device=_device("aa:aa:aa:aa:aa:aa", trusted=True), identity=DeviceIdentity(category="Printer", confidence=50),
+    )
+    untrusted = DeviceDossier(
+        device=_device("bb:bb:bb:bb:bb:bb", trusted=False), identity=DeviceIdentity(category="Camera", confidence=50),
+    )
+    result = web._filter_dossiers([trusted, untrusted], web._parse_filters({"trust": ["trusted"]}), now=now)
+    assert result == [trusted]
+
+    result = web._filter_dossiers([trusted, untrusted], web._parse_filters({"category": ["Camera"]}), now=now)
+    assert result == [untrusted]
+
+
+def test_filter_dossiers_unknown_identity():
+    from lanfence.dossier import DeviceDossier
+    from lanfence.identity import DeviceIdentity
+
+    now = datetime.now(timezone.utc)
+    known = DeviceDossier(device=_device("aa:aa:aa:aa:aa:aa"), identity=DeviceIdentity(category="Printer", confidence=50))
+    unknown = DeviceDossier(device=_device("bb:bb:bb:bb:bb:bb"), identity=DeviceIdentity())
+    result = web._filter_dossiers([known, unknown], web._parse_filters({"unknown": ["1"]}), now=now)
+    assert result == [unknown]
+
+
 # --- device list sorting --------------------------------------------------
 
 
@@ -636,6 +782,10 @@ def _device(mac, *, name=None, hostname=None, ip=None, vendor=None, status="onli
     )
 
 
+def _dossier(mac, **device_kwargs) -> DeviceDossier:
+    return DeviceDossier(device=_device(mac, **device_kwargs))
+
+
 def test_ip_sort_key_orders_numerically_not_lexicographically():
     assert web._ip_sort_key("10.0.0.2") < web._ip_sort_key("10.0.0.10")
 
@@ -645,44 +795,44 @@ def test_ip_sort_key_sorts_missing_ip_last():
 
 
 def test_render_device_list_defaults_to_mac_ascending():
-    devices = [_device("bb:bb:bb:bb:bb:bb"), _device("aa:aa:aa:aa:aa:aa")]
-    body = web._render_device_list(devices)
+    dossiers = [_dossier("bb:bb:bb:bb:bb:bb"), _dossier("aa:aa:aa:aa:aa:aa")]
+    body = web._render_device_list(dossiers)
     assert body.index("aa:aa:aa:aa:aa:aa") < body.index("bb:bb:bb:bb:bb:bb")
 
 
 def test_render_device_list_sorts_by_name_case_insensitively():
-    devices = [_device("aa:aa:aa:aa:aa:aa", name="zeta"), _device("bb:bb:bb:bb:bb:bb", name="Alpha")]
-    body = web._render_device_list(devices, sort="name", direction="asc")
+    dossiers = [_dossier("aa:aa:aa:aa:aa:aa", name="zeta"), _dossier("bb:bb:bb:bb:bb:bb", name="Alpha")]
+    body = web._render_device_list(dossiers, sort="name", direction="asc")
     assert body.index("Alpha") < body.index("zeta")
 
 
 def test_render_device_list_direction_desc_reverses_order():
-    devices = [_device("aa:aa:aa:aa:aa:aa", name="alpha"), _device("bb:bb:bb:bb:bb:bb", name="zeta")]
-    body = web._render_device_list(devices, sort="name", direction="desc")
+    dossiers = [_dossier("aa:aa:aa:aa:aa:aa", name="alpha"), _dossier("bb:bb:bb:bb:bb:bb", name="zeta")]
+    body = web._render_device_list(dossiers, sort="name", direction="desc")
     assert body.index("zeta") < body.index("alpha")
 
 
 def test_render_device_list_sorts_by_ip_numerically():
-    devices = [_device("aa:aa:aa:aa:aa:aa", ip="10.0.0.10"), _device("bb:bb:bb:bb:bb:bb", ip="10.0.0.2")]
-    body = web._render_device_list(devices, sort="ip", direction="asc")
+    dossiers = [_dossier("aa:aa:aa:aa:aa:aa", ip="10.0.0.10"), _dossier("bb:bb:bb:bb:bb:bb", ip="10.0.0.2")]
+    body = web._render_device_list(dossiers, sort="ip", direction="asc")
     assert body.index("10.0.0.2") < body.index("10.0.0.10")
 
 
 def test_render_device_list_sorts_by_trust():
-    devices = [_device("aa:aa:aa:aa:aa:aa", trusted=True), _device("bb:bb:bb:bb:bb:bb", trusted=False)]
-    body = web._render_device_list(devices, sort="trust", direction="asc")
+    dossiers = [_dossier("aa:aa:aa:aa:aa:aa", trusted=True), _dossier("bb:bb:bb:bb:bb:bb", trusted=False)]
+    body = web._render_device_list(dossiers, sort="trust", direction="asc")
     assert body.index("badge--trusted") < body.index("badge--untrusted")
 
 
 def test_render_device_list_unknown_sort_falls_back_to_default():
-    devices = [_device("bb:bb:bb:bb:bb:bb"), _device("aa:aa:aa:aa:aa:aa")]
-    body = web._render_device_list(devices, sort="not-a-real-column", direction="asc")
+    dossiers = [_dossier("bb:bb:bb:bb:bb:bb"), _dossier("aa:aa:aa:aa:aa:aa")]
+    body = web._render_device_list(dossiers, sort="not-a-real-column", direction="asc")
     assert body.index("aa:aa:aa:aa:aa:aa") < body.index("bb:bb:bb:bb:bb:bb")
 
 
 def test_render_device_list_invalid_direction_falls_back_to_asc():
-    devices = [_device("bb:bb:bb:bb:bb:bb"), _device("aa:aa:aa:aa:aa:aa")]
-    body = web._render_device_list(devices, sort="mac", direction="sideways")
+    dossiers = [_dossier("bb:bb:bb:bb:bb:bb"), _dossier("aa:aa:aa:aa:aa:aa")]
+    body = web._render_device_list(dossiers, sort="mac", direction="sideways")
     assert body.index("aa:aa:aa:aa:aa:aa") < body.index("bb:bb:bb:bb:bb:bb")
 
 

@@ -891,7 +891,7 @@ def test_preferred_addresses_by_family_returns_both_families(tmp_path: Path):
         store.observe(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=t0)
         store.record_address_evidence(
             mac="aa:bb:cc:dd:ee:ff", ip="fe80::1234", interface="eth0",
-            source="ipv6_nd", kind="direct", seen_at=t0,
+            source="ipv6_nd", kind="observed", seen_at=t0,
         )
         result = store.preferred_addresses_by_family_for_macs(["aa:bb:cc:dd:ee:ff"])
         assert result["aa:bb:cc:dd:ee:ff"] == {"ipv4": "10.0.0.5", "ipv6": "fe80::1234"}

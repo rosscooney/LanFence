@@ -90,15 +90,32 @@ class DeviceDossier(BaseModel):
     @property
     def label(self) -> str:
         """The best available short human label for this device - the
-        allowlist name first (it's what a human actually calls the
-        device), then the observed hostname, finally the bare MAC. Never a
-        fabricated name."""
+        allowlist (trusted) name first, then an operator-set friendly name
+        (see :attr:`~lanfence.models.DeviceMetadata.friendly_name`), then
+        the observed hostname, finally the bare MAC. Never a fabricated
+        name."""
 
         if self.device.allowlist_name:
             return self.device.allowlist_name
+        metadata = self.device.metadata
+        if metadata and metadata.friendly_name:
+            return metadata.friendly_name
         if self.device.hostname:
             return self.device.hostname
         return self.device.mac
+
+    @property
+    def effective_category(self) -> str:
+        """The category to show/filter/sort on: the operator's own
+        override when set (see
+        :attr:`~lanfence.models.DeviceMetadata.category_override`),
+        otherwise the inferred identity's category. Never discards the
+        underlying inference - :attr:`identity` still holds it either way."""
+
+        metadata = self.device.metadata
+        if metadata and metadata.category_override:
+            return metadata.category_override
+        return self.identity.category
 
     @property
     def observed_services_summary(self) -> list[str]:
