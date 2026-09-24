@@ -288,9 +288,10 @@ lanfence monitor --live     # force the live dashboard (fails helpfully, not sil
 lanfence monitor --no-live  # force plain, append-only output (e.g. when redirecting to a log file)
 ```
 
-**Header**: interface, network scope, elapsed session time, LAN Fence's
-version, which discovery mechanisms are active (from actual config, not
-guessed), and the last completed sweep time (or "scanning now (NN%)" while
+**Header**: your configured [site name](#site-identity) (if set), interface,
+network scope, elapsed session time, LAN Fence's version, which discovery
+mechanisms are active (from actual config, not guessed), and the last
+completed sweep time (or "scanning now (NN%)" while
 one is in progress - an *estimate*, based on elapsed time against
 `scan.active_scan_timeout_seconds`, not a report of how many hosts have
 actually responded). **Activity feed**: new/reappeared/disconnected devices and
@@ -1068,6 +1069,24 @@ webhook URL, an SMTP timeout) never stops the others, and `lanfence digest
 immediate-alert pipeline: it ignores `alerts.min_severity` and never reads
 or writes the per-MAC alert cooldown, so sending a digest can never suppress
 (or be suppressed by) an immediate alert for the same device.
+
+## Site identity
+
+If you run LAN Fence on more than one network (different sites, a client's
+network, opposite ends of a building), an optional site name and location
+let you tell their alerts, digests, and monitor sessions apart at a glance:
+
+```text
+$ lanfence setup   # Site identity section: set a name and location
+```
+
+Once set, `Site: <name> (<location>)` appears at the top of every finding
+alert and digest email (plain text and HTML alike), the email subject and
+digest summary line get a `[<name>] ` prefix, `lanfence monitor`'s header
+shows the name alongside the interface/network, and `lanfence scan`/
+`lanfence device <mac>` show it in both table and `--format json` output.
+Both fields are purely descriptive - optional, never validated against
+reality, and have no effect on scanning, matching, or alerting behaviour.
 
 ## Communication channels
 

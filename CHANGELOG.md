@@ -43,6 +43,13 @@ Each release is also published to
   type, owner, unknown identity, needs review, free-text search across
   name/MAC/IP/owner/vendor) - all plain GET query parameters, so filtered
   views stay shareable/bookmarkable with no client-side script.
+- **Site identity**: an optional name and location (`lanfence setup`'s new
+  "Site identity" section) for anyone running LAN Fence across more than
+  one network. When set, it appears at the top of every finding alert and
+  digest email (with a `[<name>] ` subject/summary prefix too), on
+  `lanfence monitor`'s header line, and in `lanfence scan`/`lanfence
+  device`'s table and JSON output - purely descriptive, with no effect on
+  scanning or matching behaviour.
 
 ## [0.5.7] - 2026-09-23
 
