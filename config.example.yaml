@@ -7,6 +7,7 @@
 
 scan:
   interface: null              # null = auto-detect
+  interfaces: []               # several at once (e.g. [eth0, eth0.10]); [] = just `interface`
   subnet: null                 # null = derive from the interface's own address
   scan_interval_seconds: 60    # how often `monitor` repeats an active sweep
   active_scan_timeout_seconds: 3

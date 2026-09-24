@@ -50,6 +50,15 @@ Each release is also published to
   `lanfence monitor`'s header line, and in `lanfence scan`/`lanfence
   device`'s table and JSON output - purely descriptive, with no effect on
   scanning or matching behaviour.
+- **Multiple interfaces and VLANs**: `scan` and `monitor` can now watch
+  several network interfaces at once, chosen in `lanfence setup`'s new
+  "Network interfaces" section, which steps through every interface the
+  OS reports (including VLAN sub-interfaces such as `eth0.10`) asking
+  whether to enable each. Each interface is swept with its own
+  auto-detected subnet, passive capture covers them all at once, and a
+  device is only marked offline by a sweep of the interface it was last
+  seen on. With no interfaces enabled, behaviour is unchanged: one
+  auto-detected interface. `ScanResult` JSON gains an `interfaces` list.
 
 ## [0.5.7] - 2026-09-23
 

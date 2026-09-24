@@ -67,6 +67,37 @@ routinely) and never touches, blocks, deauthenticates or spoofs anything.
    Discord, Microsoft Teams, ntfy, or Twilio SMS**, and everything is
    available as a CLI table or JSON for automation.
 
+## Multiple interfaces and VLANs
+
+By default LAN Fence watches a single, auto-detected network interface. To
+watch several at once - a second NIC, or VLANs - enable them in `lanfence
+setup`'s **Network interfaces** section, which lists every interface the
+OS reports and asks, one by one, whether to enable it:
+
+```text
+$ sudo lanfence setup
+...
+Enable eth0? [y/N]: y
+Enable eth0.10? [y/N]: y
+Enable wlan0? [y/N]: n
+Enabled: eth0, eth0.10
+```
+
+A VLAN is just another interface here: LAN Fence never creates or tags
+VLANs itself, so configure the VLAN sub-interface at the OS level first
+(e.g. `eth0.10` via netplan, NetworkManager, or `ip link add link eth0
+name eth0.10 type vlan id 10`), and it will appear in the list. Enable
+each VLAN you want to watch, or all of them.
+
+With several interfaces enabled, `scan` and `monitor` sweep each one and
+listen on all of them in a single capture. Each interface uses its own
+auto-detected subnet (a single `--subnet`/`scan.subnet` can't describe
+several networks, so it's ignored with a warning), and a device is only
+ever marked offline by a sweep of the interface it was last seen on.
+`--interface` still forces one interface for a single run. Enabling no
+interfaces returns to the default: one auto-detected interface. JSON
+output lists every interface swept under `"interfaces"`.
+
 ## Built-in rogue-device signatures
 
 Heuristics, not proof - a match is a lead to check by hand:
@@ -1652,6 +1683,7 @@ All settings are optional; everything has a sensible default. Pass
 ```yaml
 scan:
   interface: null              # null = auto-detect
+  interfaces: []               # several at once (e.g. [eth0, eth0.10]); [] = just `interface`
   subnet: null                 # null = derive from the interface's own address
   scan_interval_seconds: 60    # how often `monitor` repeats an active sweep
   active_scan_timeout_seconds: 3
