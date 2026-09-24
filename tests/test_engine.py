@@ -439,6 +439,31 @@ def test_trusted_always_on_device_still_gets_availability_finding(tmp_path: Path
     assert due[0].kind == "availability"
 
 
+def test_availability_finding_lists_trusted_name_above_mac(tmp_path: Path):
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None):
+        store = DeviceStore(tmp_path / "db.sqlite")
+        allowlist = Allowlist.load(None)
+        allowlist.add("aa:bb:cc:dd:ee:ff", "Trusted Server")
+        cfg = Config()
+        t0 = _now()
+
+        process_sighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=t0,
+                          store=store, allowlist=allowlist, signatures=SignatureSet.load(), cfg=cfg,
+                          interface="eth0", subnet="10.0.0.0/24")
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=t0)
+        store.mark_offline(set(), as_of=t0, grace_seconds=0, missed_after=1,
+                            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", interface="eth0")
+
+        due = evaluate_availability(
+            store, cfg, as_of=t0 + timedelta(seconds=600),
+            ipv4_covered=True, ipv4_subnet="10.0.0.0/24", ipv6_covered=False, interface="eth0",
+            allowlist=allowlist,
+        )
+        store.close()
+
+    assert due[0].evidence[:2] == ["Name: Trusted Server", "MAC: aa:bb:cc:dd:ee:ff"]
+
+
 def test_run_active_sweep_merges_ipv4_and_ipv6_sightings(tmp_path: Path):
     v4 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
     v6 = scanner.ArpSighting(mac="11:22:33:44:55:66", ip="fe80::1", seen_at=_now())

@@ -317,6 +317,7 @@ def evaluate_availability(
     ipv4_subnet: str | None,
     ipv6_covered: bool,
     interface: str | None,
+    allowlist: Allowlist | None = None,
 ) -> list[Finding]:
     """One medium-severity availability finding per always-on device whose
     absence has just reached its effective delay - see
@@ -326,6 +327,8 @@ def evaluate_availability(
     discovery path). Trust never downgrades this - it fires at ``medium``
     regardless of allowlist status. Call this once per eligible active
     sweep, alongside :func:`run_active_sweep`'s ``mark_offline`` call.
+    ``allowlist`` puts a trusted device's name at the top of its evidence,
+    the same as every other device-scoped finding.
     """
 
     due = store.evaluate_availability(
@@ -338,6 +341,7 @@ def evaluate_availability(
     findings: list[Finding] = []
     for item in due:
         delay = item["offline_after_seconds"]
+        allow_entry = allowlist.match(item["mac"]) if allowlist is not None else None
         findings.append(
             Finding(
                 mac=item["mac"],
@@ -351,6 +355,7 @@ def evaluate_availability(
                 recommendation="Check that this device is powered on and connected.",
                 evidence=_device_evidence_lines(
                     mac=item["mac"], ip=item["ip"], hostname=item["hostname"], vendor=item["vendor"],
+                    allowlisted=allow_entry is not None, allowlist_name=allow_entry.name if allow_entry else None,
                     metadata=metadata_by_mac.get(item["mac"]),
                 ),
             )
@@ -471,7 +476,7 @@ def run_active_sweep(
             evaluate_availability(
                 store, cfg, as_of=as_of,
                 ipv4_covered=ipv4_covered, ipv4_subnet=net,
-                ipv6_covered=ipv6_covered, interface=iface,
+                ipv6_covered=ipv6_covered, interface=iface, allowlist=allowlist,
             )
         )
 
