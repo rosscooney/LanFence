@@ -92,6 +92,42 @@ def test_site_identity_section_sets_name_and_location(tmp_path):
     assert saved['site']['location'] == 'Living room'
 
 
+
+_DETECTED = ['eth0', 'eth0.10', 'wlan0']
+
+
+def test_network_interfaces_step_through_enables_chosen_interfaces(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=_DETECTED):
+        result, _ = run_setup(path, '11\n1\ny\ny\nn\nback\nsave\nexit\n')
+    assert 'Enable eth0.10?' in result.output
+    assert yaml.safe_load(path.read_text())['scan']['interfaces'] == ['eth0', 'eth0.10']
+
+
+def test_network_interfaces_enabling_none_falls_back_to_auto(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml.safe_dump({'scan': {'interfaces': ['eth0', 'wlan0']}}))
+    with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=_DETECTED):
+        result, _ = run_setup(path, '11\n1\nn\nn\nn\nback\nsave\ny\nexit\n')
+    assert 'auto-detect a single interface' in result.output
+    assert 'interfaces' not in (yaml.safe_load(path.read_text()) or {}).get('scan', {})
+
+
+def test_network_interfaces_defaults_to_currently_enabled(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml.safe_dump({'scan': {'interfaces': ['wlan0']}}))
+    with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=_DETECTED):
+        # Blank answers accept each prompt's default, which reflects current state.
+        result, _ = run_setup(path, '11\n1\n\n\n\nback\nexit\n')
+    assert 'Enabled interfaces: wlan0' in result.output
+    assert 'Enabled: wlan0' in result.output
+
+
+def test_network_interfaces_not_listed_as_a_generic_scanning_field(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, '2\nback\nexit\n')
+    assert 'scan.interfaces' not in result.output
+
 def test_site_identity_overview_shows_not_set_by_default(tmp_path):
     path = tmp_path / 'config.yaml'
     result, _ = run_setup(path, 'save\nexit\n')

@@ -34,7 +34,10 @@ from lanfence import scanner, web
 # below, numbered after this section's listed fields), never edited as
 # plain text like an ordinary field.
 SECTIONS = {
-    "Scanning": [f"scan.{name}" for name in type(Config().scan).model_fields if not name.startswith("offline_")],
+    "Scanning": [
+        f"scan.{name}" for name in type(Config().scan).model_fields
+        if not name.startswith("offline_") and name != "interfaces"
+    ],
     "Offline detection": [
         "scan.offline_grace_seconds", "scan.offline_after_missed_scans",
         "scan.offline_retry_probe", "scan.offline_retry_timeout_seconds",
@@ -46,6 +49,9 @@ SECTIONS = {
     "Alert delivery": ["alerts.min_severity", "alerts.rate_limit_seconds"],
     "Web portal": ["web.enabled", "web.port"],
     "Site identity": ["site.name", "site.location"],
+    # No generic fields - scan.interfaces is edited only through the
+    # step-through edit_interfaces action below.
+    "Network interfaces": [],
 }
 MISSING = object()
 
@@ -138,7 +144,7 @@ def warnings_for(cfg):
 
 def diff_lines(before, after):
     lines = []
-    paths = sum(SECTIONS.values(), []) + ["dhcp_servers.approved", "web.password_hash"]
+    paths = sum(SECTIONS.values(), []) + ["dhcp_servers.approved", "web.password_hash", "scan.interfaces"]
     for channel in CHANNEL_NAMES:
         paths += [f"alerts.{channel}.{f.name}" for f in CHANNEL_FIELDS[channel]]
         paths.append(f"alerts.{channel}.enabled")
@@ -373,6 +379,32 @@ def edit_approvals(raw):
             raw = candidate
 
 
+def edit_interfaces(raw):
+    """The Network interfaces section's step-through: asks y/n for every
+    interface the OS reports (a VLAN sub-interface such as eth0.10 is just
+    another interface name here). Enabling none clears scan.interfaces,
+    falling back to auto-detecting a single interface."""
+
+    detected = scanner.available_interfaces()
+    if not detected:
+        typer.echo("No network interfaces detected on this host.")
+        return raw
+    current = set(value_at(raw, "scan.interfaces", []) or [])
+    typer.echo(
+        "Choose which interfaces LAN Fence scans and listens on. VLANs appear as their own "
+        "interfaces (e.g. eth0.10) once configured at the OS level - enable each one you want, "
+        "or all of them. Enabling none means auto: one interface, detected automatically."
+    )
+    selected = [name for name in detected if typer.confirm(f"Enable {name}?", default=name in current)]
+    if selected:
+        raw = patch_value(raw, "scan.interfaces", selected)
+        typer.echo("Enabled: " + ", ".join(selected))
+    else:
+        raw = patch_value(raw, "scan.interfaces")
+        typer.echo("No interfaces enabled - LAN Fence will auto-detect a single interface.")
+    return raw
+
+
 def edit_section(raw, section):
     while True:
         cfg = Config.model_validate(raw).model_dump(mode="json")
@@ -396,11 +428,18 @@ def edit_section(raw, section):
             password_index = len(SECTIONS[section]) + 1
             configured = value_at(raw, "web.password_hash") not in (MISSING, None)
             typer.echo(f"{password_index}  Set/change password ({'configured' if configured else 'not set'})")
+        interfaces_index = None
+        if section == "Network interfaces":
+            interfaces_index = len(SECTIONS[section]) + 1
+            enabled = value_at(raw, "scan.interfaces", []) or []
+            typer.echo(f"{interfaces_index}  Enabled interfaces: {', '.join(enabled) or 'auto (single interface)'}")
         max_choice = len(SECTIONS[section])
         if approvals_index is not None:
             max_choice = approvals_index
         if password_index is not None:
             max_choice = password_index
+        if interfaces_index is not None:
+            max_choice = interfaces_index
         choice = typer.prompt(
             f"Choose a section [1-{max_choice}] or b [Back]", default="b", show_default=False
         ).lower()
@@ -410,6 +449,8 @@ def edit_section(raw, section):
             raw = edit_approvals(raw)
         elif password_index is not None and choice == str(password_index):
             raw = edit_web_password(raw)
+        elif interfaces_index is not None and choice == str(interfaces_index):
+            raw = edit_interfaces(raw)
         elif choice.isdigit() and 1 <= int(choice) <= len(SECTIONS[section]):
             raw = edit_field(raw, SECTIONS[section][int(choice) - 1])
         else:
@@ -465,13 +506,14 @@ def render_overview(console, draft):
     site_summary = cfg.site.name or "not set"
     if cfg.site.location:
         site_summary += f" · {cfg.site.location}"
+    interfaces_summary = ", ".join(cfg.scan.interfaces) or "auto (single interface)"
     summaries = [enabled, f"{cfg.scan.interface or 'auto'} · every {cfg.scan.scan_interval_seconds:g}s",
                  f"{cfg.scan.offline_grace_seconds:g}s · {cfg.scan.offline_after_missed_scans} misses",
                  f"enabled={cfg.dhcp_servers.enabled} · {len(cfg.dhcp_servers.approved)} approved",
                  f"mDNS={cfg.discovery.mdns} · SSDP={cfg.discovery.ssdp}",
                  ", ".join(cfg.digest.channels) or "no destinations", "Paths only; no data migration",
                  f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s", web_summary,
-                 site_summary]
+                 site_summary, interfaces_summary]
     for i, (section, summary) in enumerate(zip(["Communications", *SECTIONS], summaries), 1):
         table.add_row(str(i), section, Text(clean_text(summary, max_len=300)))
     console.print(Panel(table, title="LAN Fence setup"))
