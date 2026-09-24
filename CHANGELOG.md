@@ -40,7 +40,8 @@ Each release is also published to
   Confidence columns, a "Know Your Network" overview panel (device counts
   by asset type, plus how many need review or have an unknown/uncertain
   identity), and filter/search controls (trust, status, category, asset
-  type, owner, unknown identity, needs review, free-text search across
+  type, owner, unknown or uncertain identity, no owner, needs review,
+  free-text search across
   name/MAC/IP/owner/vendor) - all plain GET query parameters, so filtered
   views stay shareable/bookmarkable with no client-side script.
 - **Site identity**: an optional name and location (`lanfence setup`'s new

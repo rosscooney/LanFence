@@ -66,6 +66,10 @@ log = get_logger("identity")
 
 _PACKAGED_RULES = "identity_rules.yaml"
 
+#: Below this confidence a known identity counts as "uncertain" - worth an
+#: operator's look (see :attr:`DeviceIdentity.is_uncertain`).
+UNCERTAIN_BELOW_CONFIDENCE = 50
+
 #: The fields a rule may assert a value for - see :class:`IdentityRule`.
 _IDENTITY_FIELDS = ("manufacturer", "category", "family", "platform")
 
@@ -115,6 +119,12 @@ class DeviceIdentity(BaseModel):
     @property
     def is_known(self) -> bool:
         return self.confidence > 0
+
+    @property
+    def is_uncertain(self) -> bool:
+        """Some evidence, but not much - distinct from having none at all."""
+
+        return self.is_known and self.confidence < UNCERTAIN_BELOW_CONFIDENCE
 
     @property
     def probable_identity(self) -> str:

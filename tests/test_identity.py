@@ -319,6 +319,12 @@ def test_confidence_never_negative_even_when_only_conflicting_evidence_present(t
 # --- probable_identity property ---------------------------------------------
 
 
+
+def test_is_uncertain_means_some_but_little_evidence():
+    assert DeviceIdentity(confidence=20).is_uncertain is True
+    assert DeviceIdentity(confidence=80).is_uncertain is False
+    assert DeviceIdentity(confidence=0).is_uncertain is False  # no evidence at all is "unknown", not uncertain
+
 def test_probable_identity_combines_manufacturer_and_family():
     identity = DeviceIdentity(manufacturer="Apple", family="iPhone", category="Phone", confidence=90)
     assert identity.probable_identity == "Apple iPhone"

@@ -855,6 +855,34 @@ def test_filter_dossiers_unknown_identity():
     assert result == [unknown]
 
 
+
+def test_filter_dossiers_uncertain_identity_and_no_owner():
+    from lanfence.dossier import DeviceDossier
+    from lanfence.identity import DeviceIdentity
+    from lanfence.models import DeviceMetadata
+
+    now = datetime.now(timezone.utc)
+    confident = DeviceDossier(device=_device("aa:aa:aa:aa:aa:aa"), identity=DeviceIdentity(confidence=80))
+    uncertain = DeviceDossier(device=_device("bb:bb:bb:bb:bb:bb"), identity=DeviceIdentity(confidence=20))
+    unknown = DeviceDossier(device=_device("cc:cc:cc:cc:cc:cc"), identity=DeviceIdentity())
+    owned_device = _device("dd:dd:dd:dd:dd:dd")
+    owned_device.metadata = DeviceMetadata(mac="dd:dd:dd:dd:dd:dd", owner="Alice")
+    owned = DeviceDossier(device=owned_device, identity=DeviceIdentity(confidence=80))
+    everything = [confident, uncertain, unknown, owned]
+
+    assert web._filter_dossiers(everything, web._parse_filters({"uncertain": ["1"]}), now=now) == [uncertain]
+    assert owned not in web._filter_dossiers(everything, web._parse_filters({"no_owner": ["1"]}), now=now)
+
+
+def test_network_overview_attention_counts_link_to_their_filters():
+    from lanfence.dossier import DeviceDossier
+    from lanfence.identity import DeviceIdentity
+
+    dossiers = [DeviceDossier(device=_device("aa:aa:aa:aa:aa:aa"), identity=DeviceIdentity(confidence=20))]
+    body = web._render_network_overview(dossiers, now=datetime.now(timezone.utc))
+    assert 'href="/?uncertain=1"' in body
+    assert 'href="/?no_owner=1"' in body
+
 # --- device list sorting --------------------------------------------------
 
 

@@ -803,7 +803,7 @@ def _render_device_list(
 #: shared between parsing the incoming request and building "preserve the
 #: current filters" links (sort headers, overview counts).
 _FILTER_PARAMS: tuple[str, ...] = (
-    "trust", "status", "category", "asset_type", "owner", "unknown", "review", "q",
+    "trust", "status", "category", "asset_type", "owner", "unknown", "uncertain", "no_owner", "review", "q",
 )
 
 
@@ -844,6 +844,10 @@ def _filter_dossiers(dossiers: list[DeviceDossier], filters: dict[str, str], *, 
             continue
         if filters["unknown"] == "1" and dossier.identity.is_known:
             continue
+        if filters["uncertain"] == "1" and not dossier.identity.is_uncertain:
+            continue
+        if filters["no_owner"] == "1" and _dossier_owner(dossier):
+            continue
         if filters["review"] == "1" and not is_review_needed(device, now=now):
             continue
         if q_needle:
@@ -867,6 +871,8 @@ def _render_filter_form(filters: dict[str, str], *, sort: str, direction: str) -
     asset_type_options = "".join(_option(v, filters["asset_type"]) for v in ("",) + ASSET_TYPES)
     unknown_checked = " checked" if filters["unknown"] == "1" else ""
     review_checked = " checked" if filters["review"] == "1" else ""
+    uncertain_checked = " checked" if filters["uncertain"] == "1" else ""
+    no_owner_checked = " checked" if filters["no_owner"] == "1" else ""
 
     return f"""
 <form class="stack" method="get" action="/" style="flex-direction:row;flex-wrap:wrap;gap:0.75rem;align-items:end">
@@ -902,6 +908,12 @@ def _render_filter_form(filters: dict[str, str], *, sort: str, direction: str) -
 <div>
 <label><input type="checkbox" name="review" value="1"{review_checked}> Needs review</label>
 </div>
+<div>
+<label><input type="checkbox" name="uncertain" value="1"{uncertain_checked}> Uncertain identity</label>
+</div>
+<div>
+<label><input type="checkbox" name="no_owner" value="1"{no_owner_checked}> No owner</label>
+</div>
 <button class="btn" type="submit">Filter</button>
 <a class="btn" href="/">Clear</a>
 </form>
@@ -931,7 +943,7 @@ def _render_network_overview(dossiers: list[DeviceDossier], *, now: datetime) ->
 
     needs_review = sum(1 for d in dossiers if is_review_needed(d.device, now=now))
     unknown_identity = sum(1 for d in dossiers if not d.identity.is_known)
-    uncertain_identity = sum(1 for d in dossiers if d.identity.is_known and d.identity.confidence < 50)
+    uncertain_identity = sum(1 for d in dossiers if d.identity.is_uncertain)
     no_owner = sum(1 for d in dossiers if not _dossier_owner(d))
 
     attention_parts = []
@@ -940,9 +952,9 @@ def _render_network_overview(dossiers: list[DeviceDossier], *, now: datetime) ->
     if unknown_identity:
         attention_parts.append(f'<a href="/?unknown=1">{unknown_identity} device(s) have unknown identities</a>')
     if uncertain_identity:
-        attention_parts.append(f"{uncertain_identity} device(s) have uncertain identities")
+        attention_parts.append(f'<a href="/?uncertain=1">{uncertain_identity} device(s) have uncertain identities</a>')
     if no_owner:
-        attention_parts.append(f"{no_owner} device(s) have no owner")
+        attention_parts.append(f'<a href="/?no_owner=1">{no_owner} device(s) have no owner</a>')
 
     attention_html = (
         f"<p>{' &middot; '.join(attention_parts)}</p>" if attention_parts else '<p class="muted">Nothing needs attention right now.</p>'

@@ -1270,7 +1270,7 @@ device`.
 Above the table, a "Know Your Network" panel gives a one-glance overview
 (device counts by asset type, and how many still need review or have an
 unknown/uncertain identity), and a filter/search row (trust, status,
-category, asset type, owner, unknown identity, needs review, plus free-text
+category, asset type, owner, unknown or uncertain identity, no owner, needs review, plus free-text
 search across name/MAC/IP/owner/vendor) narrows the table without leaving
 the page - every control is a plain GET form, so filters are shareable
 URLs and survive a bookmark or refresh. Every count in the overview panel
