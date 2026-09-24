@@ -240,8 +240,8 @@ def process_sighting(
     :meth:`lanfence.db.DeviceStore.observe` as discovery provenance for the
     offline-grace-period feature - see its docstring. ``source`` (see
     :data:`lanfence.scanner.SightingSource`) is likewise threaded through as
-    address-evidence provenance - only ``"arp"``/``"ipv6_nd"`` (directly
-    observed) are ever recorded as address evidence; a mere DHCP client
+    address-evidence provenance - only ``"arp"``/``"ipv6_nd"``/``"icmp"``
+    (directly observed) are ever recorded as address evidence; a mere DHCP client
     request/offer (``"dhcp_client"``) still updates presence/coverage above
     but is deliberately never trusted as evidence of the address itself
     (see ``DeviceStore.observe``'s docstring).
@@ -457,11 +457,13 @@ def run_active_sweep(
 
     if ipv4_covered or ipv6_covered:
         as_of = utcnow()
-        if ipv4_covered and net is not None and cfg.scan.offline_retry_probe:
+        arp_retry = ipv4_covered and net is not None and cfg.scan.offline_retry_probe
+        if arp_retry or cfg.scan.always_on_ping:
             _retry_devices_due_for_offline(
                 store, still_online, devices_by_mac, events, findings,
                 as_of=as_of, cfg=cfg, allowlist=allowlist, signatures=signatures,
-                interface=iface, subnet=net, ipv6_covered=ipv6_covered,
+                interface=iface, subnet=net, ipv4_covered=ipv4_covered, ipv6_covered=ipv6_covered,
+                arp_retry=arp_retry,
             )
         events.extend(
             store.mark_offline(
@@ -543,6 +545,11 @@ def run_active_sweep_multi(
     )
 
 
+#: How many times to ping an always-on device (per address) before
+#: accepting it's gone - enough to ride out a Wi-Fi power-save doze.
+_ALWAYS_ON_PING_ATTEMPTS = 3
+
+
 def _retry_devices_due_for_offline(
     store: DeviceStore,
     still_online: set[str],
@@ -555,19 +562,23 @@ def _retry_devices_due_for_offline(
     allowlist: Allowlist,
     signatures: SignatureSet,
     interface: str | None,
-    subnet: str,
+    subnet: str | None,
+    ipv4_covered: bool,
     ipv6_covered: bool,
+    arp_retry: bool,
 ) -> None:
     """Give every device :meth:`lanfence.db.DeviceStore.mark_offline` is
-    about to transition offline one last direct unicast ARP probe (see
-    :func:`lanfence.scanner.arp_probe`) before accepting that verdict -
-    see ``scan.offline_retry_probe``'s docstring in :mod:`lanfence.config`
-    for why. An answering device is folded back in exactly like a real
-    sighting (via :func:`process_sighting`) - ``still_online``/
-    ``devices_by_mac``/``events``/``findings`` are updated in place so it
-    reaches :func:`run_active_sweep`'s return value and is naturally
-    excluded from the ``mark_offline`` call that follows this. IPv4 only -
-    ARP has no IPv6 equivalent.
+    about to transition offline one last direct check before accepting that
+    verdict: a unicast ARP probe (see :func:`lanfence.scanner.arp_probe`,
+    when ``arp_retry``), and for an always-on device that still hasn't
+    answered, a few pings over IPv4 and IPv6 (see
+    :func:`lanfence.scanner.ping_probe`, when ``scan.always_on_ping``) -
+    see both settings' docstrings in :mod:`lanfence.config` for why. An
+    answering device is folded back in exactly like a real sighting (via
+    :func:`process_sighting`) - ``still_online``/``devices_by_mac``/
+    ``events``/``findings`` are updated in place so it reaches
+    :func:`run_active_sweep`'s return value and is naturally excluded from
+    the ``mark_offline`` call that follows this.
 
     The first permission/availability failure (:class:`~lanfence.scanner.ScannerUnavailable`)
     stops the retry pass early rather than retrying every remaining
@@ -580,7 +591,7 @@ def _retry_devices_due_for_offline(
         still_online, as_of=as_of,
         grace_seconds=cfg.scan.offline_grace_seconds,
         missed_after=cfg.scan.offline_after_missed_scans,
-        ipv4_covered=True, ipv4_subnet=subnet,
+        ipv4_covered=ipv4_covered, ipv4_subnet=subnet,
         ipv6_covered=ipv6_covered, interface=interface,
     )
     if not due:
@@ -591,15 +602,28 @@ def _retry_devices_due_for_offline(
     # reliable way to get a device's actual IPv4 address here.
     addresses_by_family = store.preferred_addresses_by_family_for_macs([d.mac for d in due])
     for candidate in due:
-        ipv4 = addresses_by_family.get(candidate.mac, {}).get("ipv4")
-        if not ipv4:
-            continue
+        addresses = addresses_by_family.get(candidate.mac, {})
+        ipv4 = addresses.get("ipv4")
+        reply = None
         try:
-            reply = scanner.arp_probe(
-                ipv4, interface=interface, timeout=cfg.scan.offline_retry_timeout_seconds,
-            )
+            if arp_retry and ipv4:
+                reply = scanner.arp_probe(
+                    ipv4, interface=interface, timeout=cfg.scan.offline_retry_timeout_seconds,
+                )
+            if (
+                reply is None and cfg.scan.always_on_ping
+                and store.get_presence(candidate.mac).policy == "always-on"
+            ):
+                for address in (ipv4, addresses.get("ipv6")):
+                    if address:
+                        reply = scanner.ping_probe(
+                            address, mac=candidate.mac, interface=interface,
+                            timeout=cfg.scan.offline_retry_timeout_seconds, attempts=_ALWAYS_ON_PING_ATTEMPTS,
+                        )
+                    if reply is not None:
+                        break
         except scanner.ScannerUnavailable as exc:
-            log.warning("offline-retry ARP probe unavailable, skipping remaining candidates: %s", exc)
+            log.warning("offline-retry probe unavailable, skipping remaining candidates: %s", exc)
             return
         if reply is None:
             continue

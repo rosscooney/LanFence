@@ -96,6 +96,13 @@ class ScanConfig(BaseModel):
     #: whole subnet) so a handful of unresponsive candidates can't
     #: meaningfully delay the sweep.
     offline_retry_timeout_seconds: float = 1.0
+    #: Before marking an always-on device offline (see ``lanfence device
+    #: --presence always-on``), also ping it - over IPv4 and IPv6, a few
+    #: times, each attempt waiting ``offline_retry_timeout_seconds`` - and
+    #: keep it online if it answers from its own MAC. Catches devices that
+    #: miss a sweep while asleep in Wi-Fi power save, or that have no IPv4
+    #: address for the ARP retry above. Other devices are unaffected.
+    always_on_ping: bool = True
     #: Max items buffered per passive processing queue (sightings, DHCP
     #: server observations, mDNS records, SSDP advertisements) between
     #: `monitor` drain ticks - bounds memory against a packet flood that

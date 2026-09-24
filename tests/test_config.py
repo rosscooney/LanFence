@@ -473,6 +473,10 @@ def test_web_config_accepts_hash_and_salt_together():
 
 
 
+
+def test_always_on_ping_defaults_to_on():
+    assert Config().scan.always_on_ping is True
+
 def test_scan_interfaces_defaults_to_empty_auto():
     assert Config().scan.interfaces == []
 

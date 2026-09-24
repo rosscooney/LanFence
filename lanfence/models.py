@@ -105,7 +105,7 @@ def format_datetime(dt: datetime) -> str:
 #: explicitly from the observation pipeline rather than inferred later -
 #: see :class:`lanfence.scanner.ArpSighting.source` and
 #: :func:`lanfence.engine.process_sighting`.
-AddressSource = Literal["arp", "ipv6_nd", "dhcp_ack", "legacy_snapshot"]
+AddressSource = Literal["arp", "ipv6_nd", "icmp", "dhcp_ack", "legacy_snapshot"]
 NameSource = Literal["dhcp_option_12", "reverse_dns", "legacy_snapshot"]
 
 #: "observed" - LAN Fence itself saw this address in use (ARP/ND, or a name

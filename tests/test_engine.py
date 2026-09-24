@@ -791,6 +791,132 @@ def _seed_one_online_device(db_path: Path, cfg: Config) -> None:
         store.close()
 
 
+
+# --- always-on ping before disconnecting (scan.always_on_ping) --------------
+
+
+def _sweep_missing_everything(db_path: Path, cfg: Config, *, arp_reply=None, ping_reply=None):
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[]), \
+         patch.object(scanner, "arp_probe", return_value=arp_reply) as arp_mock, \
+         patch.object(scanner, "ping_probe", return_value=ping_reply) as ping_mock:
+        store = DeviceStore(db_path)
+        result = run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(),
+                                   interface="eth0", subnet="192.168.1.0/24")
+        status = store.get_device("aa:bb:cc:dd:ee:ff").status
+        store.close()
+    return result, status, arp_mock, ping_mock
+
+
+def _make_always_on(db_path: Path) -> None:
+    with DeviceStore(db_path) as store:
+        store.set_presence_policy("aa:bb:cc:dd:ee:ff", "always-on", updated_at=_now())
+
+
+def test_always_on_device_answering_a_ping_is_not_disconnected(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    _seed_one_online_device(db_path, cfg)
+    _make_always_on(db_path)
+
+    ping = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now(), source="icmp")
+    result, status, arp_mock, ping_mock = _sweep_missing_everything(db_path, cfg, ping_reply=ping)
+
+    arp_mock.assert_called_once()  # the cheap ARP retry still goes first
+    ping_mock.assert_called_once_with(
+        "192.168.1.5", mac="aa:bb:cc:dd:ee:ff", interface="eth0", timeout=1.0, attempts=3,
+    )
+    assert status == "online"
+    assert not any(e.event_type == "disconnected" for e in result.events)
+
+
+def test_always_on_device_not_answering_a_ping_is_still_disconnected(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    _seed_one_online_device(db_path, cfg)
+    _make_always_on(db_path)
+
+    result, status, _arp, ping_mock = _sweep_missing_everything(db_path, cfg)
+
+    ping_mock.assert_called_once()
+    assert status == "offline"
+    assert any(e.event_type == "disconnected" for e in result.events)
+
+
+def test_always_on_device_answering_the_arp_retry_is_not_pinged(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    _seed_one_online_device(db_path, cfg)
+    _make_always_on(db_path)
+
+    arp = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    _result, status, _arp, ping_mock = _sweep_missing_everything(db_path, cfg, arp_reply=arp)
+
+    ping_mock.assert_not_called()
+    assert status == "online"
+
+
+def test_device_that_is_not_always_on_is_never_pinged(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    _seed_one_online_device(db_path, cfg)
+
+    _result, status, _arp, ping_mock = _sweep_missing_everything(db_path, cfg)
+
+    ping_mock.assert_not_called()
+    assert status == "offline"
+
+
+def test_always_on_ping_disabled_never_pings(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    cfg.scan.always_on_ping = False
+    _seed_one_online_device(db_path, cfg)
+    _make_always_on(db_path)
+
+    _result, status, _arp, ping_mock = _sweep_missing_everything(db_path, cfg)
+
+    ping_mock.assert_not_called()
+    assert status == "offline"
+
+
+def test_always_on_ping_still_runs_when_the_arp_retry_is_disabled(tmp_path: Path):
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    cfg.scan.offline_retry_probe = False
+    _seed_one_online_device(db_path, cfg)
+    _make_always_on(db_path)
+
+    ping = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now(), source="icmp")
+    _result, status, arp_mock, _ping = _sweep_missing_everything(db_path, cfg, ping_reply=ping)
+
+    arp_mock.assert_not_called()
+    assert status == "online"
+
+
+def test_always_on_ping_reaches_an_ipv6_only_device(tmp_path: Path):
+    """ARP can't reach an IPv6-only device at all - the ping can."""
+
+    db_path = tmp_path / "db.sqlite"
+    cfg = _cfg_immediate_offline_with_retry()
+    cfg.scan.ipv6 = True
+    v6 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="fe80::1234", seen_at=_now(), source="ipv6_nd")
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", return_value=[v6]):
+        store = DeviceStore(db_path)
+        run_active_sweep(cfg, store, Allowlist.load(None), SignatureSet.load(), interface="eth0", subnet="192.168.1.0/24")
+        store.close()
+    _make_always_on(db_path)
+
+    ping = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="fe80::1234", seen_at=_now(), source="icmp")
+    _result, status, arp_mock, ping_mock = _sweep_missing_everything(db_path, cfg, ping_reply=ping)
+
+    arp_mock.assert_not_called()
+    assert ping_mock.call_args.args == ("fe80::1234",)
+    assert status == "online"
+
 def test_offline_retry_probe_answering_device_stays_online(tmp_path: Path):
     """A device missed by the broadcast sweep, but that answers the
     unicast retry probe, must not be disconnected - it's folded back in

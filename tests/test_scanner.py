@@ -234,6 +234,86 @@ def test_arp_probe_returns_sighting_when_answered(monkeypatch):
     assert sighting.source == "arp"
 
 
+
+def _ping_reply(src_mac: str):
+    import scapy.all as scapy_module
+    from scapy.layers.inet import ICMP, IP
+
+    return scapy_module.Ether(src=src_mac) / IP(src="10.0.0.5") / ICMP(type=0)
+
+
+def test_ping_probe_returns_sighting_when_the_device_itself_answers(monkeypatch):
+    import scapy.all as scapy_module
+    from scapy.layers.inet import ICMP
+
+    sent = []
+
+    def fake_srp(pkt, **kwargs):
+        sent.append(pkt)
+        assert kwargs.get("iface") == "eth0"
+        return [(pkt, _ping_reply("AA:BB:CC:DD:EE:FF"))], []
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    sighting = scanner.ping_probe("10.0.0.5", mac="aa:bb:cc:dd:ee:ff", interface="eth0")
+    assert (sighting.mac, sighting.ip, sighting.source) == ("aa:bb:cc:dd:ee:ff", "10.0.0.5", "icmp")
+    assert sent[0][scapy_module.Ether].dst == "aa:bb:cc:dd:ee:ff"
+    assert sent[0].haslayer(ICMP)
+
+
+def test_ping_probe_ignores_a_reply_from_a_different_device(monkeypatch):
+    """Another device now holding the same IP must not keep this one online."""
+
+    import scapy.all as scapy_module
+
+    calls = []
+
+    def fake_srp(pkt, **kwargs):
+        calls.append(pkt)
+        return [(pkt, _ping_reply("11:22:33:44:55:66"))], []
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    assert scanner.ping_probe("10.0.0.5", mac="aa:bb:cc:dd:ee:ff", attempts=3) is None
+    assert len(calls) == 3
+
+
+def test_ping_probe_retries_then_succeeds(monkeypatch):
+    import scapy.all as scapy_module
+
+    replies = [[], [], None]
+
+    def fake_srp(pkt, **kwargs):
+        answer = replies.pop(0)
+        return ([(pkt, _ping_reply("aa:bb:cc:dd:ee:ff"))] if answer is None else answer), []
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    assert scanner.ping_probe("10.0.0.5", mac="aa:bb:cc:dd:ee:ff", attempts=3) is not None
+
+
+def test_ping_probe_uses_icmpv6_for_an_ipv6_address(monkeypatch):
+    import scapy.all as scapy_module
+    from scapy.layers.inet6 import ICMPv6EchoRequest, IPv6
+
+    sent = []
+
+    def fake_srp(pkt, **kwargs):
+        sent.append(pkt)
+        return [], []
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    assert scanner.ping_probe("fe80::1", mac="aa:bb:cc:dd:ee:ff", attempts=1) is None
+    assert sent[0].haslayer(IPv6) and sent[0].haslayer(ICMPv6EchoRequest)
+
+
+def test_ping_probe_permission_denied(monkeypatch):
+    import scapy.all as scapy_module
+
+    def fake_srp(pkt, **kwargs):
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(scapy_module, "srp", fake_srp)
+    with pytest.raises(scanner.ScannerUnavailable):
+        scanner.ping_probe("10.0.0.5", mac="aa:bb:cc:dd:ee:ff")
+
 def test_arp_probe_permission_denied(monkeypatch):
     import scapy.all as scapy_module
 

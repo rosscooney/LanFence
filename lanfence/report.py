@@ -632,7 +632,7 @@ def render_dossier_compact(
 
 
 _ADDRESS_SOURCE_LABELS = {
-    "arp": "ARP", "ipv6_nd": "IPv6 ND", "dhcp_ack": "DHCP (lease)", "legacy_snapshot": "legacy",
+    "arp": "ARP", "ipv6_nd": "IPv6 ND", "icmp": "ping", "dhcp_ack": "DHCP (lease)", "legacy_snapshot": "legacy",
 }
 _NAME_SOURCE_LABELS = {
     "dhcp_option_12": "DHCP option 12", "reverse_dns": "reverse DNS", "legacy_snapshot": "legacy",

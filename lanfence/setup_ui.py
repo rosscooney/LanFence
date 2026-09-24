@@ -40,7 +40,7 @@ SECTIONS = {
     ],
     "Offline detection": [
         "scan.offline_grace_seconds", "scan.offline_after_missed_scans",
-        "scan.offline_retry_probe", "scan.offline_retry_timeout_seconds",
+        "scan.offline_retry_probe", "scan.offline_retry_timeout_seconds", "scan.always_on_ping",
     ],
     "DHCP servers": ["dhcp_servers.enabled", "dhcp_servers.alert_cooldown_seconds"],
     "Service discovery": ["discovery.mdns", "discovery.ssdp"],

@@ -934,6 +934,19 @@ has no IPv6 equivalent); an IPv6-only device is unaffected either way. Set
 `scan.offline_retry_probe: false` to disable and go back to trusting the
 broadcast sweep alone.
 
+**Ping always-on devices before disconnecting**: a device you've marked
+`always-on` (see [Presence policies](#presence-policies)) gets a further
+check if it still hasn't answered: LAN Fence pings it (ICMP echo) at its
+known IPv4 and IPv6 addresses, up to three times each, waiting
+`scan.offline_retry_timeout_seconds` per attempt, and only marks it offline
+if none are answered. This rides out a device dozing in Wi-Fi power save
+through a sweep, and reaches an IPv6-only device the ARP retry can't. A
+reply only counts if it comes from the device's own MAC address, so
+another device that has since taken the same IP can never keep a departed
+one online. Only always-on devices are pinged, only when they're already
+about to be marked offline, and only at their own addresses - it is never
+a scan. Set `scan.always_on_ping: false` to turn it off.
+
 ## Presence policies
 
 Laptops, phones, and tablets routinely leave and rejoin the network - that's
@@ -968,9 +981,10 @@ Three policies, per device:
   device.
 - **`always-on`** - sustained absence is unexpected. Online/offline status
   still comes from the same scan-coverage rules, consecutive-miss threshold,
-  and global `offline_grace_seconds` as every other device (see above) -
-  presence policy doesn't change *when* a device is confirmed offline, only
-  what happens next. Once confirmed offline, if it stays absent for the
+  and global `offline_grace_seconds` as every other device (see above), with
+  one addition: it is pinged before being marked offline (see "Ping
+  always-on devices before disconnecting" above), so a device that is
+  really still there isn't recorded as disconnected and back. Once confirmed offline, if it stays absent for the
   **effective absence duration** - its own `--offline-after` override, or
   `scan.offline_grace_seconds` when no override is set - LAN Fence emits one
   medium-severity availability finding ("this device has been gone longer

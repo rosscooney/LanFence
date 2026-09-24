@@ -1061,7 +1061,7 @@ class DeviceStore:
     #: Priority tiers for computing a *preferred* address/name from retained
     #: evidence (lower wins) - see :meth:`refresh_preferred_fields`. A
     #: source missing here (shouldn't happen) sorts last.
-    _ADDRESS_SOURCE_PRIORITY = {"arp": 0, "ipv6_nd": 0, "dhcp_ack": 1, "legacy_snapshot": 2}
+    _ADDRESS_SOURCE_PRIORITY = {"arp": 0, "ipv6_nd": 0, "icmp": 0, "dhcp_ack": 1, "legacy_snapshot": 2}
     _NAME_SOURCE_PRIORITY = {"dhcp_option_12": 0, "reverse_dns": 1, "legacy_snapshot": 2}
 
     def record_address_evidence(
@@ -1430,7 +1430,7 @@ class DeviceStore:
         (:meth:`record_address_evidence`/``record_name_evidence``) and
         recompute ``ip``/``hostname`` as the preferred value across all
         retained evidence (see :meth:`refresh_preferred_fields`) - a
-        directly-observed address (``source="arp"``/``"ipv6_nd"``, the
+        directly-observed address (``source="arp"``/``"ipv6_nd"``/``"icmp"``, the
         default) always wins over a merely-requested/offered one, so a
         caller with only a DHCP client request/offer to report (not yet a
         confirmed lease) should pass ``source="dhcp_client"``, which is
@@ -1499,7 +1499,7 @@ class DeviceStore:
             )
         self._conn.commit()
 
-        if ip and source in ("arp", "ipv6_nd"):
+        if ip and source in ("arp", "ipv6_nd", "icmp"):
             self.record_address_evidence(
                 mac, ip, interface=interface or "", source=source, kind="observed", seen_at=seen_at,
             )
@@ -2257,7 +2257,7 @@ class DeviceStore:
         self._conn.commit()
 
     def _directly_observed_mac_for_ip(self, ip: str) -> str | None:
-        """The single MAC directly observed (ARP/IPv6 ND - never a DHCP
+        """The single MAC directly observed (ARP/IPv6 ND/ping - never a DHCP
         lease claim or imported legacy data) holding ``ip`` as address
         evidence, or ``None`` if zero or more than one distinct MAC has
         ever held it. An ambiguous or merely historical IP-to-MAC
@@ -2265,7 +2265,7 @@ class DeviceStore:
         :meth:`advertised_services`."""
 
         rows = self._conn.execute(
-            "SELECT DISTINCT mac FROM device_addresses WHERE ip = ? AND source IN ('arp', 'ipv6_nd')",
+            "SELECT DISTINCT mac FROM device_addresses WHERE ip = ? AND source IN ('arp', 'ipv6_nd', 'icmp')",
             (ip,),
         ).fetchall()
         macs = {row["mac"] for row in rows}

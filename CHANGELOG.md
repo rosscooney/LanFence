@@ -13,6 +13,19 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Added
+
+- Before marking an `always-on` device offline, LAN Fence now pings it
+  (ICMP echo over IPv4 and IPv6, up to three tries per address) and keeps
+  it online if it answers from its own MAC address - cutting the routine
+  disconnect/reconnect noise from devices that briefly miss a sweep (e.g.
+  dozing in Wi-Fi power save) and covering IPv6-only devices the existing
+  ARP retry can't reach. Only always-on devices already about to be marked
+  offline are pinged. On by default; `scan.always_on_ping: false` turns it
+  off. A ping reply is recorded as address evidence with source "ping".
+
 ## [0.6.1] - 2026-09-24
 
 ### Added

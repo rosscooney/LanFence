@@ -71,7 +71,7 @@ def _looks_like_permission_error(exc: BaseException) -> bool:
 #: address is not proof it's using that address (see
 #: :mod:`lanfence.engine`'s address-evidence handling), even though the
 #: sighting is still perfectly good evidence the MAC is alive on the network.
-SightingSource = str  # "arp" | "ipv6_nd" | "dhcp_client"
+SightingSource = str  # "arp" | "ipv6_nd" | "icmp" | "dhcp_client"
 
 
 @dataclass(frozen=True)
@@ -258,6 +258,49 @@ def arp_probe(ip: str, *, interface: str | None = None, timeout: float = 1.0) ->
         raise ValueError(f"not a valid IPv4 address: {ip!r}") from exc
     sightings = _arp_who_has(scapy_module, ip, interface=interface, timeout=timeout)
     return sightings[0] if sightings else None
+
+
+def ping_probe(
+    ip: str, *, mac: str, interface: str | None = None, timeout: float = 1.0, attempts: int = 3,
+) -> ArpSighting | None:
+    """Ping ``ip`` (ICMP echo, IPv4 or IPv6), addressed at Ethernet level
+    to ``mac``, and return a sighting if that same device answers.
+
+    Used before an always-on device is marked offline (see
+    :func:`lanfence.engine.run_active_sweep`). Tries up to ``attempts``
+    times, since a device in Wi-Fi power save can sleep through one
+    request. A reply only counts if it comes from ``mac`` itself - a
+    different device now holding the same IP must never keep a departed
+    device "online"."""
+
+    from scapy.layers.inet import ICMP, IP
+    from scapy.layers.inet6 import ICMPv6EchoRequest, IPv6
+
+    from lanfence.netutil import normalize_mac
+
+    scapy_module = _require_scapy()
+    address = ipaddress.ip_address(ip)
+    target_mac = normalize_mac(mac)
+    network_layer = IP(dst=ip) / ICMP() if address.version == 4 else IPv6(dst=ip) / ICMPv6EchoRequest()
+    request = scapy_module.Ether(dst=target_mac) / network_layer
+    kwargs = {"timeout": timeout, "verbose": False}
+    if interface:
+        kwargs["iface"] = interface
+
+    for _attempt in range(max(1, attempts)):
+        try:
+            answered, _unanswered = scapy_module.srp(request, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - normalised the same way as _arp_who_has
+            if _looks_like_permission_error(exc):
+                raise ScannerUnavailable(
+                    "permission denied opening a raw socket - pinging needs root (or CAP_NET_RAW). "
+                    "Re-run with sudo."
+                ) from exc
+            raise ScannerUnavailable(f"could not send ping: {exc}") from exc
+        for _sent, received in answered:
+            if received.haslayer(scapy_module.Ether) and normalize_mac(received[scapy_module.Ether].src) == target_mac:
+                return ArpSighting(mac=target_mac, ip=ip, seen_at=datetime.now(timezone.utc), source="icmp")
+    return None
 
 
 #: Ethernet multicast MAC for the IPv6 all-nodes link-local multicast address

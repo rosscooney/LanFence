@@ -22,6 +22,7 @@ scan:
   # and only an active sweep can reach them; elapsed time alone never does.
   # offline_grace_seconds: 0 and offline_after_missed_scans: 1 restores the
   # old immediate-disconnect-on-first-miss behavior.
+  always_on_ping: true         # ping an always-on device (IPv4 + IPv6, 3 tries) before marking it offline
 
 alerts:
   min_severity: medium         # info | medium | high - dispatch threshold

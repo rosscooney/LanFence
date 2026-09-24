@@ -272,6 +272,19 @@ def test_observe_dhcp_client_sighting_does_not_become_address_evidence(tmp_path:
     assert device.ip == "10.0.0.5"  # best-effort raw fallback shown anyway (no better evidence exists)
 
 
+
+def test_observe_ping_reply_is_direct_address_evidence(tmp_path: Path):
+    """A ping answered from the device's own MAC is as direct as an ARP reply."""
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        store.observe(
+            mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", hostname=None, vendor=None, seen_at=_now(),
+            interface="eth0", source="icmp",
+        )
+        evidence = store.address_evidence_for("aa:bb:cc:dd:ee:ff")
+
+    assert [(e.ip, e.source, e.kind) for e in evidence] == [("10.0.0.5", "icmp", "observed")]
+
 def test_observe_dhcp_client_ip_never_overrides_confirmed_evidence(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()
