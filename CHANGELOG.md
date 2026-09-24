@@ -13,7 +13,7 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
-## [Unreleased]
+## [0.6.1] - 2026-09-24
 
 ### Added
 
@@ -27,8 +27,11 @@ Each release is also published to
   (`lanfence/data/identity_rules.yaml`, extendable with a private
   `identity_rules_file:`) - never an opaque model, and never a new active
   probe run just to identify a device. Shown by `lanfence device` (table
-  and JSON) and the web portal's device page, alongside a "Why this
-  identity?" evidence breakdown.
+  and JSON), the `lanfence review` queue, and the web portal's device page,
+  alongside a "Why this identity?" evidence breakdown. The web device page
+  also gains Network (addresses, hostnames, first/last seen, presence,
+  advertised services) and Security (rogue-signature matches,
+  investigation notes) sections, kept separate from identity confidence.
 - Device inventory metadata gains asset ownership fields: friendly name,
   asset type (Company/Personal-BYOD/Infrastructure/IoT/Guest/Unknown), a
   category override, purpose, and notes - `lanfence device`'s
@@ -39,9 +42,9 @@ Each release is also published to
 - The web portal's inventory page gains Category/Owner/Asset type/
   Confidence columns, a "Know Your Network" overview panel (device counts
   by asset type, plus how many need review or have an unknown/uncertain
-  identity), and filter/search controls (trust, status, category, asset
-  type, owner, unknown or uncertain identity, no owner, needs review,
-  free-text search across
+  identity, each count linking to a matching filter), and filter/search
+  controls (trust, status, category, asset type, owner, unknown or
+  uncertain identity, no owner, needs review, and free-text search across
   name/MAC/IP/owner/vendor) - all plain GET query parameters, so filtered
   views stay shareable/bookmarkable with no client-side script.
 - **Site identity**: an optional name and location (`lanfence setup`'s new
@@ -60,6 +63,11 @@ Each release is also published to
   device is only marked offline by a sweep of the interface it was last
   seen on. With no interfaces enabled, behaviour is unchanged: one
   auto-detected interface. `ScanResult` JSON gains an `interfaces` list.
+
+### Fixed
+
+- The "always-on device has been absent" alert now lists a trusted
+  device's name above its MAC, like every other finding.
 
 ## [0.5.7] - 2026-09-23
 
