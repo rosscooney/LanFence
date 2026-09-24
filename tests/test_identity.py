@@ -63,6 +63,22 @@ def test_malformed_rule_missing_when_is_skipped(tmp_path: Path, caplog):
     assert identity.category == "Unknown"
 
 
+
+def test_malformed_rule_invalid_regex_is_skipped_not_fatal(tmp_path: Path):
+    extra = tmp_path / "bad_regex.yaml"
+    extra.write_text(
+        "rules:\n"
+        "  - id: bad_regex\n"
+        "    weight: 40\n"
+        "    when:\n"
+        "      hostname_regex: '(unclosed'\n"
+        "    category: 'Printer'\n"
+        "    label: 'bad regex'\n",
+        encoding="utf-8",
+    )
+    rules = IdentityRuleSet.load(extra)
+    assert len(rules) == len(_rules())  # packaged rules still load; only the bad one is dropped
+
 def test_malformed_rule_bad_category_is_skipped(tmp_path: Path):
     extra = tmp_path / "bad_category.yaml"
     extra.write_text(

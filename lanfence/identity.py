@@ -244,7 +244,7 @@ def _parse_rules(rows: list[dict]) -> list[IdentityRule]:
                     raise ValueError(f"category {value!r} is not in the known taxonomy")
             label = " ".join(str(row.get("label") or rule_id).split())
             out.append(IdentityRule(id=rule_id, weight=weight, when=_compile_condition(when_raw), asserts=asserts, label=label))
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, re.error) as exc:
             log.warning("skipping malformed identity rule %r: %s", row, exc)
     return out
 
