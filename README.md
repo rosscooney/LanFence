@@ -49,7 +49,11 @@ routinely) and never touches, blocks, deauthenticates or spoofs anything.
 4. Each device is **fingerprinted**: an offline OUI → vendor lookup, a set of
    built-in rogue-device signatures (see below), and a check of whether its
    MAC is locally administered (randomized/spoofed rather than
-   vendor-assigned).
+   vendor-assigned). That evidence also drives **Know Your Network**: a
+   probable manufacturer/category/family/platform with an explainable
+   confidence score, so you can see at a glance what's actually on your
+   network, not just that something is (see "Know Your Network: device
+   identity" below).
 5. Each device is checked against your **allowlist**
    (`lanfence allow <mac>`). A brand-new or reappearing device not on the
    allowlist produces a plain-language **finding** with a severity
@@ -533,6 +537,93 @@ from another terminal takes effect without restarting it; review/snooze
 state itself is read fresh from the database on every finding, so it needs
 no such reload.
 
+## Know Your Network: device identity
+
+Alongside the "likely device" classification above, LAN Fence builds a
+**structured identity** for every device - a probable manufacturer, device
+category, product family, and platform, each backed by a numeric,
+explainable confidence score:
+
+```text
+$ lanfence device 3c:22:fb:aa:bb:cc
+
+Identity (Know Your Network):
+  Probable identity: Apple iPhone
+  Category:          Phone
+  Confidence:        80%
+  Manufacturer:      Apple
+  Platform:          iOS
+  Evidence:
+    +30  Hostname suggests an iPhone
+    +25  Apple vendor OUI
+    +15  Advertises Apple companion-link (paired with an Apple device)
+    +10  Advertises AirPlay (_airplay._tcp/_raop._tcp)
+```
+
+This is a separate, complementary view to the classification above, not a
+replacement for it - both are shown side by side, and neither ever overrides
+the other. Confidence is a plain 0-100 score, deterministic and centrally
+computed (never an opaque model): every matching rule contributes a fixed
+weight towards the manufacturer/category/family/platform it asserts, the
+highest-scoring value for each field wins, and any rule whose assertion
+*lost* has its weight **subtracted** instead of ignored - so evidence that
+genuinely conflicts (e.g. a hostname suggesting one thing and a vendor OUI
+suggesting another) visibly lowers confidence rather than being silently
+dropped. The evidence list above is exactly how that score was reached; the
+`--format json` output includes the same breakdown under `"identity"`.
+
+The underlying evidence is exactly what [classification](#device-classification-and-review-priority)
+already uses - vendor OUI, self-reported hostname, advertised mDNS/DNS-SD or
+SSDP/UPnP services, an existing rogue-device fingerprint match, whether the
+MAC is locally administered, and ports from a previous explicit `lanfence
+inspect` - never a new active probe run just to identify a device. Every
+rule lives in a plain, human-readable YAML file
+(`lanfence/data/identity_rules.yaml`, packaged with LAN Fence), covering a
+representative starter set: Apple devices, Windows and Linux computers,
+Raspberry Pi and Orange Pi, Synology and QNAP NAS, common printers, smart
+TVs and media devices, IP cameras, network infrastructure, and virtual
+machines. It is deliberately not an exhaustive database - an operator can
+extend it with a private `identity_rules_file:` (see
+[Configuration](#configuration)), merged with the packaged rules the same
+way `rogue_signatures_file:` already works, without editing packaged files.
+
+Like every other evidence-based label in LAN Fence, an identity is a
+**probabilistic inference, never a verified fact**: a MAC's vendor prefix,
+its hostname, and anything it advertises over mDNS/SSDP are all trivially
+spoofable by a device that wants to blend in. Category, family, and
+platform stay deliberately coarse (LAN Fence would rather confidently say
+"Apple iPhone" than guess a specific model number it can't actually verify).
+A device with no matching evidence at all shows `Category: Unknown` and
+`Confidence: 0%` - "Unknown" is a legitimate outcome, not an error.
+
+**Identity confidence and security risk are entirely separate concepts.** A
+device can be `Identity confidence: 80%` and have no security findings at
+all, or `Identity confidence: 0%` (nothing recognises it) and still be
+perfectly safe - LAN Fence never folds the two into a single score. This
+phase deliberately does not introduce a network-wide security/risk score at
+all; see [Privacy and security](#privacy-and-security).
+
+**Correcting an identity**: if LAN Fence's guess is wrong, or you'd simply
+rather see your own label, set a category override:
+
+```text
+$ lanfence device aa:bb:cc:dd:ee:ff --category "Printer"
+```
+
+An override always wins for display and filtering, but the underlying
+inferred identity is retained and still shown separately - correcting one
+device never silently changes LAN Fence's general fingerprint rules or
+affects any other device. See [Device inventory metadata and asset
+ownership](#device-inventory-metadata-and-asset-ownership) for the rest of
+the fields an override sits alongside.
+
+The [web portal](#web-portal)'s device page shows the same identity
+alongside a "Why this identity?" disclosure with the full evidence list, and
+its inventory page adds Category/Confidence columns plus a "Know Your
+Network" overview panel (device counts by asset type, and how many devices
+still need review or have an uncertain/unknown identity) - see that section
+for details.
+
 ## Active device inspection
 
 Everything above is built entirely from **passive** evidence - LAN Fence
@@ -667,10 +758,11 @@ time the database is opened after upgrading - timestamped as of that
 import, not backdated to the device's original first-seen time, and never
 re-imported on a later restart.
 
-## Device inventory metadata
+## Device inventory metadata and asset ownership
 
 Beyond what LAN Fence observes on the wire, you can attach your own notes to
-a device - who owns it, and where it physically lives:
+a device - who owns it, where it physically lives, and (see [Know Your
+Network](#know-your-network-device-identity)) what kind of asset it is:
 
 ```text
 $ lanfence device aa:bb:cc:dd:ee:ff --owner "Alice" --location "Office"
@@ -682,9 +774,14 @@ Owner:      Alice
 Location:   Office
 ```
 
-Either or both of `--owner`/`--location` may be set in one call; an omitted
-field is left unchanged. `--clear-owner`/`--clear-location` removes a field
-- setting and clearing the same field in one call is rejected. Metadata
+`--owner`/`--location`/`--friendly-name`/`--asset-type`/`--category`/
+`--purpose`/`--notes` may be set in any combination in one call; an omitted
+field is left unchanged. Each has a matching `--clear-*` flag - setting and
+clearing the same field in one call is rejected. `--asset-type` and
+`--category` are only accepted from a fixed list (`Company`, `Personal /
+BYOD`, `Infrastructure`, `IoT`, `Guest`, `Unknown` for asset type; the same
+category taxonomy Know Your Network infers from) - an unrecognised value is
+rejected with the list of valid choices, never silently coerced. Metadata
 edits never scan, alert, fire a lifecycle event, or interact with
 trust/review/presence in any way - they are pure inventory bookkeeping.
 
@@ -1074,8 +1171,9 @@ A finding alert (and the same shared formatting under Slack/Discord/Teams/
 ntfy) lists a device-scoped finding's *full* evidence, not just its MAC:
 its name (the allowlist name, when it's trusted - nothing shown for an
 untrusted device), MAC, IP, hostname, vendor, and any operator-set
-metadata you've recorded for it (owner/location - see
-[Device inventory metadata](#device-inventory-metadata) below) - each
+metadata you've recorded for it (owner/location - see [Device inventory
+metadata and asset ownership](#device-inventory-metadata-and-asset-ownership)
+below) - each
 shown only when actually set, so a device nobody's annotated doesn't get
 a wall of blank fields. SMS (Twilio) stays a length-capped one-liner (MAC
 only) - there's no room for more within a billed segment.
@@ -1110,13 +1208,28 @@ dependency): a handful of small pages, not a general web application. A
 trusted device's page has an "Untrust this device" action (with a
 confirmation prompt) - the same effect as `lanfence allow --remove <MAC>`.
 
-The device list is sortable by clicking any column heading (Name, MAC, IP,
-Vendor, Status, Trust) - clicking again reverses direction. This is plain
-server-rendered HTML (`?sort=<column>&dir=asc|desc`), no JavaScript
-required. IP addresses sort numerically (`10.0.0.2` before `10.0.0.10`),
-not as plain text. A dual-stack device shows both its IPv4 and IPv6
-address, side by side, in both the list and its own detail page - the
-same as the CLI's `lanfence device`.
+The device list is sortable by clicking any column heading (Name, MAC,
+Category, Owner, Asset type, IP, Vendor, Status, Trust, Confidence, Last
+seen) - clicking again reverses direction. This is plain server-rendered
+HTML (`?sort=<column>&dir=asc|desc`), no JavaScript required. IP addresses
+sort numerically (`10.0.0.2` before `10.0.0.10`), not as plain text. A
+dual-stack device shows both its IPv4 and IPv6 address, side by side, in
+both the list and its own detail page - the same as the CLI's `lanfence
+device`.
+
+Above the table, a "Know Your Network" panel gives a one-glance overview
+(device counts by asset type, and how many still need review or have an
+unknown/uncertain identity), and a filter/search row (trust, status,
+category, asset type, owner, unknown identity, needs review, plus free-text
+search across name/MAC/IP/owner/vendor) narrows the table without leaving
+the page - every control is a plain GET form, so filters are shareable
+URLs and survive a bookmark or refresh. Every count in the overview panel
+links straight to the matching filter. A device's own page shows the same
+[Know Your Network identity](#know-your-network-device-identity) as the
+CLI, including a "Why this identity?" disclosure with the full evidence
+list, and the ownership form covers the same friendly name/owner/location/
+asset type/category override/purpose/notes fields as `lanfence device`'s
+`--friendly-name`/etc. options.
 
 ```text
 lanfence setup       # Web portal section: enable it, set a password
@@ -1597,6 +1710,7 @@ db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
 vendor_file: null             # extra OUI table, merged with the packaged one
 rogue_signatures_file: null   # extra signatures, merged with the packaged ones
+identity_rules_file: null     # extra Know Your Network identity rules, merged with the packaged ones
 ```
 
 Every channel dispatches independently and only when `enabled: true` and fully
@@ -1697,6 +1811,14 @@ never affected by whether delivery itself succeeded.
   where the transport provides one (an HTTP status, an SMTP reply code) -
   e.g. `HTTPError (code 502)` - never a full webhook URL, credentials, a
   response body, or (for Twilio) a recipient's phone number.
+- **Know Your Network's device identification is entirely local.** Identity
+  rules are a packaged (and optionally operator-extended) YAML file scored
+  by plain arithmetic, never an external service or an LLM; no device
+  inventory, evidence, or identity is ever transmitted anywhere. It only
+  ever reasons over evidence already gathered passively (or from a
+  previous, explicit `lanfence inspect`) - it never triggers its own scan
+  or probe just to identify a device, and it never introduces a network-
+  wide security/risk score.
 - **The example systemd service runs as a dedicated, unprivileged
   account**, not root - see [`packaging/lanfence.service`](packaging/lanfence.service),
   which grants only `CAP_NET_RAW` (the one capability scanning needs,

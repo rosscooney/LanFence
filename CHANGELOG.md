@@ -13,6 +13,37 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Added
+
+- **Know Your Network, phase one**: a structured, confidence-scored device
+  identity (probable manufacturer, category, product family, platform) is
+  computed from evidence LAN Fence already retains (vendor OUI, hostname,
+  advertised mDNS/SSDP services, existing rogue-device fingerprint matches,
+  locally administered MAC status, and ports from a previous `lanfence
+  inspect`). Confidence is a deterministic 0-100 score with a full itemised
+  evidence trail, driven by an extensible, human-readable YAML rule set
+  (`lanfence/data/identity_rules.yaml`, extendable with a private
+  `identity_rules_file:`) - never an opaque model, and never a new active
+  probe run just to identify a device. Shown by `lanfence device` (table
+  and JSON) and the web portal's device page, alongside a "Why this
+  identity?" evidence breakdown.
+- Device inventory metadata gains asset ownership fields: friendly name,
+  asset type (Company/Personal-BYOD/Infrastructure/IoT/Guest/Unknown), a
+  category override, purpose, and notes - `lanfence device`'s
+  `--friendly-name`/`--asset-type`/`--category`/`--purpose`/`--notes`
+  options (and matching `--clear-*` flags), alongside the existing
+  `--owner`/`--location`. A category override always wins for display and
+  filtering without discarding the underlying inferred identity.
+- The web portal's inventory page gains Category/Owner/Asset type/
+  Confidence columns, a "Know Your Network" overview panel (device counts
+  by asset type, plus how many need review or have an unknown/uncertain
+  identity), and filter/search controls (trust, status, category, asset
+  type, owner, unknown identity, needs review, free-text search across
+  name/MAC/IP/owner/vendor) - all plain GET query parameters, so filtered
+  views stay shareable/bookmarkable with no client-side script.
+
 ## [0.5.7] - 2026-09-23
 
 ### Added

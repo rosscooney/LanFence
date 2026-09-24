@@ -98,3 +98,4 @@ db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
 vendor_file: null             # extra OUI table, merged with the packaged one
 rogue_signatures_file: null   # extra signatures, merged with the packaged ones
+identity_rules_file: null     # extra Know Your Network identity rules, merged with the packaged ones
