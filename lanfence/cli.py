@@ -1590,10 +1590,6 @@ def device(
     location: Optional[str] = typer.Option(None, "--location", help="With a MAC: set the location metadata field."),
     clear_owner: bool = typer.Option(False, "--clear-owner", help="Clear the owner metadata field."),
     clear_location: bool = typer.Option(False, "--clear-location", help="Clear the location metadata field."),
-    friendly_name: Optional[str] = typer.Option(
-        None, "--friendly-name", help="With a MAC: set a human-friendly name, e.g. \"Boardroom TV\"."
-    ),
-    clear_friendly_name: bool = typer.Option(False, "--clear-friendly-name", help="Clear the friendly name."),
     asset_type: Optional[str] = typer.Option(
         None, "--asset-type",
         help=f"With a MAC: set the asset type. One of: {', '.join(ASSET_TYPES)}.",
@@ -1646,10 +1642,11 @@ def device(
     never changes the allowlist, and a policy edit alone never fabricates a
     lifecycle event or fires an alert.
 
-    With `--owner`/`--location`/`--friendly-name`/`--asset-type`/
-    `--category`/`--purpose`/`--notes` (or their `--clear-*` counterparts),
-    also edits operator-provided inventory metadata - separate from
-    observed hostname, vendor, trust, review, and presence.
+    With `--owner`/`--location`/`--asset-type`/`--category`/`--purpose`/
+    `--notes` (or their `--clear-*` counterparts), also edits
+    operator-provided inventory metadata - separate from observed
+    hostname, vendor, trust, review, and presence. A device's name is its
+    trusted name, set with `lanfence allow <MAC> --name`.
     `--category` overrides LAN Fence's own inferred identity category
     (see "Identity" in the output below) without discarding the
     underlying inference; `--asset-type` records who a device belongs to
@@ -1703,7 +1700,6 @@ def device(
         raise typer.Exit(code=2)
     for set_value, clear_flag, cli_flag in (
         (owner, clear_owner, "owner"), (location, clear_location, "location"),
-        (friendly_name, clear_friendly_name, "friendly-name"),
         (asset_type, clear_asset_type, "asset-type"),
         (category, clear_category, "category"),
         (purpose, clear_purpose, "purpose"), (notes, clear_notes, "notes"),
@@ -1725,8 +1721,6 @@ def device(
             metadata_updates["owner"] = validate_metadata_value("owner", owner)
         if location is not None:
             metadata_updates["location"] = validate_metadata_value("location", location)
-        if friendly_name is not None:
-            metadata_updates["friendly_name"] = validate_metadata_value("friendly_name", friendly_name)
         if asset_type is not None:
             metadata_updates["asset_type"] = validate_metadata_value("asset_type", asset_type)
         if category is not None:
@@ -1742,8 +1736,6 @@ def device(
         metadata_updates["owner"] = None
     if clear_location:
         metadata_updates["location"] = None
-    if clear_friendly_name:
-        metadata_updates["friendly_name"] = None
     if clear_asset_type:
         metadata_updates["asset_type"] = None
     if clear_category:
@@ -2016,7 +2008,7 @@ def _run_interactive_review(cfg: Config) -> None:
                 typer.echo("stopping review.")
                 return
             if action in ("t", "trust"):
-                name = typer.prompt("  name", default=dev.mac)
+                name = typer.prompt("  trusted name", default=dev.mac)
                 notes = typer.prompt("  notes", default="")
                 entry = allowlist.add(dev.mac, name, notes)
                 allowlist.save()
@@ -2117,7 +2109,7 @@ def review(
     ),
     trust: bool = typer.Option(False, "--trust", help="Trust this device (adds it to the allowlist)."),
     name: Optional[str] = typer.Option(
-        None, "--name", help="Friendly name when trusting (default: the MAC itself)."
+        None, "--name", help="Trusted name for the device (default: the MAC itself)."
     ),
     notes: Optional[str] = typer.Option(None, "--notes", help="Notes for --trust or --investigate."),
     snooze: Optional[str] = typer.Option(

@@ -136,10 +136,6 @@ class DeviceMetadata(BaseModel):
     mac: str
     owner: str | None = None
     location: str | None = None
-    #: A short, human-chosen display name for this device (e.g. "Boardroom
-    #: TV") - distinct from the allowlist's trusted name and from any
-    #: observed hostname, and shown in preference to both when set.
-    friendly_name: str | None = None
     #: What kind of asset this is (Company/Personal/Infrastructure/IoT/
     #: Guest) - see :data:`AssetType`. Independent of category: a phone can
     #: be Company-owned or a guest's.
@@ -158,7 +154,7 @@ class DeviceMetadata(BaseModel):
     def _normalize_mac(cls, value: str) -> str:
         return normalize_mac(value)
 
-    @field_validator("owner", "location", "friendly_name", "purpose")
+    @field_validator("owner", "location", "purpose")
     @classmethod
     def _clean(cls, value: str | None) -> str | None:
         return clean_text(value, max_len=256) if value is not None else None

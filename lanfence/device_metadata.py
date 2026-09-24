@@ -17,7 +17,6 @@ from lanfence.sanitize import clean_text
 METADATA_LIMITS = {
     "owner": 128,
     "location": 128,
-    "friendly_name": 128,
     "asset_type": 32,
     "purpose": 256,
     "notes": 2000,

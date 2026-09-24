@@ -90,16 +90,12 @@ class DeviceDossier(BaseModel):
     @property
     def label(self) -> str:
         """The best available short human label for this device - the
-        allowlist (trusted) name first, then an operator-set friendly name
-        (see :attr:`~lanfence.models.DeviceMetadata.friendly_name`), then
-        the observed hostname, finally the bare MAC. Never a fabricated
-        name."""
+        trusted (allowlist) name first (it's what a human actually calls
+        the device), then the observed hostname, finally the bare MAC.
+        Never a fabricated name."""
 
         if self.device.allowlist_name:
             return self.device.allowlist_name
-        metadata = self.device.metadata
-        if metadata and metadata.friendly_name:
-            return metadata.friendly_name
         if self.device.hostname:
             return self.device.hostname
         return self.device.mac

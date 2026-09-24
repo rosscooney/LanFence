@@ -182,7 +182,6 @@ CREATE TABLE IF NOT EXISTS device_metadata (
     mac TEXT PRIMARY KEY,
     owner TEXT,
     location TEXT,
-    friendly_name TEXT,
     asset_type TEXT,
     purpose TEXT,
     notes TEXT,
@@ -400,8 +399,9 @@ _MIGRATED_COLUMNS: dict[str, dict[str, str]] = {
     # Know Your Network's ownership/asset fields (see DeviceMetadata) - an
     # existing device_metadata row keeps its owner/location untouched and
     # simply gets these new columns as NULL until the operator sets them.
+    # (A friendly_name column from 0.6.1-0.6.2 may also exist; it's unused -
+    # the allowlist's trusted name is the one device name.)
     "device_metadata": {
-        "friendly_name": "friendly_name TEXT",
         "asset_type": "asset_type TEXT",
         "purpose": "purpose TEXT",
         "notes": "notes TEXT",
@@ -965,7 +965,7 @@ class DeviceStore:
     #: ``update_device_metadata`` so a new field is added in one place
     #: rather than four. Order matches the column order in ``_SCHEMA``.
     _METADATA_FIELDS: tuple[str, ...] = (
-        "owner", "location", "friendly_name", "asset_type", "purpose", "notes", "category_override",
+        "owner", "location", "asset_type", "purpose", "notes", "category_override",
     )
 
     def _row_to_metadata(self, mac: str, row: sqlite3.Row | None) -> DeviceMetadata:
@@ -1012,7 +1012,6 @@ class DeviceStore:
         updated_at: datetime,
         owner: str | None | object = _UNSET,
         location: str | None | object = _UNSET,
-        friendly_name: str | None | object = _UNSET,
         asset_type: str | None | object = _UNSET,
         purpose: str | None | object = _UNSET,
         notes: str | None | object = _UNSET,
@@ -1034,8 +1033,7 @@ class DeviceStore:
         mac = normalize_mac(mac)
         current = self.get_device_metadata(mac)
         requested = {
-            "owner": owner, "location": location, "friendly_name": friendly_name,
-            "asset_type": asset_type, "purpose": purpose, "notes": notes,
+            "owner": owner, "location": location, "asset_type": asset_type, "purpose": purpose, "notes": notes,
             "category_override": category_override,
         }
         merged = {

@@ -461,7 +461,7 @@ Actions: [T]rust  [I]nvestigate  [S]nooze  [D] Full details  [N]ext  [Q]uit
   choice:
 ```
 
-- **[T]rust** - prompts for a friendly name and optional notes, then adds the
+- **[T]rust** - prompts for a trusted name and optional notes, then adds the
   device to the same allowlist `lanfence allow` writes to. LAN Fence never
   trusts a device on its own; a human always makes this call.
 - **[I]nvestigate** - records an investigation flag and optional notes
@@ -806,8 +806,8 @@ Owner:      Alice
 Location:   Office
 ```
 
-`--owner`/`--location`/`--friendly-name`/`--asset-type`/`--category`/
-`--purpose`/`--notes` may be set in any combination in one call; an omitted
+`--owner`/`--location`/`--asset-type`/`--category`/`--purpose`/`--notes`
+may be set in any combination in one call; an omitted
 field is left unchanged. Each has a matching `--clear-*` flag - setting and
 clearing the same field in one call is rejected. `--asset-type` and
 `--category` are only accepted from a fixed list (`Company`, `Personal /
@@ -1292,9 +1292,11 @@ links straight to the matching filter. A device's own page shows the same
 [Know Your Network identity](#know-your-network-device-identity) as the
 CLI, including a "Why this identity?" disclosure with the full evidence
 list (a category you've assigned is labelled as yours, beside the detected
-one). Below it, an Ownership form covers the same friendly name/owner/
-location/asset type/category override/purpose/notes fields as `lanfence
-device`'s `--friendly-name`/etc. options; a Network section lists every
+one). Below it are the Trust panel, where you trust the device and set or
+change its trusted name - the one name a device has everywhere in LAN
+Fence - and an Ownership form covering the same owner/location/asset
+type/category override/purpose/notes fields as `lanfence device`'s
+`--owner`/etc. options; a Network section lists every
 retained address and hostname, first/last seen, presence and trust state,
 and advertised services; and a Security section shows rogue-signature
 matches and any investigation notes - deliberately separate from identity

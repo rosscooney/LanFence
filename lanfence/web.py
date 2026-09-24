@@ -1248,8 +1248,7 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
     metadata_fields = "".join(
         _metadata_field_html(field, label, _value(field))
         for field, label in (
-            ("friendly_name", "Friendly name"), ("owner", "Owner"), ("location", "Location"),
-            ("purpose", "Purpose"), ("notes", "Notes"),
+            ("owner", "Owner"), ("location", "Location"), ("purpose", "Purpose"), ("notes", "Notes"),
         )
     )
     metadata_fields += _metadata_select_html("asset_type", "Asset type", _value("asset_type"), ASSET_TYPES)
@@ -1274,6 +1273,9 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 {_identity_section_html(dossier)}
 </div>
 <div class="panel">
+{trust_section}
+</div>
+<div class="panel">
 <h2>Ownership</h2>
 <form class="stack" method="post" action="/device/{html.escape(device.mac)}">
 <input type="hidden" name="action" value="metadata">
@@ -1286,9 +1288,6 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 </div>
 <div class="panel">
 {_security_section_html(dossier)}
-</div>
-<div class="panel">
-{trust_section}
 </div>
 """
     return body
@@ -1495,8 +1494,7 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                 updates: dict[str, str | None] = {}
                 try:
                     for field in (
-                        "friendly_name", "owner", "location", "asset_type", "category_override",
-                        "purpose", "notes",
+                        "owner", "location", "asset_type", "category_override", "purpose", "notes",
                     ):
                         if field not in form:
                             continue  # e.g. a page loaded before this field existed - leave it alone

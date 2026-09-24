@@ -137,16 +137,6 @@ def test_label_falls_back_to_allowlist_name_then_hostname_then_mac():
     assert _dossier(device=_device()).label == "aa:bb:cc:dd:ee:ff"
 
 
-def test_label_prefers_friendly_name_over_hostname_but_not_allowlist_name():
-    from lanfence.models import DeviceMetadata
-
-    metadata = DeviceMetadata(mac="aa:bb:cc:dd:ee:ff", friendly_name="Boardroom TV")
-    assert _dossier(device=_device(hostname="host", metadata=metadata)).label == "Boardroom TV"
-    assert (
-        _dossier(device=_device(allowlist_name="My TV", hostname="host", metadata=metadata)).label == "My TV"
-    )
-
-
 # --- DeviceDossier.effective_category ---------------------------------------
 
 

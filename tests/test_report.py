@@ -234,7 +234,7 @@ def test_render_device_detail_shows_not_set_when_metadata_absent():
     text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
     assert "Owner:      Not set" in text
     assert "Location:   Not set" in text
-    assert "Friendly name:      Not set" in text
+    assert "Trusted name:       Not trusted" in text
     assert "Asset type:         Not set" in text
     assert "Category override:  Not set" in text
     assert "Purpose:            Not set" in text
@@ -244,14 +244,14 @@ def test_render_device_detail_shows_not_set_when_metadata_absent():
 def test_render_device_detail_shows_asset_fields_when_set():
     now = _now()
     device = Device(
-        mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now,
+        mac="aa:bb:cc:dd:ee:ff", first_seen=now, last_seen=now, allowlisted=True, allowlist_name="Boardroom TV",
         metadata=DeviceMetadata(
-            mac="aa:bb:cc:dd:ee:ff", friendly_name="Boardroom TV", asset_type="Company",
+            mac="aa:bb:cc:dd:ee:ff", asset_type="Company",
             category_override="Media Device", purpose="Boardroom display", notes="Mounted on wall",
         ),
     )
     text = render_device_detail(device, [], now - timedelta(days=1), now=now, plain=True)
-    assert "Friendly name:      Boardroom TV" in text
+    assert "Trusted name:       Boardroom TV" in text
     assert "Asset type:         Company" in text
     assert "Category override:  Media Device" in text
     assert "Purpose:            Boardroom display" in text

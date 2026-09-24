@@ -23,7 +23,6 @@ def test_get_device_metadata_defaults_to_unset(tmp_path: Path):
     assert meta.mac == "aa:bb:cc:dd:ee:ff"
     assert meta.owner is None
     assert meta.location is None
-    assert meta.friendly_name is None
     assert meta.asset_type is None
     assert meta.purpose is None
     assert meta.notes is None
@@ -57,14 +56,13 @@ def test_device_metadata_table_migration_adds_asset_columns(tmp_path: Path):
     with DeviceStore(db_path) as store:  # re-opening should add the missing columns
         meta = store.get_device_metadata("aa:bb:cc:dd:ee:ff")
         assert meta.owner == "Alice"  # pre-existing value preserved
-        assert meta.friendly_name is None
         assert meta.asset_type is None
 
         # And the new columns are genuinely writable now, not just readable.
         updated = store.update_device_metadata(
-            "aa:bb:cc:dd:ee:ff", updated_at=_now(), friendly_name="Boardroom TV", asset_type="Company",
+            "aa:bb:cc:dd:ee:ff", updated_at=_now(), purpose="Boardroom display", asset_type="Company",
         )
-        assert updated.friendly_name == "Boardroom TV"
+        assert updated.purpose == "Boardroom display"
         assert updated.asset_type == "Company"
         assert updated.owner == "Alice"  # untouched by the asset-field update
 
@@ -160,13 +158,12 @@ def test_update_device_metadata_persists_across_reopen(tmp_path: Path):
 def test_update_device_metadata_sets_all_asset_fields_at_once(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         result = store.update_device_metadata(
-            "aa:bb:cc:dd:ee:ff", updated_at=_now(), owner="Operations", friendly_name="Boardroom TV",
+            "aa:bb:cc:dd:ee:ff", updated_at=_now(), owner="Operations",
             asset_type="Company", purpose="Boardroom display", notes="Wall-mounted, HDMI 2",
             category_override="Media Device",
         )
 
     assert result.owner == "Operations"
-    assert result.friendly_name == "Boardroom TV"
     assert result.asset_type == "Company"
     assert result.purpose == "Boardroom display"
     assert result.notes == "Wall-mounted, HDMI 2"
@@ -181,12 +178,12 @@ def test_update_device_metadata_asset_fields_independent_of_owner_location(tmp_p
         t0 = _now()
         store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=t0, owner="Alice", location="Office")
         result = store.update_device_metadata(
-            "aa:bb:cc:dd:ee:ff", updated_at=t0 + timedelta(minutes=5), friendly_name="Alice's Laptop",
+            "aa:bb:cc:dd:ee:ff", updated_at=t0 + timedelta(minutes=5), asset_type="Personal / BYOD",
         )
 
     assert result.owner == "Alice"
     assert result.location == "Office"
-    assert result.friendly_name == "Alice's Laptop"
+    assert result.asset_type == "Personal / BYOD"
 
 
 def test_update_device_metadata_clears_category_override_with_explicit_none(tmp_path: Path):
@@ -291,3 +288,22 @@ def test_metadata_edit_creates_no_lifecycle_event(tmp_path: Path):
         after = len(store.events_for("aa:bb:cc:dd:ee:ff"))
 
     assert before == after
+
+
+def test_database_with_a_leftover_friendly_name_column_still_works(tmp_path: Path):
+    """0.6.1-0.6.2 databases have a friendly_name column. It's no longer
+    used, but its presence (with a value in it) must not break anything."""
+
+    db_path = tmp_path / "db.sqlite"
+    with DeviceStore(db_path) as store:
+        store._conn.execute("ALTER TABLE device_metadata ADD COLUMN friendly_name TEXT")
+        store._conn.execute(
+            "INSERT INTO device_metadata (mac, owner, friendly_name, updated_at) VALUES (?, ?, ?, ?)",
+            ("aa:bb:cc:dd:ee:ff", "Alice", "Boardroom TV", _now().isoformat()),
+        )
+        store._conn.commit()
+
+    with DeviceStore(db_path) as store:
+        assert store.get_device_metadata("aa:bb:cc:dd:ee:ff").owner == "Alice"
+        updated = store.update_device_metadata("aa:bb:cc:dd:ee:ff", updated_at=_now(), location="Office")
+    assert (updated.owner, updated.location) == ("Alice", "Office")

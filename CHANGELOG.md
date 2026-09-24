@@ -17,6 +17,15 @@ Each release is also published to
 
 ### Changed
 
+- The separate "friendly name" is gone: a device's trusted name (the
+  allowlist name, set with `lanfence allow --name`, the review queue's
+  Trust action, or the web portal's Trust panel) is its one name
+  everywhere. `lanfence device`'s `--friendly-name`/`--clear-friendly-name`
+  options and the web portal's Friendly name field are removed, and the
+  device details now show the trusted name in their place. On the web
+  device page the Trust panel moves up beside Ownership. Existing
+  databases keep their now-unused `friendly_name` column rather than a
+  destructive migration.
 - The web portal now listens on every private address of the interface
   holding the host's LAN address (e.g. all of eth0's addresses), not just
   the one detected address, with one self-signed certificate covering

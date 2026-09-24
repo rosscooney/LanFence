@@ -532,18 +532,20 @@ def _identity_summary_line(dossier: DeviceDossier) -> str:
     return line
 
 
-def _inventory_detail_lines(metadata: DeviceMetadata, *, escape: bool = False) -> list[str]:
+def _inventory_detail_lines(device: Device, *, escape: bool = False) -> list[str]:
     """The "Inventory details" block's field lines, shared by the plain-text
     and Rich renders of `render_device_detail` - owner/location keep their
-    original column width for compatibility; the newer Know Your Network
-    asset fields (see :class:`~lanfence.models.DeviceMetadata`) share a
-    second, wider column since "Category override:" is the longest label."""
+    original column width for compatibility; the trusted name and the
+    newer Know Your Network asset fields (see
+    :class:`~lanfence.models.DeviceMetadata`) share a second, wider column
+    since "Category override:" is the longest label."""
 
     esc = _rich_escape if escape else (lambda s: s)
+    metadata = device.metadata or DeviceMetadata(mac=device.mac)
     return [
         f"  Owner:      {esc(metadata.owner or 'Not set')}",
         f"  Location:   {esc(metadata.location or 'Not set')}",
-        f"  Friendly name:      {esc(metadata.friendly_name or 'Not set')}",
+        f"  Trusted name:       {esc(device.allowlist_name or 'Not trusted')}",
         f"  Asset type:         {esc(metadata.asset_type or 'Not set')}",
         f"  Category override:  {esc(metadata.category_override or 'Not set')}",
         f"  Purpose:            {esc(metadata.purpose or 'Not set')}",
@@ -906,10 +908,9 @@ def render_device_detail(
         lines.append("Identity (Know Your Network):")
         lines.extend(f"  {line}" for line in _identity_lines(identity))
 
-    metadata = device.metadata or DeviceMetadata(mac=device.mac)
     lines.append("")
     lines.append("Inventory details (user-provided, not derived from observed traffic):")
-    lines.extend(_inventory_detail_lines(metadata))
+    lines.extend(_inventory_detail_lines(device))
 
     lines.append("")
     lines.append(
@@ -974,7 +975,7 @@ def render_device_detail(
 
     console.print(
         Panel(
-            "\n".join(line.strip() for line in _inventory_detail_lines(metadata, escape=True)),
+            "\n".join(line.strip() for line in _inventory_detail_lines(device, escape=True)),
             title="Inventory details (user-provided)",
         )
     )

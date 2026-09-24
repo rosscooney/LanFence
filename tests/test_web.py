@@ -769,7 +769,7 @@ def test_metadata_edit_sets_asset_fields(running_portal):
 
     data = urllib.parse.urlencode(
         {
-            "action": "metadata", "owner": "", "location": "", "friendly_name": "Boardroom TV",
+            "action": "metadata", "owner": "", "location": "",
             "asset_type": "Company", "category_override": "Media Device", "purpose": "Boardroom display",
             "notes": "Mounted on wall",
         }
@@ -780,12 +780,10 @@ def test_metadata_edit_sets_asset_fields(running_portal):
 
     with DeviceStore(cfg.resolved_db_path()) as store:
         metadata = store.get_device_metadata("aa:bb:cc:dd:ee:ff")
-    assert metadata.friendly_name == "Boardroom TV"
     assert metadata.asset_type == "Company"
     assert metadata.category_override == "Media Device"
     assert metadata.purpose == "Boardroom display"
     assert metadata.notes == "Mounted on wall"
-
 
 
 def test_metadata_edit_leaves_fields_the_form_did_not_send_untouched(running_portal):
@@ -796,7 +794,7 @@ def test_metadata_edit_leaves_fields_the_form_did_not_send_untouched(running_por
     with DeviceStore(cfg.resolved_db_path()) as store:
         store.update_device_metadata(
             "aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc),
-            friendly_name="Boardroom TV", asset_type="Company",
+            purpose="Boardroom display", asset_type="Company",
         )
     opener = _opener()
     opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
@@ -807,7 +805,7 @@ def test_metadata_edit_leaves_fields_the_form_did_not_send_untouched(running_por
     with DeviceStore(cfg.resolved_db_path()) as store:
         metadata = store.get_device_metadata("aa:bb:cc:dd:ee:ff")
     assert metadata.owner == "Alice"
-    assert metadata.friendly_name == "Boardroom TV"
+    assert metadata.purpose == "Boardroom display"
     assert metadata.asset_type == "Company"
 
 
@@ -815,16 +813,32 @@ def test_metadata_edit_clears_a_field_submitted_empty(running_portal):
     base_url, cfg = running_portal
     with DeviceStore(cfg.resolved_db_path()) as store:
         store.update_device_metadata(
-            "aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc), friendly_name="Boardroom TV",
+            "aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc), purpose="Boardroom display",
         )
     opener = _opener()
     opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
 
-    data = urllib.parse.urlencode({"action": "metadata", "friendly_name": ""}).encode()
+    data = urllib.parse.urlencode({"action": "metadata", "purpose": ""}).encode()
     opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data).read()
 
     with DeviceStore(cfg.resolved_db_path()) as store:
-        assert store.get_device_metadata("aa:bb:cc:dd:ee:ff").friendly_name is None
+        assert store.get_device_metadata("aa:bb:cc:dd:ee:ff").purpose is None
+
+
+def test_device_page_names_the_device_by_its_trusted_name_with_no_separate_name_field(running_portal):
+    base_url, cfg = running_portal
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    allowlist.path = cfg.resolved_allowlist_file()
+    allowlist.add("aa:bb:cc:dd:ee:ff", "Boardroom TV")
+    allowlist.save()
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    body = opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff").read().decode()
+    assert "<h1>Boardroom TV</h1>" in body
+    assert 'name="friendly_name"' not in body
+    assert body.index("Trusted name") < body.index("<h2>Ownership</h2>")
+
 
 def test_metadata_rejects_invalid_asset_type(running_portal):
     base_url, _ = running_portal

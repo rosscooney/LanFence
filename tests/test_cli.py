@@ -2126,14 +2126,14 @@ def test_device_metadata_json_output_is_additive(config_path: Path):
 def test_device_set_all_asset_fields_at_once(config_path: Path):
     _seed_devices(config_path)
     result = runner.invoke(
-        app, ["device", "aa:bb:cc:dd:ee:ff", "--friendly-name", "Boardroom TV", "--asset-type", "Company",
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--asset-type", "Company",
               "--category", "Media Device", "--purpose", "Boardroom display", "--notes", "Mounted on wall",
               "--config", str(config_path)],
     )
     assert result.exit_code == 0
 
     show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
-    assert "Friendly name:      Boardroom TV" in show.output
+    assert "Trusted name:       My Phone" in show.output  # the name given when trusting (_seed_devices)
     assert "Asset type:         Company" in show.output
     assert "Category override:  Media Device" in show.output
     assert "Purpose:            Boardroom display" in show.output
@@ -2143,18 +2143,36 @@ def test_device_set_all_asset_fields_at_once(config_path: Path):
 def test_device_clear_asset_fields(config_path: Path):
     _seed_devices(config_path)
     runner.invoke(
-        app, ["device", "aa:bb:cc:dd:ee:ff", "--friendly-name", "Boardroom TV", "--asset-type", "Company",
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--asset-type", "Company", "--purpose", "Display",
               "--config", str(config_path)],
     )
     result = runner.invoke(
-        app, ["device", "aa:bb:cc:dd:ee:ff", "--clear-friendly-name", "--clear-asset-type",
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--clear-purpose", "--clear-asset-type",
               "--config", str(config_path)],
     )
     assert result.exit_code == 0
 
     show = runner.invoke(app, ["device", "aa:bb:cc:dd:ee:ff", "--config", str(config_path)])
-    assert "Friendly name:      Not set" in show.output
+    assert "Purpose:            Not set" in show.output
     assert "Asset type:         Not set" in show.output
+
+
+def test_device_has_no_separate_friendly_name_option(config_path: Path):
+    """A device's name is its trusted name (lanfence allow --name) - there
+    is no second, separate name to set."""
+
+    _seed_devices(config_path)
+    result = runner.invoke(
+        app, ["device", "aa:bb:cc:dd:ee:ff", "--friendly-name", "Boardroom TV", "--config", str(config_path)]
+    )
+    assert result.exit_code == 2
+    assert "No such option" in result.output
+
+
+def test_device_shows_not_trusted_for_an_untrusted_device(config_path: Path):
+    _seed_devices(config_path)
+    show = runner.invoke(app, ["device", "11:22:33:44:55:66", "--config", str(config_path)])
+    assert "Trusted name:       Not trusted" in show.output
 
 
 def test_device_set_and_clear_same_asset_field_is_contradictory(config_path: Path):
