@@ -312,6 +312,20 @@ class DigestConfig(BaseModel):
         return value
 
 
+class SiteConfig(BaseModel):
+    """An optional label for *which* LAN this installation is watching -
+    useful once you run more than one LAN Fence instance (different sites,
+    sides of a building, or client networks) and need to tell their alerts,
+    digests, and monitor sessions apart at a glance. Purely descriptive:
+    never validated against reality, never affects scanning/matching
+    behaviour, and both fields may be left unset."""
+
+    model_config = {"extra": "forbid"}
+
+    name: str | None = None
+    location: str | None = None
+
+
 class WebConfig(BaseModel):
     """`lanfence web`'s local device-browsing/labeling portal - see
     ``lanfence/web.py``. Configured entirely through `lanfence setup`'s Web
@@ -531,6 +545,7 @@ DEFAULT_CONFIG_PATH = Path("~/.config/lanfence/config.yaml")
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
+    site: SiteConfig = Field(default_factory=SiteConfig)
     scan: ScanConfig = Field(default_factory=ScanConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)

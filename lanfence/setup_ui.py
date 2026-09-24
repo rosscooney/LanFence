@@ -42,9 +42,10 @@ SECTIONS = {
     "DHCP servers": ["dhcp_servers.enabled", "dhcp_servers.alert_cooldown_seconds"],
     "Service discovery": ["discovery.mdns", "discovery.ssdp"],
     "Daily digest": ["digest.channels", "digest.send_when_empty"],
-    "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file"],
+    "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file", "identity_rules_file"],
     "Alert delivery": ["alerts.min_severity", "alerts.rate_limit_seconds"],
     "Web portal": ["web.enabled", "web.port"],
+    "Site identity": ["site.name", "site.location"],
 }
 MISSING = object()
 
@@ -461,12 +462,16 @@ def render_overview(console, draft):
     web_summary = "disabled"
     if cfg.web.enabled:
         web_summary = f"enabled, port {cfg.web.port} · " + ("password set" if cfg.web.password_hash else "no password")
+    site_summary = cfg.site.name or "not set"
+    if cfg.site.location:
+        site_summary += f" · {cfg.site.location}"
     summaries = [enabled, f"{cfg.scan.interface or 'auto'} · every {cfg.scan.scan_interval_seconds:g}s",
                  f"{cfg.scan.offline_grace_seconds:g}s · {cfg.scan.offline_after_missed_scans} misses",
                  f"enabled={cfg.dhcp_servers.enabled} · {len(cfg.dhcp_servers.approved)} approved",
                  f"mDNS={cfg.discovery.mdns} · SSDP={cfg.discovery.ssdp}",
                  ", ".join(cfg.digest.channels) or "no destinations", "Paths only; no data migration",
-                 f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s", web_summary]
+                 f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s", web_summary,
+                 site_summary]
     for i, (section, summary) in enumerate(zip(["Communications", *SECTIONS], summaries), 1):
         table.add_row(str(i), section, Text(clean_text(summary, max_len=300)))
     console.print(Panel(table, title="LAN Fence setup"))

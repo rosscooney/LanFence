@@ -84,6 +84,20 @@ def test_save_then_cancel_preserves_completed_save(tmp_path):
     assert yaml.safe_load(path.read_text())['scan']['interface'] == 'eth1'
 
 
+def test_site_identity_section_sets_name_and_location(tmp_path):
+    path = tmp_path / 'config.yaml'
+    run_setup(path, '10\n1\nMy Home LAN\n2\nLiving room\nback\nsave\nexit\n')
+    saved = yaml.safe_load(path.read_text())
+    assert saved['site']['name'] == 'My Home LAN'
+    assert saved['site']['location'] == 'Living room'
+
+
+def test_site_identity_overview_shows_not_set_by_default(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, 'save\nexit\n')
+    assert 'not set' in result.output.lower()
+
+
 def test_reset_and_null_have_distinct_persistence(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('scan:\n  interface: eth0\n  subnet: 192.168.1.0/24\n')

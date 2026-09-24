@@ -470,3 +470,18 @@ def test_web_config_accepts_hash_and_salt_together():
     cfg = Config(web={"password_hash": "abc", "password_salt": "def"})
     assert cfg.web.password_hash == "abc"
     assert cfg.web.password_salt == "def"
+
+
+# --- site identity ------------------------------------------------------
+
+
+def test_site_config_defaults_to_unset():
+    cfg = Config()
+    assert cfg.site.name is None
+    assert cfg.site.location is None
+
+
+def test_site_config_accepts_name_and_location():
+    cfg = Config(site={"name": "My Home LAN", "location": "Living room"})
+    assert cfg.site.name == "My Home LAN"
+    assert cfg.site.location == "Living room"
