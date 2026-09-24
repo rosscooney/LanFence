@@ -521,11 +521,30 @@ def render_overview(console, draft):
         console.print(Text("Warning: " + warning, style="yellow"))
 
 
+def restart_web_portal_after_changes(path):
+    """A running web portal reads its configuration once, at startup - so
+    after setup has saved changes, restart it to pick them up."""
+
+    try:
+        outcome = web.restart_server(path)
+    except web.WebError as exc:
+        typer.echo(f"Could not restart the web portal: {exc}")
+        return
+    if outcome is not None:
+        typer.echo(f"Web portal {outcome} (to pick up your changes).")
+
+
 def run_setup(path, loaded):
     from lanfence import cli
     console = Console()
     draft = deepcopy(loaded.raw)
     sections = ["Communications", *SECTIONS]
+    restart_pending = False
+
+    def _finish():
+        if restart_pending:
+            restart_web_portal_after_changes(path)
+
     while True:
         render_overview(console, draft)
         choice = typer.prompt(
@@ -534,9 +553,11 @@ def run_setup(path, loaded):
         exiting = choice in ("exit", "q")
         if exiting:
             if draft == loaded.raw:
+                _finish()
                 return
             choice = typer.prompt("Unsaved changes: Save / Discard / Return", default="return").lower()
             if choice == "discard":
+                _finish()
                 return
             if choice != "save":
                 continue
@@ -570,6 +591,7 @@ def run_setup(path, loaded):
             except OSError:
                 typer.echo(f"Could not save {path}; check permissions and rerun with the intended --config path.")
                 continue
+            restart_pending = True
             loaded.raw = deepcopy(draft)
             loaded.raw_bytes = path.read_bytes()
             loaded.cfg = Config.model_validate(draft)
@@ -608,6 +630,7 @@ def run_setup(path, loaded):
                     if typer.confirm("Start the web portal now?", default=False):
                         try:
                             urls = web.start_background(path)
+                            restart_pending = False  # just started with the saved config
                             typer.echo(f"Web portal starting: {', '.join(urls)}")
                             typer.echo(
                                 "This is a convenience start for right now - it won't survive a reboot or "
@@ -618,13 +641,10 @@ def run_setup(path, loaded):
             elif web_before.enabled and not web_after.enabled:
                 if web.stop_server():
                     typer.echo("Web portal stopped.")
-            elif (
-                web_after.enabled and web_before.enabled
-                and (web_before.port, web_before.password_hash) != (web_after.port, web_after.password_hash)
-                and web.is_server_running()
-            ):
-                typer.echo("Note: the running web portal won't see this change until it's restarted.")
+            elif web_after.enabled and web.is_server_running():
+                typer.echo("The running web portal will be restarted when you exit setup, to pick up changes.")
             if exiting:
+                _finish()
                 return
         else:
             typer.echo("Choose a listed section or action.")

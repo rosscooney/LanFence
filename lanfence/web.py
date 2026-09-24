@@ -435,6 +435,24 @@ def stop_server() -> bool:
     return True
 
 
+def restart_server(config_path: Path) -> str | None:
+    """Restart the web portal if it's running, so it picks up saved config
+    changes - it reads its configuration only once, at startup. Returns a
+    short description of what happened, or ``None`` if it wasn't running.
+    Raises :class:`WebError` if it was stopped but couldn't be started
+    again (e.g. no LAN address could be confirmed)."""
+
+    if _systemd_unit_active(_SYSTEMD_UNIT):
+        result = subprocess.run(["systemctl", "restart", _SYSTEMD_UNIT], timeout=15, check=False)
+        if result.returncode != 0:
+            raise WebError(f"`systemctl restart {_SYSTEMD_UNIT}` failed - run it yourself with sudo")
+        return f"restarted the {_SYSTEMD_UNIT} service"
+    if running_pid() is None:
+        return None
+    stop_server()
+    return "restarted: " + ", ".join(start_background(config_path))
+
+
 # --- local firewall (best-effort) ----------------------------------------
 #
 # Binding only to the LAN address (see resolve_bind_host) keeps the portal

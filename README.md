@@ -1315,7 +1315,10 @@ checks for an active local firewall (`ufw`/`firewalld`) that could block
 other LAN devices from reaching the port even though the portal itself is
 running, and offers to open it; it then offers to start the portal
 immediately for convenience. Disabling the portal again stops whatever's
-currently running automatically.
+currently running automatically. The portal reads its configuration only
+when it starts, so when you exit `setup` after saving any change, a
+portal that's already running (in the background or as the systemd unit)
+is restarted to pick it up.
 
 **Security posture, by design:**
 

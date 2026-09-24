@@ -21,6 +21,9 @@ Each release is also published to
   holding the host's LAN address (e.g. all of eth0's addresses), not just
   the one detected address, with one self-signed certificate covering
   them all. Public and IPv6 link-local addresses are still never used.
+- Exiting `lanfence setup` after saving a change now restarts a running
+  web portal (background process or `lanfence-web` systemd unit) so the
+  change takes effect, instead of printing a note to restart it yourself.
 
 ## [0.6.2] - 2026-09-24
 

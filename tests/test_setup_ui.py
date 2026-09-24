@@ -454,11 +454,45 @@ def test_web_portal_disable_stops_running_server(tmp_path):
 
 
 
+def test_exiting_setup_after_saving_restarts_a_running_web_portal(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/') as restart_mock:
+        result, _ = run_setup(path, '10\n1\nMy Home LAN\nback\nsave\nexit\n')
+    restart_mock.assert_called_once_with(path)
+    assert 'Web portal restarted: https://192.168.1.5:8080/ (to pick up your changes)' in result.output
+
+
+def test_exiting_setup_without_saving_leaves_the_web_portal_alone(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.restart_server') as restart_mock:
+        run_setup(path, 'exit\n')
+    restart_mock.assert_not_called()
+
+
+def test_setup_does_not_restart_a_portal_it_just_started(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.start_background', return_value=['https://192.168.1.5:8080/']), \
+         patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
+         patch('lanfence.web.detect_active_firewall', return_value=None), \
+         patch('lanfence.web.restart_server') as restart_mock:
+        run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n')
+    restart_mock.assert_not_called()
+
+
+def test_restart_failure_on_exit_is_reported_not_fatal(tmp_path):
+    from lanfence import web
+
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.restart_server', side_effect=web.WebError('no LAN address')):
+        result, _ = run_setup(path, '10\n1\nMy Home LAN\nback\nsave\nexit\n')
+    assert 'Could not restart the web portal: no LAN address' in result.output
+
 def test_web_portal_password_change_while_running_notes_restart_needed(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text(
         yaml.safe_dump({'web': {'enabled': True, 'password_hash': 'x' * 64, 'password_salt': 'y' * 32}})
     )
-    with patch('lanfence.web.is_server_running', return_value=True):
+    with patch('lanfence.web.is_server_running', return_value=True), \
+         patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/'):
         result, _ = run_setup(path, '9\n3\nnewpassword\nnewpassword\nback\nsave\nexit\n')
-    assert "won't see this change until it's restarted" in result.output
+    assert "will be restarted when you exit setup" in result.output

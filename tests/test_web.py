@@ -481,6 +481,34 @@ def test_run_server_fails_if_the_primary_address_cannot_be_bound():
         _run_server_with_mocks(["192.168.1.50"], v4=MagicMock(side_effect=OSError("in use")))
 
 
+def test_restart_server_restarts_a_background_portal(tmp_path: Path):
+    with patch.object(web, "_systemd_unit_active", return_value=False), \
+         patch.object(web, "running_pid", return_value=1234), \
+         patch.object(web, "stop_server") as stop_mock, \
+         patch.object(web, "start_background", return_value=["https://192.168.1.5:8080/"]) as start_mock:
+        outcome = web.restart_server(tmp_path / "config.yaml")
+    stop_mock.assert_called_once()
+    start_mock.assert_called_once_with(tmp_path / "config.yaml")
+    assert "https://192.168.1.5:8080/" in outcome
+
+
+def test_restart_server_uses_systemd_when_the_unit_is_active(tmp_path: Path):
+    import subprocess
+
+    with patch.object(web, "_systemd_unit_active", return_value=True), \
+         patch("lanfence.web.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run_mock:
+        outcome = web.restart_server(tmp_path / "config.yaml")
+    assert run_mock.call_args.args[0] == ["systemctl", "restart", "lanfence-web"]
+    assert "lanfence-web" in outcome
+
+
+def test_restart_server_does_nothing_when_not_running(tmp_path: Path):
+    with patch.object(web, "_systemd_unit_active", return_value=False), \
+         patch.object(web, "running_pid", return_value=None), \
+         patch.object(web, "start_background") as start_mock:
+        assert web.restart_server(tmp_path / "config.yaml") is None
+    start_mock.assert_not_called()
+
 def test_tls_wrapped_server_accepts_real_https_requests(tmp_path: Path):
     """End-to-end: a ThreadingHTTPServer whose socket is wrapped in TLS
     exactly as run_server() does, using a real cert from
