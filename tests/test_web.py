@@ -654,6 +654,45 @@ def test_metadata_edit_sets_asset_fields(running_portal):
     assert metadata.notes == "Mounted on wall"
 
 
+
+def test_metadata_edit_leaves_fields_the_form_did_not_send_untouched(running_portal):
+    """A page loaded before a field existed (or any partial form) must not
+    silently clear the fields it doesn't include."""
+
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc),
+            friendly_name="Boardroom TV", asset_type="Company",
+        )
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    data = urllib.parse.urlencode({"action": "metadata", "owner": "Alice", "location": ""}).encode()
+    opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data).read()
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        metadata = store.get_device_metadata("aa:bb:cc:dd:ee:ff")
+    assert metadata.owner == "Alice"
+    assert metadata.friendly_name == "Boardroom TV"
+    assert metadata.asset_type == "Company"
+
+
+def test_metadata_edit_clears_a_field_submitted_empty(running_portal):
+    base_url, cfg = running_portal
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        store.update_device_metadata(
+            "aa:bb:cc:dd:ee:ff", updated_at=datetime.now(timezone.utc), friendly_name="Boardroom TV",
+        )
+    opener = _opener()
+    opener.open(f"{base_url}/login", data=urllib.parse.urlencode({"password": "s3cret-pw"}).encode())
+
+    data = urllib.parse.urlencode({"action": "metadata", "friendly_name": ""}).encode()
+    opener.open(f"{base_url}/device/aa:bb:cc:dd:ee:ff", data=data).read()
+
+    with DeviceStore(cfg.resolved_db_path()) as store:
+        assert store.get_device_metadata("aa:bb:cc:dd:ee:ff").friendly_name is None
+
 def test_metadata_rejects_invalid_asset_type(running_portal):
     base_url, _ = running_portal
     opener = _opener()

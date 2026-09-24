@@ -1247,7 +1247,9 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
         def _read_form(self) -> dict[str, str]:
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(length) if length else b""
-            parsed = parse_qs(body.decode("utf-8", errors="replace"))
+            # Blank fields are kept so a deliberately emptied input ("clear
+            # this") stays distinguishable from a field the form never sent.
+            parsed = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
             return {key: values[0] for key, values in parsed.items() if values}
 
         def _send(self, status: HTTPStatus, body: bytes, *, headers: dict[str, str] | None = None) -> None:
@@ -1415,7 +1417,9 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                         "friendly_name", "owner", "location", "asset_type", "category_override",
                         "purpose", "notes",
                     ):
-                        raw_value = form.get(field, "").strip()
+                        if field not in form:
+                            continue  # e.g. a page loaded before this field existed - leave it alone
+                        raw_value = form[field].strip()
                         updates[field] = validate_metadata_value(field, raw_value) if raw_value else None
                     with DeviceStore(context.cfg.resolved_db_path()) as store:
                         if store.get_device(mac) is None:
