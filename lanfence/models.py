@@ -435,6 +435,10 @@ class ScanResult(BaseModel):
     ended_at: datetime
     interface: str | None = None
     subnet: str | None = None
+    #: Every interface this sweep covered. ``interface`` above holds the
+    #: single one when exactly one was swept, and is ``None`` when more
+    #: than one was (see :func:`lanfence.engine.run_active_sweep_multi`).
+    interfaces: list[str] = Field(default_factory=list)
     #: The operator-set site name/location (see
     #: :class:`lanfence.config.SiteConfig`), so a script consuming JSON
     #: output from more than one LAN Fence instance can tell them apart -

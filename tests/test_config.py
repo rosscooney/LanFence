@@ -472,6 +472,14 @@ def test_web_config_accepts_hash_and_salt_together():
     assert cfg.web.password_salt == "def"
 
 
+
+def test_scan_interfaces_defaults_to_empty_auto():
+    assert Config().scan.interfaces == []
+
+
+def test_scan_interfaces_accepts_a_list_including_vlan_sub_interfaces():
+    assert Config(scan={"interfaces": ["eth0", "eth0.10"]}).scan.interfaces == ["eth0", "eth0.10"]
+
 # --- site identity ------------------------------------------------------
 
 

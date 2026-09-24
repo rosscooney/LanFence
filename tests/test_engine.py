@@ -21,7 +21,9 @@ from lanfence.engine import (
     filter_snoozed,
     is_review_needed,
     process_sighting,
+    resolve_scan_interfaces,
     run_active_sweep,
+    run_active_sweep_multi,
 )
 from lanfence.fingerprint import SignatureSet
 from lanfence.models import Device, DeviceMetadata, Finding
@@ -588,6 +590,156 @@ def test_run_active_sweep_partial_success_still_marks_offline(tmp_path: Path):
 
     assert still_online == "offline"
     assert any(e.event_type == "disconnected" for e in result.events)
+
+
+# --- multiple interfaces -------------------------------------------------
+
+_SUBNETS = {"eth0": "192.168.1.0/24", "eth0.10": "192.168.10.0/24"}
+
+
+def _per_interface_scan(by_interface):
+    def fake_active_scan(*, subnet, interface, timeout):
+        return by_interface.get(interface, [])
+    return fake_active_scan
+
+
+def test_resolve_scan_interfaces_cli_override_wins():
+    cfg = Config(scan={"interfaces": ["eth0", "eth0.10"], "interface": "wlan0"})
+    assert resolve_scan_interfaces(cfg, "eth1") == ["eth1"]
+
+
+def test_resolve_scan_interfaces_prefers_configured_list_over_legacy_single():
+    cfg = Config(scan={"interfaces": ["eth0", "eth0.10"], "interface": "wlan0"})
+    assert resolve_scan_interfaces(cfg, None) == ["eth0", "eth0.10"]
+
+
+def test_resolve_scan_interfaces_falls_back_to_legacy_single_then_auto():
+    assert resolve_scan_interfaces(Config(scan={"interface": "wlan0"}), None) == ["wlan0"]
+    with patch.object(scanner, "default_interface", return_value="eth9"):
+        assert resolve_scan_interfaces(Config(), None) == ["eth9"]
+    with patch.object(scanner, "default_interface", return_value=None):
+        assert resolve_scan_interfaces(Config(), None) == []
+
+
+def test_run_active_sweep_multi_merges_every_interface(tmp_path: Path):
+    a = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    b = scanner.ArpSighting(mac="11:22:33:44:55:66", ip="192.168.10.7", seen_at=_now())
+
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "local_subnet", side_effect=_SUBNETS.get), \
+         patch.object(scanner, "active_scan", side_effect=_per_interface_scan({"eth0": [a], "eth0.10": [b]})), \
+         patch.object(scanner, "active_scan_v6", return_value=[]):
+        store = DeviceStore(tmp_path / "db.sqlite")
+        result = run_active_sweep_multi(
+            Config(), store, Allowlist.load(None), SignatureSet.load(), interfaces=["eth0", "eth0.10"],
+        )
+        store.close()
+
+    assert result.interfaces == ["eth0", "eth0.10"]
+    assert result.interface is None
+    assert {d.mac for d in result.devices} == {"aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"}
+    assert {e.mac for e in result.events if e.event_type == "new_device"} == {
+        "aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66",
+    }
+
+
+def test_run_active_sweep_multi_prefixes_errors_with_their_interface(tmp_path: Path):
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "local_subnet", side_effect=_SUBNETS.get), \
+         patch.object(scanner, "active_scan", return_value=[]), \
+         patch.object(scanner, "active_scan_v6", side_effect=scanner.ScannerUnavailable("no v6")):
+        store = DeviceStore(tmp_path / "db.sqlite")
+        result = run_active_sweep_multi(
+            Config(), store, Allowlist.load(None), SignatureSet.load(), interfaces=["eth0", "eth0.10"],
+        )
+        store.close()
+
+    assert any(e.startswith("eth0: ") for e in result.errors)
+    assert any(e.startswith("eth0.10: ") for e in result.errors)
+
+
+def test_run_active_sweep_multi_ignores_configured_subnet(tmp_path: Path):
+    seen_subnets = {}
+
+    def fake_active_scan(*, subnet, interface, timeout):
+        seen_subnets[interface] = subnet
+        return []
+
+    cfg = Config(scan={"subnet": "172.16.0.0/16"})
+    with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+         patch.object(scanner, "local_subnet", side_effect=_SUBNETS.get), \
+         patch.object(scanner, "active_scan", side_effect=fake_active_scan), \
+         patch.object(scanner, "active_scan_v6", return_value=[]):
+        store = DeviceStore(tmp_path / "db.sqlite")
+        run_active_sweep_multi(cfg, store, Allowlist.load(None), SignatureSet.load(), interfaces=["eth0", "eth0.10"])
+        store.close()
+
+    assert seen_subnets == _SUBNETS
+    assert cfg.scan.subnet == "172.16.0.0/16"  # the caller's config is left untouched
+
+
+def test_run_active_sweep_multi_never_marks_a_device_offline_from_another_interfaces_sweep(tmp_path: Path):
+    """A device on eth0 that eth0's sweep just saw must not count as a miss
+    during eth0.10's sweep in the same round - offline detection is scoped
+    to the interface each device was last seen on."""
+
+    a = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    b = scanner.ArpSighting(mac="11:22:33:44:55:66", ip="192.168.10.7", seen_at=_now())
+    scans = _per_interface_scan({"eth0": [a], "eth0.10": [b]})
+
+    db_path = tmp_path / "db.sqlite"
+    for _round in range(3):
+        with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+             patch.object(scanner, "local_subnet", side_effect=_SUBNETS.get), \
+             patch.object(scanner, "active_scan", side_effect=scans), \
+             patch.object(scanner, "active_scan_v6", return_value=[]):
+            store = DeviceStore(db_path)
+            result = run_active_sweep_multi(
+                _cfg_immediate_offline(), store, Allowlist.load(None), SignatureSet.load(),
+                interfaces=["eth0", "eth0.10"],
+            )
+            statuses = {mac: store.get_device(mac).status for mac in ("aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66")}
+            store.close()
+        assert not any(e.event_type == "disconnected" for e in result.events)
+        assert statuses == {"aa:bb:cc:dd:ee:ff": "online", "11:22:33:44:55:66": "online"}
+
+
+def test_run_active_sweep_multi_still_detects_a_real_disconnect_on_its_own_interface(tmp_path: Path):
+    a = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.5", seen_at=_now())
+    b = scanner.ArpSighting(mac="11:22:33:44:55:66", ip="192.168.10.7", seen_at=_now())
+
+    db_path = tmp_path / "db.sqlite"
+    for by_interface in ({"eth0": [a], "eth0.10": [b]}, {"eth0": [a], "eth0.10": []}):
+        with patch("lanfence.engine.scanner.resolve_hostname", return_value=None), \
+             patch.object(scanner, "local_subnet", side_effect=_SUBNETS.get), \
+             patch.object(scanner, "active_scan", side_effect=_per_interface_scan(by_interface)), \
+             patch.object(scanner, "active_scan_v6", return_value=[]):
+            store = DeviceStore(db_path)
+            result = run_active_sweep_multi(
+                _cfg_immediate_offline(), store, Allowlist.load(None), SignatureSet.load(),
+                interfaces=["eth0", "eth0.10"],
+            )
+            statuses = {mac: store.get_device(mac).status for mac in ("aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66")}
+            store.close()
+
+    assert statuses == {"aa:bb:cc:dd:ee:ff": "online", "11:22:33:44:55:66": "offline"}
+    assert [e.mac for e in result.events if e.event_type == "disconnected"] == ["11:22:33:44:55:66"]
+
+
+def test_coalesce_sightings_keeps_the_same_sighting_on_different_interfaces_apart():
+    now = _now()
+    on_eth0 = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=now, interface="eth0")
+    on_vlan = scanner.ArpSighting(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.5", seen_at=now, interface="eth0.10")
+    assert coalesce_sightings([on_eth0, on_vlan, on_eth0]) == [on_eth0, on_vlan]
+
+
+def test_apply_self_trust_trusts_this_host_on_every_listed_interface():
+    macs = {"eth0": "02:00:00:00:00:01", "eth0.10": "02:00:00:00:00:02"}
+    allowlist = Allowlist.load(None)
+    with patch.object(scanner, "local_mac", side_effect=macs.get):
+        apply_self_trust(allowlist, interface=["eth0", "eth0.10"])
+    assert allowlist.match("02:00:00:00:00:01") is not None
+    assert allowlist.match("02:00:00:00:00:02") is not None
 
 
 # --- offline retry probe (scan.offline_retry_probe) -------------------------

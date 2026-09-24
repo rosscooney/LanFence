@@ -1245,7 +1245,7 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             identity_rules = IdentityRuleSet.load(context.cfg.identity_rules_file)
             with DeviceStore(context.cfg.resolved_db_path()) as store:
                 allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
-                apply_self_trust(allowlist, interface=context.cfg.scan.interface)
+                apply_self_trust(allowlist, interface=context.cfg.scan.interfaces or context.cfg.scan.interface)
                 inventory = build_inventory(store, allowlist)
                 dossiers = [
                     build_device_dossier(
@@ -1284,7 +1284,7 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                 return
             with DeviceStore(context.cfg.resolved_db_path()) as store:
                 allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
-                apply_self_trust(allowlist, interface=context.cfg.scan.interface)
+                apply_self_trust(allowlist, interface=context.cfg.scan.interfaces or context.cfg.scan.interface)
                 dossier = self._load_dossier(store, allowlist, mac)
             if dossier is None:
                 self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
@@ -1345,7 +1345,7 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
 
             with DeviceStore(context.cfg.resolved_db_path()) as store:
                 allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
-                apply_self_trust(allowlist, interface=context.cfg.scan.interface)
+                apply_self_trust(allowlist, interface=context.cfg.scan.interfaces or context.cfg.scan.interface)
                 dossier = self._load_dossier(store, allowlist, mac)
             if dossier is None:
                 self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))

@@ -659,6 +659,66 @@ def _scan_with_sightings(config_path: Path, monkeypatch, sightings, *, extra_arg
     return runner.invoke(app, ["scan", "--no-ipv6", *extra_args, "--config", str(config_path)])
 
 
+
+def _scan_multi(config_path: Path, monkeypatch, by_interface, *, extra_args=()):
+    import json
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    cfg_dict["scan"] = {"interfaces": list(by_interface)}
+    config_path.write_text(yaml.safe_dump(cfg_dict))
+    subnets = {"eth0": "10.0.0.0/24", "eth0.10": "10.0.10.0/24"}
+    monkeypatch.setattr(
+        "lanfence.cli.scanner.active_scan",
+        lambda *, subnet, interface=None, timeout=3.0: by_interface.get(interface, []),
+    )
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: subnets.get(iface))
+    monkeypatch.setattr("lanfence.cli.scanner.default_interface", lambda: "eth0")
+    monkeypatch.setattr("lanfence.cli.scanner.local_mac", lambda iface=None: None)
+    result = runner.invoke(
+        app, ["scan", "--no-ipv6", "--format", "json", *extra_args, "--config", str(config_path)],
+    )
+    lines = result.output.strip().splitlines()
+    json_start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("{")), None)
+    data = json.loads("\n".join(lines[json_start:])) if json_start is not None else None
+    return result, data
+
+
+def test_scan_sweeps_every_configured_interface(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    a = scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())
+    b = scanner_module.ArpSighting(mac="00:11:22:33:44:55", ip="10.0.10.11", seen_at=_now())
+    result, data = _scan_multi(config_path, monkeypatch, {"eth0": [a], "eth0.10": [b]})
+
+    assert result.exit_code == 0, result.output
+    assert data["interfaces"] == ["eth0", "eth0.10"]
+    assert data["interface"] is None
+    assert {d["mac"] for d in data["devices"]} == {"b8:e9:37:11:22:33", "00:11:22:33:44:55"}
+
+
+def test_scan_interface_option_forces_a_single_interface(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    a = scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())
+    b = scanner_module.ArpSighting(mac="00:11:22:33:44:55", ip="10.0.10.11", seen_at=_now())
+    result, data = _scan_multi(
+        config_path, monkeypatch, {"eth0": [a], "eth0.10": [b]}, extra_args=["--interface", "eth0.10"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert data["interfaces"] == ["eth0.10"]
+    assert data["interface"] == "eth0.10"
+    assert {d["mac"] for d in data["devices"]} == {"00:11:22:33:44:55"}
+
+
+def test_scan_warns_that_subnet_is_ignored_across_several_interfaces(config_path: Path, monkeypatch):
+    result, data = _scan_multi(
+        config_path, monkeypatch, {"eth0": [], "eth0.10": []}, extra_args=["--subnet", "172.16.0.0/16"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "can't apply to all of them" in result.output
+
 def test_scan_table_output_shows_triage_summary(config_path: Path, monkeypatch):
     from lanfence import scanner as scanner_module
 
@@ -758,7 +818,7 @@ def test_scan_json_output_omits_triage_summary_and_stays_stable(config_path: Pat
     data = json.loads("\n".join(lines[json_start:]))
     assert set(data.keys()) == {
         "started_at", "ended_at", "interface", "subnet", "mode", "devices", "events", "findings", "errors",
-        "site_name", "site_location",
+        "site_name", "site_location", "interfaces",
     }
 
 
@@ -2780,6 +2840,65 @@ def test_monitor_queued_passive_sighting_prevents_false_disconnect_reappear(
     # pair generated within this tick.
     assert [e.event_type for e in events] == ["new_device"]
 
+
+
+def test_monitor_listens_on_every_configured_interface_and_attributes_passive_sightings(
+    tmp_path: Path, monkeypatch
+):
+    """With several interfaces enabled, one passive capture covers all of
+    them, and each passive sighting is recorded against the interface (and
+    that interface's subnet) it actually arrived on - which is what offline
+    detection later relies on."""
+
+    from lanfence import scanner as scanner_module
+
+    db_path = tmp_path / "lanfence.db"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "db_path": str(db_path),
+            "allowlist_file": str(tmp_path / "allowlist.yaml"),
+            "scan": {
+                "scan_interval_seconds": 0.001, "resolve_hostnames": False,
+                "interfaces": ["eth0", "eth0.10"],
+            },
+        }),
+        encoding="utf-8",
+    )
+    sighting_mac = "00:11:22:33:44:55"
+    sniffed_on = {}
+
+    class _SyncThread:
+        def __init__(self, target=None, **_kwargs):
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    def fake_passive_sniff(*, on_sighting, interface=None, **_kwargs):
+        sniffed_on["interface"] = interface
+        on_sighting(scanner_module.ArpSighting(
+            mac=sighting_mac, ip="10.0.10.5", seen_at=_now(), interface="eth0.10",
+        ))
+
+    subnets = {"eth0": "10.0.0.0/24", "eth0.10": "10.0.10.0/24"}
+    monkeypatch.setattr("lanfence.cli.threading.Thread", _SyncThread)
+    monkeypatch.setattr("lanfence.cli.scanner.passive_sniff", fake_passive_sniff)
+    monkeypatch.setattr("lanfence.cli.scanner.active_scan", lambda *, subnet, interface=None, timeout=3.0: [])
+    monkeypatch.setattr("lanfence.cli.scanner.local_subnet", lambda iface=None: subnets.get(iface))
+    monkeypatch.setattr("lanfence.cli.scanner.local_mac", lambda iface=None: None)
+    monkeypatch.setattr("lanfence.cli.time.sleep", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    result = runner.invoke(app, ["monitor", "--no-ipv6", "--no-live", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert sniffed_on["interface"] == ["eth0", "eth0.10"]
+    assert "eth0, eth0.10" in result.output
+
+    with DeviceStore(db_path) as store:
+        row = store._conn.execute(
+            "SELECT last_interface, ipv4_subnet, status FROM devices WHERE mac = ?", (sighting_mac,),
+        ).fetchone()
+    assert (row["last_interface"], row["ipv4_subnet"], row["status"]) == ("eth0.10", "10.0.10.0/24", "online")
 
 def test_monitor_disconnect_activity_line_prefers_allowlist_name_over_hostname(tmp_path: Path, monkeypatch):
     """A trusted device's DISCONNECTED line must show the name we gave it

@@ -185,7 +185,7 @@ def build_findings(device: Device, event_type: EventType | None, matches: list[S
 
 def coalesce_sightings(sightings: list[scanner.ArpSighting]) -> list[scanner.ArpSighting]:
     """Collapse repeated, truly-identical sightings within one batch (same
-    mac/ip/hostname/source) down to the single most-recently-seen one,
+    mac/ip/hostname/source/interface) down to the single most-recently-seen one,
     while leaving every distinct sighting - a different IP (dual-stack), a
     changed hostname, a different discovery source - completely untouched.
 
@@ -198,10 +198,10 @@ def coalesce_sightings(sightings: list[scanner.ArpSighting]) -> list[scanner.Arp
     is otherwise unchanged.
     """
 
-    latest: dict[tuple[str, str, str | None, str], scanner.ArpSighting] = {}
-    order: list[tuple[str, str, str | None, str]] = []
+    latest: dict[tuple[str, str, str | None, str, str | None], scanner.ArpSighting] = {}
+    order: list[tuple[str, str, str | None, str, str | None]] = []
     for sighting in sightings:
-        key = (sighting.mac, sighting.ip, sighting.hostname, sighting.source)
+        key = (sighting.mac, sighting.ip, sighting.hostname, sighting.source, sighting.interface)
         if key not in latest:
             order.append(key)
             latest[key] = sighting
@@ -477,8 +477,64 @@ def run_active_sweep(
 
     return ScanResult(
         started_at=started_at, ended_at=utcnow(), interface=iface, subnet=net,
+        interfaces=[iface] if iface else [],
         mode="active", devices=list(devices_by_mac.values()), events=events, findings=findings, errors=errors,
         site_name=cfg.site.name, site_location=cfg.site.location,
+    )
+
+
+def resolve_scan_interfaces(cfg: Config, cli_interface: str | None = None) -> list[str]:
+    """The interfaces this run should scan/sniff on. A ``--interface`` CLI
+    override forces single-interface mode for that run; otherwise the
+    ``scan.interfaces`` list from `lanfence setup`, then the legacy single
+    ``scan.interface``, then one auto-detected default interface (empty
+    only if even that can't be found)."""
+
+    if cli_interface:
+        return [cli_interface]
+    if cfg.scan.interfaces:
+        return list(cfg.scan.interfaces)
+    if cfg.scan.interface:
+        return [cfg.scan.interface]
+    default = scanner.default_interface()
+    return [default] if default else []
+
+
+def run_active_sweep_multi(
+    cfg: Config,
+    store: DeviceStore,
+    allowlist: Allowlist,
+    signatures: SignatureSet,
+    *,
+    interfaces: list[str],
+) -> ScanResult:
+    """One :func:`run_active_sweep` per interface, merged into a single
+    result. Each per-interface sweep is individually correct on its own -
+    offline detection is already scoped to the interface a device was last
+    seen on (see :meth:`lanfence.db.DeviceStore.mark_offline`), so a device
+    on one interface is never marked offline by another interface's sweep.
+    Each interface uses its own auto-detected subnet (``scan.subnet`` is
+    ignored here). ``devices`` is every device any interface's sweep saw,
+    one entry per MAC."""
+
+    started_at = utcnow()
+    # A configured scan.subnet names one network, so it can't apply to
+    # every interface - each one auto-detects its own instead.
+    per_iface_cfg = cfg.model_copy(update={"scan": cfg.scan.model_copy(update={"subnet": None})})
+    devices_by_mac: dict[str, Device] = {}
+    events: list[DeviceEvent] = []
+    findings: list[Finding] = []
+    errors: list[str] = []
+    for iface in interfaces:
+        result = run_active_sweep(per_iface_cfg, store, allowlist, signatures, interface=iface, subnet=None)
+        devices_by_mac.update((device.mac, device) for device in result.devices)
+        events.extend(result.events)
+        findings.extend(result.findings)
+        errors.extend(f"{iface}: {error}" for error in result.errors)
+    return ScanResult(
+        started_at=started_at, ended_at=utcnow(), interface=None, subnet=None, interfaces=list(interfaces),
+        mode="active", devices=list(devices_by_mac.values()), events=events, findings=findings,
+        errors=errors, site_name=cfg.site.name, site_location=cfg.site.location,
     )
 
 
@@ -641,10 +697,11 @@ def filter_snoozed(findings: list[Finding], store: DeviceStore, *, now: datetime
     return [f for f in findings if f.mac is None or not store.is_snoozed(f.mac, now=now)]
 
 
-def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
-    """Make LAN Fence trust its own MAC address on ``interface``, so its own
-    ARP/ND traffic - inevitably visible to a passive capture, and sometimes
-    even to its own active sweep - is never treated as an unknown device.
+def apply_self_trust(allowlist: Allowlist, *, interface: str | list[str] | None) -> None:
+    """Make LAN Fence trust its own MAC address on ``interface`` (or on each
+    of them, given a list), so its own ARP/ND traffic - inevitably visible
+    to a passive capture, and sometimes even to its own active sweep - is
+    never treated as an unknown device.
 
     In-memory only: mutates ``allowlist.entries`` directly and never touches
     ``allowlist.path`` or calls :meth:`Allowlist.save`, so this is never
@@ -655,6 +712,10 @@ def apply_self_trust(allowlist: Allowlist, *, interface: str | None) -> None:
     is left alone rather than overwritten.
     """
 
+    if isinstance(interface, list):
+        for name in interface:
+            apply_self_trust(allowlist, interface=name)
+        return
     self_mac = scanner.local_mac(interface)
     if self_mac is None:
         return

@@ -29,6 +29,12 @@ class ScanConfig(BaseModel):
 
     #: Network interface to scan/sniff on. ``None`` -> auto-detect.
     interface: str | None = None
+    #: Every interface to scan/sniff on at once, set via `lanfence setup`'s
+    #: Network interfaces section. A VLAN sub-interface (e.g. ``eth0.10``)
+    #: is just another interface name here. Empty (the default) falls back
+    #: to ``interface`` above, then to auto-detecting a single interface -
+    #: see :func:`lanfence.engine.resolve_scan_interfaces`.
+    interfaces: list[str] = Field(default_factory=list)
     #: CIDR subnet to actively ARP-scan, e.g. "192.168.1.0/24". ``None`` ->
     #: derive from the interface's own address.
     subnet: str | None = None

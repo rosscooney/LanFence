@@ -89,6 +89,10 @@ class ArpSighting:
     #: compatibility with any caller constructing one without this field;
     #: every real construction site in this module sets it explicitly.
     source: SightingSource = "arp"
+    #: The interface a passive capture received this on, when it was
+    #: listening on more than one (see :func:`passive_sniff`). ``None``
+    #: means "whichever single interface the caller already knows about".
+    interface: str | None = None
 
 
 def _require_scapy():
@@ -424,7 +428,7 @@ class DhcpServerSighting:
 def passive_sniff(
     *,
     on_sighting: Callable[[ArpSighting], None],
-    interface: str | None = None,
+    interface: str | list[str] | None = None,
     stop_event: "SupportsIsSet | None" = None,
     packet_count: int = 0,
     dhcp: bool = True,
@@ -440,7 +444,9 @@ def passive_sniff(
     Blocks until ``stop_event`` is set (checked between packets) or
     ``packet_count`` packets have been processed (0 = unbounded - normal use is
     to run this in a background thread and set ``stop_event`` to end it).
-    ``dhcp=False`` omits DHCP entirely, from both the capture filter and the
+    ``interface`` may be a list, in which case one capture covers every
+    listed interface and each DHCP-server/mDNS/SSDP sighting records the
+    interface its packet actually arrived on. ``dhcp=False`` omits DHCP entirely, from both the capture filter and the
     packet handler - which also disables ``on_dhcp_server`` regardless of
     whether it's given, since there is no separate DHCP capture to gate
     only the server side of.
@@ -488,6 +494,19 @@ def passive_sniff(
             return value or None
         return None
 
+    def _receiving_interface(packet) -> str | None:
+        # Sniffing a list of interfaces: scapy tags each packet with the one
+        # it arrived on. A single (or default) interface keeps its old value.
+        if isinstance(interface, list):
+            sniffed_on = getattr(packet, "sniffed_on", None)
+            return sniffed_on if isinstance(sniffed_on, str) and sniffed_on else None
+        return interface
+
+    def _sighting_interface(packet) -> str | None:
+        # Only tagged when listening on several interfaces - with one, the
+        # caller already knows which interface every sighting came from.
+        return _receiving_interface(packet) if isinstance(interface, list) else None
+
     def _handle_dhcp_server(packet, bootp, options, message_type) -> None:
         server_id = _dhcp_ip_option(options.get("server_id"))
         if server_id is None:
@@ -496,7 +515,7 @@ def passive_sniff(
             # guess (e.g. from the relay/source address).
             log.warning(
                 "dropping a DHCP %s reply with a missing/invalid server "
-                "identifier (option 54) on %s", message_type, interface or "(default interface)",
+                "identifier (option 54) on %s", message_type, _receiving_interface(packet) or "(default interface)",
             )
             return
         giaddr = getattr(bootp, "giaddr", None)
@@ -511,7 +530,7 @@ def passive_sniff(
 
         on_dhcp_server(
             DhcpServerSighting(
-                interface=interface,
+                interface=_receiving_interface(packet),
                 server_id=server_id,
                 message_type=message_type,
                 observed_at=datetime.now(timezone.utc),
@@ -572,6 +591,7 @@ def passive_sniff(
                 # while this is still perfectly good evidence the MAC and
                 # any self-reported hostname are alive on the network.
                 source="dhcp_client",
+                interface=_sighting_interface(packet),
             )
         )
 
@@ -583,7 +603,9 @@ def passive_sniff(
             # op 1 = who-has (request), op 2 = is-at (reply) - both carry a
             # live sender MAC/IP pairing worth recording.
             if arp.op in (1, 2):
-                on_sighting(ArpSighting(mac=arp.hwsrc, ip=arp.psrc, seen_at=now, source="arp"))
+                on_sighting(ArpSighting(
+                    mac=arp.hwsrc, ip=arp.psrc, seen_at=now, source="arp", interface=_sighting_interface(packet),
+                ))
             return
 
         if packet.haslayer(ICMPv6ND_NS) or packet.haslayer(ICMPv6ND_NA):
@@ -596,7 +618,10 @@ def passive_sniff(
             if src_ip in ("::", ""):
                 return
             on_sighting(
-                ArpSighting(mac=packet[scapy_module.Ether].src, ip=src_ip, seen_at=now, source="ipv6_nd")
+                ArpSighting(
+                    mac=packet[scapy_module.Ether].src, ip=src_ip, seen_at=now, source="ipv6_nd",
+                    interface=_sighting_interface(packet),
+                )
             )
             return
 
@@ -633,7 +658,7 @@ def passive_sniff(
         except Exception:  # noqa: BLE001 - malformed capture must never crash monitoring
             return
         sightings = discovery.parse_mdns_packet(
-            payload, interface=interface or "", source_ip=source_ip, source_mac=source_mac,
+            payload, interface=_receiving_interface(packet) or "", source_ip=source_ip, source_mac=source_mac,
             family=family, seen_at=datetime.now(timezone.utc),
         )
         if sightings:
@@ -648,7 +673,7 @@ def passive_sniff(
         except Exception:  # noqa: BLE001 - malformed capture must never crash monitoring
             return
         sighting = discovery.parse_ssdp_packet(
-            payload, interface=interface or "", source_ip=source_ip, source_mac=source_mac,
+            payload, interface=_receiving_interface(packet) or "", source_ip=source_ip, source_mac=source_mac,
             family=family, seen_at=datetime.now(timezone.utc),
         )
         if sighting is not None:

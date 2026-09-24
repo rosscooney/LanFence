@@ -67,7 +67,9 @@ from lanfence.engine import (
     filter_snoozed,
     is_review_needed,
     process_sighting,
+    resolve_scan_interfaces,
     run_active_sweep,
+    run_active_sweep_multi,
     utcnow,
 )
 from lanfence.fingerprint import SignatureSet, fingerprint_device
@@ -320,6 +322,31 @@ def _permanent_link_hint() -> Optional[str]:
     return "lanfence link          # prompts for your sudo password"
 
 
+def _run_sweep(
+    cfg: Config, store: DeviceStore, allowlist: Allowlist, signatures: SignatureSet,
+    interfaces: list[str], *, subnet: str | None,
+) -> ScanResult:
+    """One active sweep across ``interfaces`` (see
+    :func:`lanfence.engine.resolve_scan_interfaces`) - an ordinary
+    single-interface sweep for one, :func:`run_active_sweep_multi` for more."""
+
+    if len(interfaces) > 1:
+        return run_active_sweep_multi(cfg, store, allowlist, signatures, interfaces=interfaces)
+    return run_active_sweep(
+        cfg, store, allowlist, signatures, interface=interfaces[0] if interfaces else None, subnet=subnet,
+    )
+
+
+def _warn_subnet_ignored(interfaces: list[str], subnet: str | None, cfg: Config) -> None:
+    if len(interfaces) > 1 and (subnet or cfg.scan.subnet):
+        typer.secho(
+            f"note: scanning {len(interfaces)} interfaces ({', '.join(interfaces)}) - a single "
+            "--subnet/scan.subnet can't apply to all of them, so each interface's own subnet is "
+            "auto-detected instead.",
+            fg="yellow", err=True,
+        )
+
+
 def _warn_not_root(subcommand: str) -> None:
     """Print a not-root warning with copy-pasteable ways to fix it.
 
@@ -419,7 +446,9 @@ def scan(
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
     identity_rules = IdentityRuleSet.load(cfg.identity_rules_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    apply_self_trust(allowlist, interface=interface or cfg.scan.interface)
+    interfaces = resolve_scan_interfaces(cfg, interface)
+    apply_self_trust(allowlist, interface=interfaces or None)
+    _warn_subnet_ignored(interfaces, subnet, cfg)
 
     if output_format != "json":
         typer.secho(
@@ -434,7 +463,7 @@ def scan(
     triage: Optional[TriageSummary] = None
     with _open_store(cfg.resolved_db_path()) as store:
         def _do_sweep() -> ScanResult:
-            return run_active_sweep(cfg, store, allowlist, signatures, interface=interface, subnet=subnet)
+            return _run_sweep(cfg, store, allowlist, signatures, interfaces, subnet=subnet)
 
         if output_format == "json":
             result = _do_sweep()
@@ -684,9 +713,18 @@ def monitor(
         cfg.resolved_db_path(), site_name=cfg.site.name, site_location=cfg.site.location,
     )
 
-    iface = interface or cfg.scan.interface or scanner.default_interface()
-    net = subnet or cfg.scan.subnet
-    apply_self_trust(allowlist, interface=iface)
+    interfaces = resolve_scan_interfaces(cfg, interface)
+    multi = len(interfaces) > 1
+    # Single-interface mode keeps exactly its previous values; with several
+    # interfaces there's no one interface/subnet, so passive sightings are
+    # attributed per packet (see scanner.passive_sniff) instead.
+    iface = None if multi else (interfaces[0] if interfaces else None)
+    net = None if multi else (subnet or cfg.scan.subnet)
+    subnet_by_iface = {name: scanner.local_subnet(name) for name in interfaces} if multi else {}
+    apply_self_trust(allowlist, interface=interfaces or None)
+    _warn_subnet_ignored(interfaces, subnet, cfg)
+    iface_display = ", ".join(interfaces) or "(auto)"
+    net_display = ", ".join(s for s in subnet_by_iface.values() if s) if multi else net
 
     dhcp_active = cfg.scan.passive and cfg.scan.dhcp_snooping
     dhcp_server_active = dhcp_server_detection_active(cfg)
@@ -699,7 +737,7 @@ def monitor(
         typer.secho(f"note: {fallback_reason}", fg="yellow", err=True)
 
     header = monitor_ui.HeaderInfo(
-        version=__version__, interface=iface or "(auto)", network=net or "(auto)",
+        version=__version__, interface=iface_display, network=net_display or "(auto)",
         scan_interval_seconds=cfg.scan.scan_interval_seconds, passive=cfg.scan.passive,
         ipv6=cfg.scan.ipv6, dhcp=dhcp_active, mdns=mdns_active, ssdp=ssdp_active,
         dhcp_server_detection=dhcp_server_active, site_name=cfg.site.name,
@@ -751,7 +789,7 @@ def monitor(
     if not use_live:
         typer.secho(f"LAN Fence {__version__} - monitoring (Ctrl+C to stop)", fg="green", bold=True)
         typer.echo(
-            f"interface: {iface or '(auto)'}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
+            f"interface: {iface_display}   scan interval: {cfg.scan.scan_interval_seconds:.0f}s   "
             f"passive: {cfg.scan.passive}   ipv6: {cfg.scan.ipv6}   dhcp: {dhcp_active}   "
             f"dhcp-server-detection: {dhcp_server_active}   mdns: {mdns_active}   ssdp: {ssdp_active}"
         )
@@ -784,7 +822,8 @@ def monitor(
     def _run_passive() -> None:
         try:
             scanner.passive_sniff(
-                on_sighting=passive_queue.put_dropping, interface=iface, stop_event=stop_event,
+                on_sighting=passive_queue.put_dropping, interface=interfaces if multi else iface,
+                stop_event=stop_event,
                 dhcp=cfg.scan.dhcp_snooping,
                 on_dhcp_server=dhcp_server_queue.put_dropping if cfg.dhcp_servers.enabled else None,
                 mdns=cfg.discovery.mdns, ssdp=cfg.discovery.ssdp,
@@ -809,7 +848,7 @@ def monitor(
         stats.set_inventory_counts(known=known, review=review)
 
     def _loop() -> None:
-        nonlocal net
+        nonlocal net, subnet_by_iface
         last_sweep = 0.0
         last_stats_refresh = 0.0
         if use_live:
@@ -841,7 +880,9 @@ def monitor(
                 device, event_type, findings = process_sighting(
                     mac=sighting.mac, ip=sighting.ip, seen_at=sighting.seen_at,
                     store=store, allowlist=allowlist, signatures=signatures, cfg=cfg,
-                    hostname_hint=sighting.hostname, interface=iface, subnet=net,
+                    hostname_hint=sighting.hostname,
+                    interface=sighting.interface or iface,
+                    subnet=subnet_by_iface.get(sighting.interface) if multi else net,
                     source=sighting.source,
                 )
                 stats.record_event(device.mac, event_type)
@@ -927,7 +968,7 @@ def monitor(
                 # from the database on every finding via filter_snoozed.
                 try:
                     allowlist_reloaded = Allowlist.load(cfg.resolved_allowlist_file())
-                    apply_self_trust(allowlist_reloaded, interface=iface)
+                    apply_self_trust(allowlist_reloaded, interface=interfaces or None)
                     allowlist.entries[:] = allowlist_reloaded.entries
                     allowlist.path = allowlist_reloaded.path
                 except Exception as exc:  # noqa: BLE001 - a bad edit must not crash monitoring
@@ -941,12 +982,17 @@ def monitor(
                     # scan.active_scan_timeout_seconds (doubled with IPv6)
                     # and would otherwise look like nothing is happening.
                     typer.echo("scanning...")
-                result = run_active_sweep(cfg, store, allowlist, signatures, interface=iface, subnet=net)
-                # Keep using the just-resolved subnet for passive sightings
+                result = _run_sweep(cfg, store, allowlist, signatures, interfaces, subnet=net)
+                # Keep using the just-resolved subnet(s) for passive sightings
                 # drained between now and the next sweep, so their coverage
                 # provenance (see DeviceStore.observe) matches what this
                 # sweep actually covered rather than staying unresolved.
-                net = result.subnet or net
+                if multi:
+                    subnet_by_iface = {
+                        name: scanner.local_subnet(name) or subnet_by_iface.get(name) for name in interfaces
+                    }
+                else:
+                    net = result.subnet or net
                 last_sweep = now
                 stats.record_sweep_end(ok=not result.errors, now_monotonic=time.monotonic())
                 event_type_by_mac = {e.mac: e.event_type for e in result.events}
@@ -1053,7 +1099,7 @@ def digest(
     since_dt = until - timedelta(seconds=duration_seconds)
 
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    apply_self_trust(allowlist, interface=cfg.scan.interface)
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
     signatures = SignatureSet.load(cfg.rogue_signatures_file) if verbose else None
     portal_url = web.build_portal_url(cfg)
     monitor_running = monitor_status.is_running()
@@ -1440,7 +1486,7 @@ def _list_devices(
 
     cfg = _load_config(config)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    apply_self_trust(allowlist, interface=cfg.scan.interface)
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
     now = utcnow()
 
     with _open_store(cfg.resolved_db_path()) as store:
@@ -1489,7 +1535,7 @@ def _delete_new_offline_devices(*, config: Optional[Path], yes: bool) -> None:
 
     cfg = _load_config(config)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    apply_self_trust(allowlist, interface=cfg.scan.interface)
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
 
     with _open_store(cfg.resolved_db_path()) as store:
         inventory = build_inventory(store, allowlist)
@@ -1749,7 +1795,7 @@ def device(
 
     since_dt = _parse_since(since)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    apply_self_trust(allowlist, interface=cfg.scan.interface)
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
     now = utcnow()
 
     with _open_store(cfg.resolved_db_path()) as store:
@@ -1838,7 +1884,7 @@ def inspect(
 
     cfg = _load_config(config)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
-    apply_self_trust(allowlist, interface=cfg.scan.interface)
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
 
     with _open_store(cfg.resolved_db_path()) as store:
         dev = build_device(store, allowlist, norm_mac)
@@ -1900,7 +1946,7 @@ def _run_interactive_review(cfg: Config) -> None:
         # itself (the one .save() is called on below) stays exactly what
         # was on disk plus whatever the operator explicitly chooses here.
         display_allowlist = Allowlist(list(allowlist.entries), allowlist_path)
-        apply_self_trust(display_allowlist, interface=cfg.scan.interface)
+        apply_self_trust(display_allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
 
         # A stable snapshot taken once at the start - a decision made on one
         # device (trust/snooze/investigate) never reshuffles or reintroduces

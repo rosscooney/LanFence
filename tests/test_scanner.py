@@ -304,6 +304,49 @@ def test_passive_sniff_dispatches_arp_and_ndp_sightings(monkeypatch):
     assert [s.source for s in sightings] == ["arp", "ipv6_nd"]
 
 
+
+def test_passive_sniff_passes_interface_list_straight_to_scapy(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+    monkeypatch.setattr(scapy_module, "sniff", lambda **kwargs: captured.update(kwargs))
+    scanner.passive_sniff(on_sighting=lambda s: None, interface=["eth0", "eth0.10"])
+    assert captured["iface"] == ["eth0", "eth0.10"]
+
+
+def test_passive_sniff_tags_sightings_with_receiving_interface_when_listening_on_several(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+    monkeypatch.setattr(scapy_module, "sniff", lambda **kwargs: captured.update(kwargs))
+    sightings = []
+    scanner.passive_sniff(on_sighting=sightings.append, interface=["eth0", "eth0.10"])
+
+    packet = scapy_module.Ether(src="aa:bb:cc:dd:ee:ff") / scapy_module.ARP(
+        op=2, hwsrc="aa:bb:cc:dd:ee:ff", psrc="10.0.10.5"
+    )
+    packet.sniffed_on = "eth0.10"
+    captured["prn"](packet)
+
+    assert [(s.mac, s.interface) for s in sightings] == [("aa:bb:cc:dd:ee:ff", "eth0.10")]
+
+
+def test_passive_sniff_leaves_sighting_interface_unset_for_a_single_interface(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+    monkeypatch.setattr(scapy_module, "sniff", lambda **kwargs: captured.update(kwargs))
+    sightings = []
+    scanner.passive_sniff(on_sighting=sightings.append, interface="eth0")
+
+    packet = scapy_module.Ether(src="aa:bb:cc:dd:ee:ff") / scapy_module.ARP(
+        op=2, hwsrc="aa:bb:cc:dd:ee:ff", psrc="10.0.0.5"
+    )
+    packet.sniffed_on = "eth0"
+    captured["prn"](packet)
+
+    assert sightings[0].interface is None
+
 def _dhcp_packet(*, chaddr_mac="aa:bb:cc:dd:ee:ff", options):
     from scapy.layers.dhcp import DHCP, BOOTP
     from scapy.layers.inet import IP, UDP
@@ -464,6 +507,25 @@ def _sniff_dhcp_server(monkeypatch, **passive_sniff_kwargs):
     )
     return captured["prn"], client_sightings, server_sightings
 
+
+
+def test_passive_sniff_dhcp_server_sighting_records_receiving_interface_in_list_mode(monkeypatch):
+    import scapy.all as scapy_module
+
+    captured = {}
+    monkeypatch.setattr(scapy_module, "sniff", lambda **kwargs: captured.update(kwargs))
+    servers = []
+    scanner.passive_sniff(
+        on_sighting=lambda s: None, on_dhcp_server=servers.append, interface=["eth0", "eth0.20"],
+    )
+    packet = _dhcp_reply_packet(
+        yiaddr="192.168.20.50", xid=1,
+        options=[("message-type", "offer"), ("server_id", "192.168.20.1"), "end"],
+    )
+    packet.sniffed_on = "eth0.20"
+    captured["prn"](packet)
+
+    assert [s.interface for s in servers] == ["eth0.20"]
 
 def test_passive_sniff_dispatches_dhcp_offer_as_server_sighting(monkeypatch):
     handler, clients, servers = _sniff_dhcp_server(monkeypatch)
