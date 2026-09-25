@@ -66,6 +66,16 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from lanfence import branding
 from lanfence.allowlist import Allowlist
+from lanfence.baseline import (
+    accept_pending,
+    assess_device,
+    maturity,
+    reassess_device,
+    reset_baseline,
+    review_change,
+    set_excluded_signals,
+)
+from lanfence.changes import day_heading, describe, format_time, service_label, significance_at_least
 from lanfence.config import Config, expand_operator_path
 from lanfence.db import DeviceStore
 from lanfence.device_metadata import METADATA_LIMITS, validate_metadata_value
@@ -74,7 +84,19 @@ from lanfence.engine import apply_self_trust, build_inventory, is_review_needed
 from lanfence.fingerprint import SignatureSet
 from lanfence.identity import IdentityRuleSet
 from lanfence.logging_config import get_logger
-from lanfence.models import ASSET_TYPES, DEVICE_CATEGORIES, Device, format_datetime, utcnow
+from lanfence.models import (
+    ASSET_TYPES,
+    CHANGE_TYPES,
+    DEVICE_CATEGORIES,
+    EXCLUDABLE_SIGNALS,
+    SIGNIFICANCES,
+    ChangeEvent,
+    Device,
+    RiskAssessment,
+    format_datetime,
+    utcnow,
+)
+from lanfence.policy import Policy, effective_policies
 from lanfence.netutil import normalize_mac
 
 log = get_logger("web")
@@ -700,14 +722,32 @@ footer.site {
   color: var(--muted); font-size: 0.85rem;
 }
 footer.site a { color: var(--muted); }
+.site-nav { display: flex; align-items: center; gap: 1.1rem; }
+.site-nav a { color: var(--text); font-weight: 600; }
+.sig { display: inline-block; padding: 0.1em 0.5em; border-radius: 999px; font-size: 0.75em; font-weight: 700;
+  letter-spacing: 0.03em; }
+.sig--info { background: rgba(148,163,184,0.15); color: var(--muted); }
+.sig--low, .sig--moderate { background: rgba(56,189,248,0.15); color: var(--accent-2); }
+.sig--medium { background: rgba(251,191,36,0.15); color: #fbbf24; }
+.sig--high { background: rgba(248,113,113,0.18); color: #f87171; }
+.sig--critical { background: #b91c1c; color: #fff; }
+.change-row { display: grid; grid-template-columns: 4rem 1fr auto; gap: 0.3rem 1rem; padding: 0.7rem 0;
+  border-bottom: 1px solid var(--border); }
+.change-row:last-child { border-bottom: none; }
+.change-when { color: var(--muted); font-variant-numeric: tabular-nums; }
+.change-state { color: var(--muted); font-size: 0.85em; }
+.muted-row { opacity: 0.6; }
+.button-row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+details > summary { cursor: pointer; color: var(--accent-2); }
 footer.site a:hover { color: var(--text); }
 """
 
 
 def _page(*, title: str, body: str, authed: bool) -> bytes:
     nav = (
+        '<nav class="site-nav"><a href="/">Devices</a><a href="/changes">What Changed?</a>'
         '<form method="post" action="/logout" style="margin:0">'
-        '<button class="btn btn--ghost" type="submit">Log out</button></form>'
+        '<button class="btn btn--ghost" type="submit">Log out</button></form></nav>'
         if authed else ""
     )
     html_doc = f"""<!doctype html>
@@ -1036,6 +1076,278 @@ def _render_network_overview(dossiers: list[DeviceDossier], *, now: datetime) ->
 """
 
 
+# --- What Changed? --------------------------------------------------------
+
+_SINCE_CHOICES: dict[str, timedelta | None] = {
+    "24h": timedelta(days=1), "7d": timedelta(days=7), "30d": timedelta(days=30), "all": None,
+}
+_CHANGE_FILTER_PARAMS = ("since", "mac", "severity", "upto", "review", "trust", "category")
+_REVIEW_FILTERS = {
+    "": "Any", "attention": "Needs attention", "unreviewed": "Unreviewed", "investigating": "Investigating",
+    "snoozed": "Snoozed", "reviewed": "Reviewed", "accepted": "Accepted",
+}
+#: Change types that mean a device *behaved* differently from its baseline -
+#: the "changed behaviour" count on the dashboard.
+_BEHAVIOUR_CHANGES = (
+    "service_new", "service_removed", "mdns_service_new", "mdns_service_removed", "ssdp_service_new",
+    "ssdp_service_removed", "identity_changed", "hostname_changed", "ipv6_prefix_new",
+)
+_SERVICE_CHANGES = (
+    "service_new", "service_removed", "mdns_service_new", "mdns_service_removed", "ssdp_service_new",
+    "ssdp_service_removed",
+)
+_MAX_LISTED_CHANGES = 500
+
+
+def _sig_badge(level: str) -> str:
+    return f'<span class="sig sig--{html.escape(level)}">{html.escape(level.upper())}</span>'
+
+
+def _parse_change_filters(query: dict[str, list[str]]) -> dict[str, object]:
+    filters: dict[str, object] = {name: query.get(name, [""])[0] for name in _CHANGE_FILTER_PARAMS}
+    if filters["since"] not in _SINCE_CHOICES:
+        filters["since"] = "7d"
+    filters["types"] = [t for t in query.get("type", []) if t in CHANGE_TYPES]
+    return filters
+
+
+def _change_query_string(filters: dict[str, object]) -> str:
+    parts = [f"{name}={quote(str(filters[name]))}" for name in _CHANGE_FILTER_PARAMS if filters.get(name)]
+    parts += [f"type={quote(t)}" for t in filters.get("types", [])]
+    return "&amp;".join(parts)
+
+
+@dataclass(frozen=True)
+class _DeviceSummary:
+    label: str
+    trusted: bool
+    category: str
+
+
+def _device_summaries(store: DeviceStore, allowlist: Allowlist) -> dict[str, _DeviceSummary]:
+    """Label, trust and category for every device - cheap: category comes
+    from each baseline's last-known identity (or the operator's override),
+    not a fresh identity inference per device."""
+
+    baselines = store.all_baselines()
+    out = {}
+    for device in build_inventory(store, allowlist):
+        override = device.metadata.category_override if device.metadata else None
+        baseline = baselines.get(device.mac)
+        category = override or (baseline.identity_category if baseline else None) or "Unknown"
+        out[device.mac] = _DeviceSummary(
+            label=device.allowlist_name or device.hostname or device.mac, trusted=device.allowlisted,
+            category=category,
+        )
+    return out
+
+
+def _filter_changes(
+    events: list[ChangeEvent], filters: dict[str, object], devices: dict[str, _DeviceSummary], *, now: datetime,
+) -> list[ChangeEvent]:
+    out = []
+    for event in events:
+        device = devices.get(event.mac) if event.mac else None
+        if filters["severity"] and not significance_at_least(event.significance, str(filters["severity"])):
+            continue
+        if filters["upto"] and significance_at_least(event.significance, str(filters["upto"])) and (
+            event.significance != filters["upto"]
+        ):
+            continue
+        review = filters["review"]
+        if review == "attention" and not event.needs_attention(now=now):
+            continue
+        if review and review != "attention" and event.review_state != review:
+            continue
+        if filters["trust"] in ("trusted", "untrusted"):
+            if device is None or device.trusted != (filters["trust"] == "trusted"):
+                continue
+        if filters["category"] and (device is None or device.category != filters["category"]):
+            continue
+        out.append(event)
+    return out
+
+
+def _change_subject_label(event: ChangeEvent, devices: dict[str, _DeviceSummary]) -> str:
+    if event.mac:
+        device = devices.get(event.mac)
+        return device.label if device else event.mac
+    return event.subject_id or "Network"
+
+
+def _render_changes_page(
+    events: list[ChangeEvent], filters: dict[str, object], devices: dict[str, _DeviceSummary], *, now: datetime,
+) -> str:
+    def _option(value: str, current: object, label: str | None = None) -> str:
+        selected = " selected" if value == current else ""
+        return f'<option value="{html.escape(value)}"{selected}>{html.escape(label or value or "Any")}</option>'
+
+    since_options = "".join(_option(v, filters["since"], {"24h": "Last 24 hours", "7d": "Last 7 days",
+                                                          "30d": "Last 30 days", "all": "Everything kept"}[v])
+                            for v in _SINCE_CHOICES)
+    device_options = _option("", filters["mac"]) + "".join(
+        _option(mac, filters["mac"], summary.label) for mac, summary in sorted(devices.items(), key=lambda kv: kv[1].label)
+    )
+    current_type = filters["types"][0] if len(filters["types"]) == 1 else ""
+    type_options = _option("", current_type) + "".join(_option(t, current_type, t.replace("_", " ")) for t in CHANGE_TYPES)
+    severity_options = _option("", filters["severity"]) + "".join(
+        _option(s, filters["severity"], f"{s.upper()} and above") for s in SIGNIFICANCES
+    )
+    review_options = "".join(_option(k, filters["review"], v) for k, v in _REVIEW_FILTERS.items())
+    trust_options = "".join(_option(v, filters["trust"], v or "Any") for v in ("", "trusted", "untrusted"))
+    category_options = "".join(_option(v, filters["category"], v or "Any") for v in ("", *DEVICE_CATEGORIES))
+
+    if not events:
+        listing = '<p class="muted">Nothing changed that matches - LAN Fence stays quiet when nothing meaningful happens.</p>'
+    else:
+        listing = ""
+        heading = None
+        for event in events[:_MAX_LISTED_CHANGES]:
+            day = day_heading(event.occurred_at, now=now)
+            if day != heading:
+                listing += ("</div>" if heading is not None else "") + f'<h2 style="margin-top:1rem">{html.escape(day)}</h2><div>'
+                heading = day
+            text = describe(event)
+            state = [] if event.review_state == "unreviewed" else [event.review_state]
+            if event.alerted_at:
+                state.append("alert sent")
+            if event.suppressed:
+                state.append("excluded from alerting")
+            muted = " muted-row" if event.suppressed or event.review_state in ("reviewed", "accepted") else ""
+            listing += (
+                f'<div class="change-row{muted}">'
+                f'<div class="change-when">{html.escape(format_time(event.occurred_at))}</div>'
+                f'<div><a href="/changes/{event.id}"><strong>{html.escape(_change_subject_label(event, devices))}</strong></a>'
+                f'<br>{html.escape(text.title)}'
+                + (f'<br><span class="change-state">{html.escape(", ".join(state))}</span>' if state else "")
+                + f'</div><div>{_sig_badge(event.significance)}</div></div>'
+            )
+        listing += "</div>"
+        if len(events) > _MAX_LISTED_CHANGES:
+            listing += f'<p class="muted">Showing the latest {_MAX_LISTED_CHANGES} of {len(events)} - narrow the filters to see more.</p>'
+
+    return f"""
+<h1>What Changed?</h1>
+<div class="panel">
+<form class="stack" method="get" action="/changes" style="flex-direction:row;flex-wrap:wrap;gap:0.75rem;align-items:end;max-width:none">
+<div><label for="since">When</label><select id="since" name="since">{since_options}</select></div>
+<div><label for="mac">Device</label><select id="mac" name="mac">{device_options}</select></div>
+<div><label for="type">Change</label><select id="type" name="type">{type_options}</select></div>
+<div><label for="severity">Severity</label><select id="severity" name="severity">{severity_options}</select></div>
+<div><label for="review">Review</label><select id="review" name="review">{review_options}</select></div>
+<div><label for="trust">Trust</label><select id="trust" name="trust">{trust_options}</select></div>
+<div><label for="category">Category</label><select id="category" name="category">{category_options}</select></div>
+<button class="btn" type="submit">Filter</button>
+<a class="btn btn--ghost" href="/changes">Clear</a>
+</form>
+</div>
+<div class="panel">
+{listing}
+</div>
+"""
+
+
+def _risk_panel_html(assessment: RiskAssessment | None, *, title: str = "Risk") -> str:
+    if assessment is None:
+        return f"<h2>{html.escape(title)}</h2><p class=\"muted\">Not assessed yet - it's worked out on each scan or monitor sweep.</p>"
+    rows = "".join(
+        f"<li><strong>{c.points:+d}</strong>&nbsp; {html.escape(c.label)}</li>" for c in assessment.contributions
+    ) or '<li class="muted">Nothing raises or lowers this device\'s risk.</li>'
+    return f"""
+<h2>{html.escape(title)}</h2>
+<p><strong>{assessment.score} / 100</strong> {_sig_badge(assessment.level)}</p>
+<details><summary>Why this risk?</summary><ul>{rows}</ul></details>
+<p><strong>Recommended action:</strong> {html.escape(assessment.recommendation)}</p>
+<p class="muted">A prioritisation aid, not a verdict - and separate from how sure LAN Fence is about what the device is.</p>
+"""
+
+
+def _render_change_detail(
+    event: ChangeEvent,
+    *,
+    subject: str,
+    risk: RiskAssessment | None,
+    policy: Policy | None,
+    now: datetime,
+    message: str | None = None,
+    error: str | None = None,
+) -> str:
+    text = describe(event)
+    day = day_heading(event.occurred_at, now=now)
+    when = f"{'today' if day == 'Today' else 'yesterday' if day == 'Yesterday' else day} at {format_time(event.occurred_at)}"
+    details = "".join(f"<p>{html.escape(line)}</p>" for line in text.details)
+    if event.change_type == "risk_changed":
+        risk_block = ""
+        contributions = event.current.get("contributions") or []
+        if contributions:
+            rows = "".join(f"<li><strong>{int(c['points']):+d}</strong>&nbsp; {html.escape(str(c['label']))}</li>"
+                           for c in contributions)
+            risk_block = f"<details open><summary>Why?</summary><ul>{rows}</ul></details>"
+    else:
+        risk_block = _risk_panel_html(risk, title="This device's risk now") if event.mac else ""
+    if policy is not None and event.alerted_at:
+        policy_line = (f"Alert sent {html.escape(format_datetime(event.alerted_at))} by policy "
+                       f"<strong>{html.escape(policy.id)}</strong> ({html.escape(policy.description)}).")
+    elif policy is not None:
+        how = {"digest": "included in the digest", "none": "recorded only"}.get(policy.action, "no alert was needed")
+        policy_line = f"Matched policy <strong>{html.escape(policy.id)}</strong> - {how}."
+    elif event.policy_id:
+        policy_line = f"Matched policy <strong>{html.escape(event.policy_id)}</strong> (no longer configured)."
+    else:
+        policy_line = "No alert policy matched - recorded for review only."
+    technical_rows = "".join(
+        f"<tr><td>{html.escape(key)}</td><td>{html.escape(str(event.previous.get(key, '-')))}</td>"
+        f"<td>{html.escape(str(event.current.get(key, '-')))}</td></tr>"
+        for key in sorted(set(event.previous) | set(event.current)) if key != "contributions"
+    )
+    evidence = "".join(f"<li>{html.escape(item)}</li>" for item in event.evidence)
+    review = event.review_state + (
+        f" until {format_datetime(event.snoozed_until)}" if event.review_state == "snoozed" and event.snoozed_until
+        else ""
+    )
+    device_link = f' &middot; <a href="/device/{html.escape(event.mac)}">Device details</a>' if event.mac else ""
+    note = html.escape(event.review_note or "")
+    return f"""
+<p><a href="/changes">&larr; What Changed?</a>{device_link}</p>
+<h1>{html.escape(subject)}</h1>
+{_flash(message)}
+{_flash(error, error=True)}
+<div class="panel">
+<p class="muted">Something changed {html.escape(when)}.</p>
+<h2>{html.escape(text.title)} {_sig_badge(event.significance)}</h2>
+{details}
+{'<p class="muted">This signal is excluded from alerting for this device; kept as history.</p>' if event.suppressed else ''}
+<p>{policy_line}</p>
+<details><summary>Technical detail</summary>
+<table><thead><tr><th>Field</th><th>Before</th><th>After</th></tr></thead><tbody>{technical_rows}</tbody></table>
+<p class="muted">Observed by: {html.escape(event.source)}</p>
+{f'<ul>{evidence}</ul>' if evidence else ''}
+</details>
+</div>
+{f'<div class="panel">{risk_block}</div>' if risk_block else ''}
+<div class="panel">
+<h2>What now?</h2>
+<p>Review: <strong>{html.escape(review)}</strong></p>
+<form method="post" action="/changes/{event.id}" class="stack" style="max-width:none">
+<div class="button-row">
+<button class="btn" name="action" value="investigating" type="submit">Investigate</button>
+<button class="btn" name="action" value="accepted" type="submit">Accept as expected</button>
+<button class="btn btn--ghost" name="action" value="snooze_1d" type="submit">Snooze a day</button>
+<button class="btn btn--ghost" name="action" value="snooze_7d" type="submit">Snooze a week</button>
+<button class="btn btn--ghost" name="action" value="reviewed" type="submit">Mark reviewed</button>
+{'<button class="btn btn--ghost" name="action" value="unreviewed" type="submit">Reopen</button>' if event.review_state != 'unreviewed' else ''}
+</div>
+<div>
+<label for="note">Note</label>
+<input type="text" id="note" name="note" value="{note}" maxlength="2000">
+</div>
+<div><button class="btn btn--ghost" name="action" value="note" type="submit">Save note</button></div>
+</form>
+<p class="muted">Accepting adds this to the device's expected baseline; the change itself stays in history.</p>
+</div>
+"""
+
+
 def _flash(message: str | None, *, error: bool = False) -> str:
     if not message:
         return ""
@@ -1203,9 +1515,108 @@ still be a risk, and an unidentified one can be perfectly safe.</p>
 """
 
 
+@dataclass(frozen=True)
+class _ChangeContext:
+    """Know When It Changes data for one device's page."""
+
+    risk: RiskAssessment | None
+    baseline: object | None
+    maturity: str
+    items: list
+    recent: list[ChangeEvent]
+
+
+def _changes_section_html(mac: str, ctx: _ChangeContext, *, now: datetime) -> str:
+    rows = "".join(
+        f'<div class="change-row"><div class="change-when">{html.escape(format_time(e.occurred_at))}</div>'
+        f'<div><a href="/changes/{e.id}">{html.escape(describe(e).title)}</a>'
+        f'<br><span class="change-state">{html.escape(day_heading(e.occurred_at, now=now))}'
+        f'{"" if e.review_state == "unreviewed" else " &middot; " + html.escape(e.review_state)}</span></div>'
+        f"<div>{_sig_badge(e.significance)}</div></div>"
+        for e in ctx.recent
+    ) or '<p class="muted">No changes recorded for this device.</p>'
+    return f"""
+<h2>Changes</h2>
+{rows}
+<p><a href="/changes?mac={quote(mac)}&amp;since=all">All changes for this device &rarr;</a></p>
+"""
+
+
+def _services_section_html(ctx: _ChangeContext) -> str:
+    services = [i for i in ctx.items if i.signal in ("port", "mdns", "ssdp")]
+    if not services:
+        return ('<h2>Services</h2><p class="muted">None observed yet. Advertised services are learned passively; '
+                "open ports only appear after an explicit <code>lanfence inspect</code>.</p>")
+    event_by_item = {(e.signal, e.subject): e for e in reversed(ctx.recent) if e.signal}
+
+    def _state(item) -> str:
+        if not item.present:
+            return "No longer seen"
+        if not item.in_baseline:
+            event = event_by_item.get((item.signal, item.value))
+            link = f' - <a href="/changes/{event.id}">review</a>' if event else ""
+            return f"<strong>New</strong> - pending review{link}"
+        return "Accepted by you" if item.origin == "accepted" else "Expected"
+
+    order = {False: 0, True: 1}
+    rows = "".join(
+        f"<tr><td>{html.escape(service_label(i.signal, i.value))}</td><td>{_state(i)}</td></tr>"
+        for i in sorted(services, key=lambda i: (order[i.in_baseline and i.present], service_label(i.signal, i.value)))
+    )
+    return f"""
+<h2>Services</h2>
+<table><thead><tr><th>Service</th><th>State</th></tr></thead><tbody>{rows}</tbody></table>
+"""
+
+
+def _baseline_section_html(mac: str, ctx: _ChangeContext) -> str:
+    baseline = ctx.baseline
+    if baseline is None:
+        return '<h2>Baseline</h2><p class="muted">Not started yet - it begins on the next scan or monitor sweep.</p>'
+    explain = {
+        "learning": "Still learning what's normal. Ordinary new services are added quietly; remote-administration "
+                    "services always wait for your approval.",
+        "established": "Established - anything new is flagged for you to accept or investigate. Time alone never "
+                       "makes a change trusted.",
+        "stale": "Stale - this device hasn't been seen for a long time. Its baseline is kept for when it returns.",
+    }.get(ctx.maturity, "")
+    established = (f"<br>Established {html.escape(format_datetime(baseline.established_at))}"
+                   if baseline.established_at else "")
+    pending = sum(1 for i in ctx.items if not i.in_baseline and i.present)
+    checkboxes = "".join(
+        f'<label style="display:inline-block;margin-right:1rem"><input type="checkbox" name="exclude_{s}" value="1"'
+        f'{" checked" if s in baseline.excluded_signals else ""}> {html.escape(s)}</label>'
+        for s in EXCLUDABLE_SIGNALS
+    )
+    accept_button = (
+        f'<button class="btn" name="action" value="accept_pending" type="submit">Accept all {pending} pending</button>'
+        if pending else ""
+    )
+    return f"""
+<h2>Baseline</h2>
+<p><strong>{html.escape(ctx.maturity.capitalize())}</strong> - learning since
+{html.escape(format_datetime(baseline.started_at))}{established}</p>
+<p class="muted">{html.escape(explain)}</p>
+<details><summary>Manage baseline</summary>
+<form method="post" action="/device/{html.escape(mac)}" class="stack" style="max-width:none">
+<div class="button-row">{accept_button}
+<button class="btn btn--danger" name="action" value="baseline_reset" type="submit"
+  onclick="return confirm('Forget what is normal for this device and learn it again? Its change history is kept.');">Reset and relearn</button>
+</div>
+</form>
+<form method="post" action="/device/{html.escape(mac)}" class="stack" style="max-width:none;margin-top:1rem">
+<input type="hidden" name="action" value="baseline_exclude">
+<div><label>Don't alert on changes to (still kept as history):</label>{checkboxes}</div>
+<div><button class="btn btn--ghost" type="submit">Save</button></div>
+</form>
+</details>
+"""
+
+
 def _render_device_detail(
     dossier: DeviceDossier, *, message: str | None = None, error: str | None = None,
-    offline_grace_seconds: float | None = None,
+    offline_grace_seconds: float | None = None, changes: _ChangeContext | None = None,
+    now: datetime | None = None,
 ) -> str:
     device = dossier.device
     metadata = device.metadata
@@ -1256,6 +1667,18 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
         "category_override", "Category (override)", _value("category_override"), DEVICE_CATEGORIES
     )
 
+    change_sections = ""
+    if changes is not None:
+        now = now or utcnow()
+        change_sections = "".join(
+            f'<div class="panel">{section}</div>' for section in (
+                _risk_panel_html(changes.risk),
+                _changes_section_html(device.mac, changes, now=now),
+                _services_section_html(changes),
+                _baseline_section_html(device.mac, changes),
+            )
+        )
+
     body = f"""
 <p><a href="/">&larr; All devices</a></p>
 <h1>{html.escape(dossier.label)}</h1>
@@ -1272,6 +1695,7 @@ Trusting it here is the same action as <code>lanfence allow</code>.</p>
 <div class="panel">
 {_identity_section_html(dossier)}
 </div>
+{change_sections}
 <div class="panel">
 {trust_section}
 </div>
@@ -1381,6 +1805,12 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             if path.startswith("/device/"):
                 self._handle_device_get(path[len("/device/"):])
                 return
+            if path == "/changes":
+                self._handle_changes()
+                return
+            if path.startswith("/changes/"):
+                self._handle_change_get(path[len("/changes/"):])
+                return
             self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib method name
@@ -1397,9 +1827,108 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
             if path.startswith("/device/"):
                 self._handle_device_post(path[len("/device/"):])
                 return
+            if path.startswith("/changes/"):
+                self._handle_change_post(path[len("/changes/"):])
+                return
             self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
 
         # --- handlers ------------------------------------------------------
+
+        def _not_found(self) -> None:
+            self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
+
+        def _load_allowlist(self) -> Allowlist:
+            allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
+            apply_self_trust(allowlist, interface=context.cfg.scan.interfaces or context.cfg.scan.interface)
+            return allowlist
+
+        def _handle_changes(self) -> None:
+            filters = _parse_change_filters(parse_qs(urlsplit(self.path).query))
+            now = utcnow()
+            window = _SINCE_CHOICES[str(filters["since"])]
+            mac = None
+            if filters["mac"]:
+                try:
+                    mac = normalize_mac(str(filters["mac"]))
+                except ValueError:
+                    filters["mac"] = ""
+            with DeviceStore(context.cfg.resolved_db_path()) as store:
+                devices = _device_summaries(store, self._load_allowlist())
+                events = store.change_events(
+                    since=now - window if window else None, mac=mac, change_types=filters["types"] or None,
+                )
+            events = _filter_changes(events, filters, devices, now=now)
+            self._send(
+                HTTPStatus.OK,
+                _page(title="What Changed?", body=_render_changes_page(events, filters, devices, now=now), authed=True),
+            )
+
+        def _render_change(self, event_id: int, *, message: str | None = None, error: str | None = None) -> None:
+            now = utcnow()
+            cfg = context.cfg
+            with DeviceStore(cfg.resolved_db_path()) as store:
+                event = store.get_change_event(event_id)
+                if event is None:
+                    self._not_found()
+                    return
+                allowlist = self._load_allowlist()
+                devices = _device_summaries(store, allowlist)
+                risk = assess_device(
+                    store, allowlist, cfg, event.mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+                    identity_rules=IdentityRuleSet.load(cfg.identity_rules_file), now=now,
+                ) if event.mac else None
+            policy = next((p for p in effective_policies(cfg.policies) if p.id == event.policy_id), None)
+            body = _render_change_detail(
+                event, subject=_change_subject_label(event, devices), risk=risk, policy=policy, now=now,
+                message=message, error=error,
+            )
+            self._send(HTTPStatus.OK, _page(title="What Changed?", body=body, authed=True))
+
+        def _handle_change_get(self, raw_id: str) -> None:
+            if not raw_id.isdigit():
+                self._not_found()
+                return
+            self._render_change(int(raw_id))
+
+        def _handle_change_post(self, raw_id: str) -> None:
+            if not raw_id.isdigit():
+                self._not_found()
+                return
+            event_id = int(raw_id)
+            form = self._read_form()
+            action = form.get("action", "")
+            note = form.get("note")
+            actions = {
+                "investigating": ("investigating", None), "accepted": ("accepted", None),
+                "reviewed": ("reviewed", None), "unreviewed": ("unreviewed", None), "note": ("note", None),
+                "snooze_1d": ("snoozed", timedelta(days=1)), "snooze_7d": ("snoozed", timedelta(days=7)),
+            }
+            if action not in actions:
+                self._render_change(event_id, error="Unknown action.")
+                return
+            review_action, snooze_for = actions[action]
+            cfg = context.cfg
+            now = utcnow()
+            with DeviceStore(cfg.resolved_db_path()) as store:
+                updated = review_change(
+                    store, event_id, review_action, now=now, note=note.strip() if note is not None else None,
+                    snooze_for=snooze_for,
+                )
+                if updated is None:
+                    self._not_found()
+                    return
+                if updated.mac:
+                    reassess_device(
+                        store, self._load_allowlist(), cfg, updated.mac,
+                        signatures=SignatureSet.load(cfg.rogue_signatures_file),
+                        identity_rules=IdentityRuleSet.load(cfg.identity_rules_file), now=now,
+                    )
+            messages = {
+                "investigating": "Marked for investigation.", "accepted": "Accepted as expected - the baseline is updated.",
+                "reviewed": "Marked reviewed.", "unreviewed": "Reopened.", "note": "Note saved.",
+                "snooze_1d": "Snoozed for a day.", "snooze_7d": "Snoozed for a week.",
+            }
+            self._render_change(event_id, message=messages[action])
 
         def _handle_index(self) -> None:
             query = parse_qs(urlsplit(self.path).query)
@@ -1442,24 +1971,46 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                 vendor_file=context.cfg.vendor_file,
             )
 
+        def _send_device_page(self, mac: str, *, message: str | None = None, error: str | None = None) -> None:
+            cfg = context.cfg
+            now = utcnow()
+            with DeviceStore(cfg.resolved_db_path()) as store:
+                allowlist = self._load_allowlist()
+                dossier = self._load_dossier(store, allowlist, mac)
+                if dossier is None:
+                    self._not_found()
+                    return
+                baseline = store.get_baseline(mac)
+                changes = _ChangeContext(
+                    risk=assess_device(
+                        store, allowlist, cfg, mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+                        identity_rules=IdentityRuleSet.load(cfg.identity_rules_file), now=now,
+                    ),
+                    baseline=baseline,
+                    maturity=maturity(baseline, last_seen=dossier.device.last_seen, now=now,
+                                      stale_days=cfg.changes.stale_days),
+                    items=store.baseline_items(mac),
+                    recent=store.change_events(mac=mac, limit=8),
+                )
+            self._send(
+                HTTPStatus.OK,
+                _page(
+                    title=dossier.device.allowlist_name or mac,
+                    body=_render_device_detail(
+                        dossier, message=message, error=error, offline_grace_seconds=cfg.scan.offline_grace_seconds,
+                        changes=changes, now=now,
+                    ),
+                    authed=True,
+                ),
+            )
+
         def _handle_device_get(self, raw_mac: str) -> None:
             try:
                 mac = normalize_mac(raw_mac)
             except ValueError:
-                self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
+                self._not_found()
                 return
-            with DeviceStore(context.cfg.resolved_db_path()) as store:
-                allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
-                apply_self_trust(allowlist, interface=context.cfg.scan.interfaces or context.cfg.scan.interface)
-                dossier = self._load_dossier(store, allowlist, mac)
-            if dossier is None:
-                self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
-                return
-            self._send(
-                HTTPStatus.OK,
-                _page(title=dossier.device.allowlist_name or mac, body=_render_device_detail(dossier, offline_grace_seconds=context.cfg.scan.offline_grace_seconds),
-                      authed=True),
-            )
+            self._send_device_page(mac)
 
         def _handle_device_post(self, raw_mac: str) -> None:
             try:
@@ -1508,27 +2059,34 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                             message = "Details saved."
                 except ValueError as exc:
                     error = str(exc)
+            elif action in ("baseline_reset", "accept_pending", "baseline_exclude"):
+                now = utcnow()
+                with DeviceStore(context.cfg.resolved_db_path()) as store:
+                    if store.get_device(mac) is None:
+                        error = "No such device."
+                    elif action == "baseline_reset":
+                        reset_baseline(store, mac, now=now)
+                        message = "Baseline reset - it will be learned again from the next sweep."
+                    elif action == "accept_pending":
+                        count = accept_pending(store, mac, now=now)
+                        message = f"Accepted {count} pending item(s) into the baseline."
+                    else:
+                        chosen = [s for s in EXCLUDABLE_SIGNALS if form.get(f"exclude_{s}")]
+                        if set_excluded_signals(store, mac, chosen, now=now) is None:
+                            error = "No baseline yet - it starts on the next scan or monitor sweep."
+                        else:
+                            message = "Saved."
+                    if error is None and action != "baseline_exclude":
+                        cfg = context.cfg
+                        reassess_device(
+                            store, self._load_allowlist(), cfg, mac,
+                            signatures=SignatureSet.load(cfg.rogue_signatures_file),
+                            identity_rules=IdentityRuleSet.load(cfg.identity_rules_file), now=now,
+                        )
             else:
                 error = "Unknown action."
 
-            with DeviceStore(context.cfg.resolved_db_path()) as store:
-                allowlist = Allowlist.load(context.cfg.resolved_allowlist_file())
-                apply_self_trust(allowlist, interface=context.cfg.scan.interfaces or context.cfg.scan.interface)
-                dossier = self._load_dossier(store, allowlist, mac)
-            if dossier is None:
-                self._send(HTTPStatus.NOT_FOUND, _page(title="Not found", body="<h1>Not found</h1>", authed=True))
-                return
-            self._send(
-                HTTPStatus.OK,
-                _page(
-                    title=dossier.device.allowlist_name or mac,
-                    body=_render_device_detail(
-                        dossier, message=message, error=error,
-                        offline_grace_seconds=context.cfg.scan.offline_grace_seconds,
-                    ),
-                    authed=True,
-                ),
-            )
+            self._send_device_page(mac, message=message, error=error)
 
         def _handle_login(self) -> None:
             source = self.client_address[0]
