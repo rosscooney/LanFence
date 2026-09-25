@@ -1201,6 +1201,7 @@ def digest(
             store, allowlist, since=since_dt, until=until, portal_url=portal_url, monitor_running=monitor_running,
             generated_by_host=generated_by_host, site_name=cfg.site.name, site_location=cfg.site.location,
             resolve_missing_hostnames=cfg.scan.resolve_hostnames, dns_timeout_seconds=cfg.scan.dns_timeout_seconds,
+            policies=cfg.policies,
         )
         events = store.events_since(since_dt) if verbose else []
         devices_by_mac = {d.mac: d for d in store.all_devices()} if verbose else {}

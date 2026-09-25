@@ -43,7 +43,18 @@ from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.engine import build_inventory, enrich_missing_hostnames, is_review_needed
 from lanfence.logging_config import get_logger
-from lanfence.models import Device, Digest, DigestActivity, DigestDeviceEntry, DigestSection, format_datetime
+from lanfence.changes import describe, significance_at_least
+from lanfence.models import (
+    Device,
+    Digest,
+    DigestActivity,
+    DigestChange,
+    DigestDeviceEntry,
+    DigestRiskEntry,
+    DigestSection,
+    format_datetime,
+)
+from lanfence.policy import Policy, effective_policies
 from lanfence.safe_errors import summarize_error
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 from lanfence.web import PORTAL_NOT_RUNNING_NOTE
@@ -106,6 +117,54 @@ def _section(
     return DigestSection(items=items, total_count=len(ordered), omitted_count=0)
 
 
+#: Change types the digest already reports in its own sections/activity
+#: counts, so they aren't listed a second time as changes.
+_COVERED_ELSEWHERE = frozenset({"new_device", "reappeared", "disconnected"})
+
+
+def _changes(
+    store: DeviceStore, by_mac: dict[str, Device], policies: list[Policy], *, since: datetime, until: datetime,
+) -> tuple[list[DigestChange], int]:
+    """The window's significant changes, and how many informational ones
+    there were besides."""
+
+    silenced = {p.id for p in policies if p.action == "none"}
+    significant: list[DigestChange] = []
+    informational = 0
+    for event in store.change_events(since=since, until=until):
+        if event.change_type in _COVERED_ELSEWHERE or event.suppressed or event.policy_id in silenced:
+            continue
+        if not significance_at_least(event.significance, "low"):
+            informational += 1
+            continue
+        device = by_mac.get(event.mac) if event.mac else None
+        significant.append(DigestChange(
+            change_id=event.id, mac=event.mac,
+            device=_device_label(device) if device else (event.mac or event.subject_id or "Network"),
+            title=describe(event).title, significance=event.significance, occurred_at=event.occurred_at,
+            review_state=event.review_state,
+        ))
+    return significant, informational
+
+
+def _high_risk(store: DeviceStore, by_mac: dict[str, Device]) -> list[DigestRiskEntry]:
+    entries = []
+    for mac, risk in store.all_risk().items():
+        device = by_mac.get(mac)
+        if device is None or risk.level not in ("high", "critical"):
+            continue
+        top = next((c.label for c in risk.contributions if c.points > 0), None)
+        entries.append(DigestRiskEntry(
+            mac=mac, device=_device_label(device), score=risk.score, level=risk.level, reason=top,
+            recommendation=risk.recommendation,
+        ))
+    return sorted(entries, key=lambda e: (-e.score, e.mac))
+
+
+def _device_label(device: Device) -> str:
+    return device.allowlist_name or device.hostname or device.mac
+
+
 def build_digest(
     store: DeviceStore,
     allowlist: Allowlist,
@@ -119,6 +178,7 @@ def build_digest(
     site_location: str | None = None,
     resolve_missing_hostnames: bool = False,
     dns_timeout_seconds: float = 1.0,
+    policies: list[Policy] | None = None,
 ) -> Digest:
     """Aggregate one digest for the window ``since``..``until``.
 
@@ -140,6 +200,10 @@ def build_digest(
     lookup for any *online* device that has no hostname yet - see
     :func:`lanfence.engine.enrich_missing_hostnames` for exactly what that
     does and doesn't do.
+
+    ``policies`` (the configured alert policies, or the built-in defaults
+    when ``None``) only decide which changes are left out - those a policy
+    marks "none".
     """
 
     inventory = build_inventory(store, allowlist)
@@ -172,6 +236,8 @@ def build_digest(
         new_device_count=len(new_macs),
     )
 
+    changes, informational = _changes(store, by_mac, effective_policies(policies), since=since, until=until)
+
     return Digest(
         generated_at=until,
         window_start=since,
@@ -183,6 +249,9 @@ def build_digest(
         investigating=_section(investigating),
         missing_always_on=_section(missing_always_on),
         activity=activity,
+        changes=changes,
+        informational_change_count=informational,
+        high_risk=_high_risk(store, by_mac),
         omitted_capabilities=[
             "historical security-finding severity (not persisted; only lifecycle events are)",
             "monitor uptime / alert-delivery health tracking (not persisted)",
@@ -269,7 +338,36 @@ def format_digest_text(digest: Digest) -> str:
     lines += _format_section_plain("Investigating", digest.investigating)
     lines.append("")
     lines += _format_section_plain("Missing always-on devices", digest.missing_always_on)
+    lines.append("")
+    lines += format_changes_plain(digest)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def format_changes_plain(digest: Digest) -> list[str]:
+    """The digest's change and risk sections as plain text - shared with
+    the console renderer in ``lanfence/report.py``."""
+
+    lines = [f"Significant changes ({len(digest.changes)}):"]
+    if not digest.changes:
+        lines.append("  (none)")
+    for change in digest.changes:
+        state = "" if change.review_state == "unreviewed" else f"  [{change.review_state}]"
+        lines.append(
+            f"  - {change.significance.upper():<8} {change.device}: {change.title}"
+            f"  ({format_datetime(change.occurred_at)}){state}"
+        )
+    if digest.informational_change_count:
+        lines.append(f"  Plus {digest.informational_change_count} informational change(s) - see What Changed?")
+    lines.append("")
+    lines.append(f"High risk devices ({len(digest.high_risk)}):")
+    if not digest.high_risk:
+        lines.append("  (none)")
+    for entry in digest.high_risk:
+        reason = f" - {entry.reason}" if entry.reason else ""
+        lines.append(f"  - {entry.level.upper()} {entry.score}/100  {entry.device} ({entry.mac}){reason}")
+        if entry.recommendation:
+            lines.append(f"      Recommended: {entry.recommendation}")
+    return lines
 
 
 #: Inline styles only (no <style> block, no external assets) - many email
@@ -317,6 +415,59 @@ def _html_section_table(title: str, section: DigestSection) -> str:
   </table>
 </td></tr>
 """
+
+
+def _html_panel(title: str, rows: str) -> str:
+    return f"""
+<tr><td style="padding:20px 0 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_EMAIL_PANEL_STYLE}">
+    <tr><td style="font-size:15px;font-weight:700;padding-bottom:4px;">{html.escape(title)}</td></tr>
+    {rows}
+  </table>
+</td></tr>
+"""
+
+
+def _html_row(main: str, detail: str) -> str:
+    return (
+        f'<tr><td style="padding:8px 0;border-top:1px solid {branding.COLORS["border"]};font-size:14px;">'
+        f'{main}<br><span style="{_EMAIL_MUTED_STYLE}font-size:13px;">{detail}</span></td></tr>'
+    )
+
+
+def _html_none() -> str:
+    return f'<tr><td style="padding:8px 0;{_EMAIL_MUTED_STYLE}">none</td></tr>'
+
+
+def _html_changes_table(digest: Digest) -> str:
+    rows = "".join(
+        _html_row(
+            f"<strong>{html.escape(change.significance.upper())}</strong> "
+            f"{html.escape(change.device)}: {html.escape(change.title)}",
+            html.escape(format_datetime(change.occurred_at))
+            + ("" if change.review_state == "unreviewed" else f" &middot; {html.escape(change.review_state)}"),
+        )
+        for change in digest.changes
+    ) or _html_none()
+    if digest.informational_change_count:
+        rows += (
+            f'<tr><td style="padding:8px 0;{_EMAIL_MUTED_STYLE}font-size:13px;">'
+            f"Plus {digest.informational_change_count} informational change(s) - see What Changed?</td></tr>"
+        )
+    return _html_panel(f"Significant changes ({len(digest.changes)})", rows)
+
+
+def _html_risk_table(digest: Digest) -> str:
+    rows = "".join(
+        _html_row(
+            f"<strong>{html.escape(entry.level.upper())} {entry.score}/100</strong> {html.escape(entry.device)} "
+            f'<span style="{_EMAIL_MUTED_STYLE}font-size:12px;">({html.escape(entry.mac)})</span>',
+            html.escape(entry.reason or "")
+            + (f"<br>Recommended: {html.escape(entry.recommendation)}" if entry.recommendation else ""),
+        )
+        for entry in digest.high_risk
+    ) or _html_none()
+    return _html_panel(f"High risk devices ({len(digest.high_risk)})", rows)
 
 
 def format_digest_html(digest: Digest) -> str:
@@ -389,6 +540,8 @@ def format_digest_html(digest: Digest) -> str:
 {_html_section_table("Needs review", digest.needs_review)}
 {_html_section_table("Investigating", digest.investigating)}
 {_html_section_table("Missing always-on devices", digest.missing_always_on)}
+{_html_changes_table(digest)}
+{_html_risk_table(digest)}
 <tr><td style="padding:20px 20px 28px;{_EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
   {branding.FOOTER_HTML}
 </td></tr>
@@ -403,7 +556,8 @@ def _digest_summary_line(digest: Digest) -> str:
     return (
         f"{prefix}LAN Fence digest: {digest.activity.new_device_count} new, "
         f"{digest.needs_review.total_count} need review, "
-        f"{digest.missing_always_on.total_count} always-on device(s) missing"
+        f"{digest.missing_always_on.total_count} always-on device(s) missing, "
+        f"{len(digest.changes)} significant change(s), {len(digest.high_risk)} high risk"
     )
 
 

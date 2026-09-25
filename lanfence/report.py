@@ -29,7 +29,7 @@ from lanfence.models import (
     ScanResult,
     format_datetime,
 )
-from lanfence.digest import monitor_status_line
+from lanfence.digest import format_changes_plain, monitor_status_line
 from lanfence.web import PORTAL_NOT_RUNNING_NOTE
 
 try:  # rich ships with typer, but keep rendering optional
@@ -1126,6 +1126,8 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
     lines += _section_lines("Investigating", digest.investigating)
     lines.append("")
     lines += _section_lines("Missing always-on devices", digest.missing_always_on)
+    lines.append("")
+    lines += format_changes_plain(digest)
 
     text = "\n".join(lines)
     if plain or not _RICH:
@@ -1184,6 +1186,10 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
         console.print(table)
         if section.omitted_count:
             console.print(f"[dim]... and {section.omitted_count} more[/dim]")
+
+    console.print()
+    for line in format_changes_plain(digest):
+        console.print(_rich_escape(line), highlight=False)
 
     return text
 

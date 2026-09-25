@@ -536,6 +536,30 @@ class DigestActivity(BaseModel):
     new_device_count: int = 0
 
 
+class DigestChange(BaseModel):
+    """One significant change in the digest window - see
+    :mod:`lanfence.changes` for the wording."""
+
+    change_id: int | None = None
+    mac: str | None = None
+    device: str
+    title: str
+    significance: str
+    occurred_at: datetime
+    review_state: str = "unreviewed"
+
+
+class DigestRiskEntry(BaseModel):
+    """A device currently assessed as high or critical risk."""
+
+    mac: str
+    device: str
+    score: int
+    level: str
+    reason: str | None = None
+    recommendation: str = ""
+
+
 class Digest(BaseModel):
     """A structured, side-effect-free summary of recent network activity -
     see :func:`lanfence.digest.build_digest`. Distinguishes activity that
@@ -576,6 +600,16 @@ class Digest(BaseModel):
     investigating: DigestSection = Field(default_factory=DigestSection)
     missing_always_on: DigestSection = Field(default_factory=DigestSection)
     activity: DigestActivity = Field(default_factory=DigestActivity)
+    #: Changes of at least low significance within the window (see
+    #: :mod:`lanfence.baseline`), newest first - excluding new, returning
+    #: and disconnected devices, which the sections above already cover,
+    #: and any change a policy marks "none". Never truncated.
+    changes: list[DigestChange] = Field(default_factory=list)
+    #: How many purely informational changes (address renewals and the
+    #: like) happened in the window - counted, not listed.
+    informational_change_count: int = 0
+    #: Devices currently assessed as high or critical risk, highest first.
+    high_risk: list[DigestRiskEntry] = Field(default_factory=list)
 
     #: Whether `lanfence monitor` is running right now, checked via its own
     #: pidfile (see ``lanfence/monitor_status.py``) - ``None`` if this was
@@ -609,7 +643,8 @@ class Digest(BaseModel):
         are informational only and never affect this - an unchanged
         inventory alone does not make a digest nonempty, and neither does
         the other direction: a big inventory with nothing new or
-        outstanding is still an empty digest.
+        outstanding is still an empty digest. Significant changes and
+        high-risk devices count; informational changes alone don't.
         """
 
         return (
@@ -617,6 +652,8 @@ class Digest(BaseModel):
             and self.needs_review.total_count == 0
             and self.investigating.total_count == 0
             and self.missing_always_on.total_count == 0
+            and not self.changes
+            and not self.high_risk
             and self.activity.reappeared_device_count == 0
             and self.activity.disconnected_device_count == 0
         )

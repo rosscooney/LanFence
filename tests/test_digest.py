@@ -799,3 +799,86 @@ def test_dispatch_digest_unexpected_exception_logs_never_contain_sentinel(tmp_pa
             results = dispatch_digest(digest, cfg, channels=["webhook"])
     assert results == {"webhook": False}
     assert _SENTINEL not in caplog.text
+
+
+# --- Know When It Changes: changes and risk ---------------------------------------
+
+
+def _changes_store(store: DeviceStore, t0: datetime) -> None:
+    from lanfence.models import ChangeEvent, RiskAssessment, RiskContribution
+
+    store.observe(mac="00:11:32:aa:bb:01", ip="10.0.0.5", hostname="diskstation", vendor=None,
+                  seen_at=t0 - timedelta(days=30))
+    for change_type, significance, subject, policy in (
+        ("service_new", "high", "tcp/22", "new-remote-admin-service"),
+        ("ip_changed", "info", "10.0.0.5", None),
+        ("new_device", "high", None, None),  # already in "New devices"
+        ("hostname_changed", "low", "nas", "quiet"),  # silenced by a "none" policy
+    ):
+        store.record_change_event(ChangeEvent(
+            mac="00:11:32:aa:bb:01", change_type=change_type, occurred_at=t0 - timedelta(hours=1),
+            signal="port" if change_type == "service_new" else None, subject=subject, source="test",
+            significance=significance, policy_id=policy,
+        ))
+    store.save_risk("00:11:32:aa:bb:01", RiskAssessment(
+        score=45, level="high", recommendation="Check whether SSH on diskstation was enabled on purpose.",
+        contributions=[RiskContribution(factor="new_admin_service", label="New administrative service: SSH / TCP 22",
+                                        points=25)],
+    ), now=t0)
+
+
+def test_digest_lists_significant_changes_and_counts_informational_ones(tmp_path: Path):
+    from lanfence.policy import Policy
+
+    quiet = Policy(id="quiet", triggers=["hostname_changed"], severity="info", action="none")
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _changes_store(store, t0)
+        digest = build_digest(store, Allowlist.load(None), since=t0 - timedelta(days=1), until=t0,
+                              policies=[quiet])
+
+    assert [c.title for c in digest.changes] == ["New service detected: SSH / TCP 22"]
+    assert digest.changes[0].device == "diskstation"
+    assert digest.informational_change_count == 1
+    assert not digest.is_empty
+
+
+def test_digest_lists_high_risk_devices_with_their_reason(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _changes_store(store, t0)
+        digest = build_digest(store, Allowlist.load(None), since=t0 - timedelta(days=1), until=t0)
+
+    [entry] = digest.high_risk
+    assert (entry.device, entry.score, entry.level) == ("diskstation", 45, "high")
+    assert entry.reason == "New administrative service: SSH / TCP 22"
+
+
+def test_digest_text_and_html_show_changes_and_risk(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        _changes_store(store, t0)
+        digest = build_digest(store, Allowlist.load(None), since=t0 - timedelta(days=1), until=t0)
+
+    text = format_digest_text(digest)
+    assert "Significant changes (2):" in text
+    assert "HIGH     diskstation: New service detected: SSH / TCP 22" in text
+    assert "Plus 1 informational change(s)" in text
+    assert "High risk devices (1):" in text
+    assert "Recommended: Check whether SSH on diskstation was enabled on purpose." in text
+    body = format_digest_html(digest)
+    assert "Significant changes (2)" in body and "High risk devices (1)" in body
+
+
+def test_digest_with_only_informational_changes_is_empty(tmp_path: Path):
+    from lanfence.models import ChangeEvent
+
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        store.record_change_event(ChangeEvent(
+            mac="00:11:32:aa:bb:01", change_type="ip_changed", occurred_at=t0, source="test", significance="info",
+        ))
+        digest = build_digest(store, Allowlist.load(None), since=t0 - timedelta(days=1), until=t0)
+
+    assert digest.informational_change_count == 1
+    assert digest.is_empty
