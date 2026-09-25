@@ -697,8 +697,9 @@ A baseline is in one of three states:
 New and removed services (ports, mDNS, SSDP), a new IPv6 network, IP
 address and hostname changes, identity and trust changes, new, returning
 and disconnected devices, an unapproved DHCP server, an untrusted device
-that stays on the network unreviewed for `changes.unknown_device_minutes`
-(default 60), a trusted device returning after `changes.long_absence_days`
+that arrives and stays on the network unreviewed for
+`changes.unknown_device_minutes` (default 60; devices already there when
+change detection first ran are left to `lanfence review`), a trusted device returning after `changes.long_absence_days`
 (default 14), and a device's risk level rising. Each is recorded once, as
 a structured change event (what, when, which device, before and after,
 evidence, significance, review state), and never again just because the

@@ -329,6 +329,7 @@ def test_trusting_a_device_is_recorded(tmp_path):
 
 def test_unknown_device_present_is_flagged_once_until_cleared(tmp_path):
     with network(tmp_path) as net:
+        net.detect(T0 - timedelta(minutes=1))  # change detection starts before the phone arrives
         net.see(PHONE, T0)
         net.detect(T0)
         net.see(PHONE, T0 + timedelta(minutes=30))
@@ -338,6 +339,17 @@ def test_unknown_device_present_is_flagged_once_until_cleared(tmp_path):
         assert len(flagged) == 1 and flagged[0].significance == "high"
         net.see(PHONE, T0 + timedelta(hours=5))
         assert not [e for e in net.detect(T0 + timedelta(hours=5)) if e.change_type == "unknown_device_present"]
+
+
+def test_devices_present_when_detection_began_are_never_flagged_as_unknown(tmp_path):
+    # An upgrade or a fresh install shouldn't flag every untrusted device
+    # already on the network - that's what `lanfence review` is for.
+    with network(tmp_path) as net:
+        net.see(PHONE, T0 - timedelta(days=30))
+        net.see(PHONE, T0)
+        net.detect(T0)
+        net.see(PHONE, T0 + timedelta(hours=3))
+        assert not [e for e in net.detect(T0 + timedelta(hours=3)) if e.change_type == "unknown_device_present"]
 
 
 # --- lifecycle and network-level changes ---------------------------------------

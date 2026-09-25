@@ -41,9 +41,10 @@ replaying history.
 from __future__ import annotations
 
 import ipaddress
+import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from lanfence.allowlist import Allowlist
 from lanfence.changes import is_admin_service, normalize_mdns_type, port_value, service_label
@@ -140,6 +141,9 @@ class _Context:
     cfg: Config
     now: datetime
     recorded: list[ChangeEvent]
+    #: When change detection first ran on this network - see
+    #: :func:`_watching_since`.
+    watching_since: datetime | None = None
 
     def record(self, event: ChangeEvent, *, excluded: set[str] | frozenset[str] = frozenset()) -> ChangeEvent:
         if event.signal is not None and event.signal in excluded:
@@ -163,7 +167,7 @@ def detect_changes(
 
     if not cfg.changes.enabled:
         return []
-    ctx = _Context(store=store, cfg=cfg, now=now, recorded=[])
+    ctx = _Context(store=store, cfg=cfg, now=now, recorded=[], watching_since=_watching_since(store, now))
     _ingest_lifecycle(ctx, allowlist)
     _ingest_dhcp_servers(ctx)
 
@@ -204,6 +208,20 @@ def detect_changes(
             dhcp_server=device.mac in dhcp_macs,
         )
     return ctx.recorded
+
+
+def _watching_since(store: DeviceStore, now: datetime) -> datetime:
+    """When change detection first ran here (recorded on the first run).
+    Devices already present then are the existing network: like the
+    silently seeded baselines, they never count as unknown devices that
+    turned up and lingered - `lanfence review` is where those get
+    worked through."""
+
+    started = store.get_cursor("watching_since")
+    if started is None:
+        started = math.ceil(now.timestamp())  # whole seconds; round up so nothing already seen is "after"
+        store.set_cursor("watching_since", started)
+    return datetime.fromtimestamp(started, tz=timezone.utc)
 
 
 def _ingest_lifecycle(ctx: _Context, allowlist: Allowlist) -> None:
@@ -416,8 +434,9 @@ def _compare(
         baseline.trusted = trusted
 
     unknown_minutes = (now - device.first_seen).total_seconds() / 60
+    arrived_while_watching = ctx.watching_since is None or device.first_seen > ctx.watching_since
     unknown_present = (
-        not trusted and device.status == "online" and device.review_state == "pending"
+        arrived_while_watching and not trusted and device.status == "online" and device.review_state == "pending"
         and is_review_needed(device, now=now) and unknown_minutes >= cfg.unknown_device_minutes
     )
     if unknown_present and baseline.unknown_present_event_id is None:
