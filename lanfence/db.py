@@ -54,7 +54,10 @@ from lanfence.models import (
     SEVERITIES,
     AddressEvidence,
     AdvertisedService,
+    BaselineItem,
+    ChangeEvent,
     Device,
+    DeviceBaseline,
     DeviceEvent,
     DeviceMetadata,
     DhcpServerRecord,
@@ -64,6 +67,8 @@ from lanfence.models import (
     NameEvidence,
     PresenceState,
     ReviewState,
+    RiskAssessment,
+    RiskContribution,
     Severity,
 )
 from lanfence.netutil import normalize_mac
@@ -312,6 +317,84 @@ CREATE TABLE IF NOT EXISTS device_inspections (
     platform_confidence TEXT,
     platform_reasons TEXT NOT NULL
 );
+
+-- Know When It Changes (see lanfence/baseline.py). One row per structured
+-- change - written only on a state transition, never per observation, and
+-- bounded by DeviceStore's max_change_events / change retention.
+CREATE TABLE IF NOT EXISTS change_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac TEXT,
+    subject_id TEXT,
+    change_type TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    signal TEXT,
+    subject TEXT,
+    previous TEXT NOT NULL DEFAULT '{}',
+    current TEXT NOT NULL DEFAULT '{}',
+    evidence TEXT NOT NULL DEFAULT '[]',
+    source TEXT NOT NULL,
+    significance TEXT NOT NULL,
+    risk_before INTEGER,
+    risk_after INTEGER,
+    suppressed INTEGER NOT NULL DEFAULT 0,
+    review_state TEXT NOT NULL DEFAULT 'unreviewed',
+    review_note TEXT,
+    reviewed_at TEXT,
+    snoozed_until TEXT,
+    policy_id TEXT,
+    alerted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_change_events_time ON change_events (occurred_at);
+CREATE INDEX IF NOT EXISTS idx_change_events_mac ON change_events (mac, occurred_at);
+
+-- What's normal for each device: scalar observations here, set-valued
+-- ones (ports, mDNS/SSDP service types, IPv6 prefixes) in baseline_items.
+CREATE TABLE IF NOT EXISTS device_baselines (
+    mac TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    established_at TEXT,
+    excluded_signals TEXT NOT NULL DEFAULT '[]',
+    ipv4 TEXT,
+    hostname TEXT,
+    identity_category TEXT,
+    identity_manufacturer TEXT,
+    trusted INTEGER NOT NULL DEFAULT 0,
+    inspection_at TEXT,
+    unknown_present_event_id INTEGER,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS baseline_items (
+    mac TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    value TEXT NOT NULL,
+    in_baseline INTEGER NOT NULL,
+    origin TEXT NOT NULL,
+    present INTEGER NOT NULL DEFAULT 1,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    removed_at TEXT,
+    PRIMARY KEY (mac, signal, value)
+);
+
+-- The latest risk assessment per device only; its history is the
+-- risk_changed rows in change_events, not a snapshot per sweep.
+CREATE TABLE IF NOT EXISTS device_risk (
+    mac TEXT PRIMARY KEY,
+    score INTEGER NOT NULL,
+    level TEXT NOT NULL,
+    contributions TEXT NOT NULL,
+    recommendation TEXT NOT NULL DEFAULT '',
+    assessed_at TEXT NOT NULL
+);
+
+-- How far the change detector has read other append-only tables (events,
+-- dhcp_server_findings), so each row becomes at most one change.
+CREATE TABLE IF NOT EXISTS change_cursors (
+    name TEXT PRIMARY KEY,
+    position INTEGER NOT NULL
+);
 """
 
 #: Advertised-service evidence rows older than this, and already
@@ -335,6 +418,11 @@ _DISCOVERY_TABLES_WITH_EXPIRY = (
 _DEFAULT_MAX_EVIDENCE_ROWS_PER_MAC = 100
 _DEFAULT_MAX_DHCP_SERVER_FINDINGS = 5000
 _DEFAULT_MAX_DISCOVERY_ROWS_PER_TABLE = 5000
+_DEFAULT_MAX_CHANGE_EVENTS = 20000
+_DEFAULT_CHANGE_EVENT_RETENTION = timedelta(days=365)
+#: Per-device cap on baseline items - a device advertising an endless
+#: stream of distinct services can't grow the table without bound.
+_MAX_BASELINE_ITEMS_PER_MAC = 200
 
 
 def _iso(dt: datetime) -> str:
@@ -646,6 +734,8 @@ class DeviceStore:
         max_evidence_rows_per_mac: int = _DEFAULT_MAX_EVIDENCE_ROWS_PER_MAC,
         max_dhcp_server_findings: int = _DEFAULT_MAX_DHCP_SERVER_FINDINGS,
         max_discovery_rows_per_table: int = _DEFAULT_MAX_DISCOVERY_ROWS_PER_TABLE,
+        max_change_events: int = _DEFAULT_MAX_CHANGE_EVENTS,
+        change_event_retention: timedelta = _DEFAULT_CHANGE_EVENT_RETENTION,
     ) -> None:
         self.path = Path(path)
         _ensure_secure_directory(self.path.parent)
@@ -657,6 +747,8 @@ class DeviceStore:
         self._max_evidence_rows_per_mac = max(1, max_evidence_rows_per_mac)
         self._max_dhcp_server_findings = max(1, max_dhcp_server_findings)
         self._max_discovery_rows_per_table = max(1, max_discovery_rows_per_table)
+        self._max_change_events = max(1, max_change_events)
+        self._change_event_retention = change_event_retention
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
@@ -1860,6 +1952,8 @@ class DeviceStore:
         self._conn.execute("DELETE FROM device_names")
         self._conn.execute("DELETE FROM device_metadata")
         self._conn.execute("DELETE FROM device_inspections")
+        for table in ("change_events", "device_baselines", "baseline_items", "device_risk", "change_cursors"):
+            self._conn.execute(f"DELETE FROM {table}")
         for table in _DISCOVERY_TABLES_WITH_EXPIRY:
             self._conn.execute(f"DELETE FROM {table}")
         self._conn.commit()
@@ -1875,6 +1969,7 @@ class DeviceStore:
     _PER_DEVICE_TABLES = (
         "events", "alert_log", "device_review", "device_presence",
         "device_addresses", "device_names", "device_metadata", "device_inspections",
+        "change_events", "device_baselines", "baseline_items", "device_risk",
     )
 
     def delete_device(self, mac: str) -> bool:
@@ -2415,3 +2510,336 @@ class DeviceStore:
             services = [s for s in services if s.mac is None]
         services.sort(key=lambda s: (s.protocol, s.service_type, s.identity))
         return services
+
+    # --- Know When It Changes: change events --------------------------
+
+    def record_change_event(self, event: ChangeEvent) -> ChangeEvent:
+        """Store one change and return it with its ``id``. Then applies
+        retention (row cap and age) so the table stays bounded."""
+
+        cursor = self._conn.execute(
+            "INSERT INTO change_events (mac, subject_id, change_type, occurred_at, signal, subject, previous, "
+            "current, evidence, source, significance, risk_before, risk_after, suppressed, review_state, "
+            "review_note, reviewed_at, snoozed_until, policy_id, alerted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.mac, event.subject_id, event.change_type, _iso(event.occurred_at), event.signal,
+                event.subject, json.dumps(event.previous, separators=(",", ":")),
+                json.dumps(event.current, separators=(",", ":")),
+                json.dumps(event.evidence, separators=(",", ":")), event.source, event.significance,
+                event.risk_before, event.risk_after, int(event.suppressed), event.review_state,
+                event.review_note, _iso(event.reviewed_at) if event.reviewed_at else None,
+                _iso(event.snoozed_until) if event.snoozed_until else None, event.policy_id,
+                _iso(event.alerted_at) if event.alerted_at else None,
+            ),
+        )
+        self._conn.execute(
+            "DELETE FROM change_events WHERE occurred_at < ?",
+            (_iso(event.occurred_at - self._change_event_retention),),
+        )
+        self._enforce_row_cap("change_events", self._max_change_events, order_by="id")
+        self._conn.commit()
+        return event.model_copy(update={"id": cursor.lastrowid})
+
+    @staticmethod
+    def _row_to_change_event(row: sqlite3.Row) -> ChangeEvent:
+        def _dt(value: str | None) -> datetime | None:
+            return _parse_dt(value) if value else None
+
+        return ChangeEvent(
+            id=row["id"], mac=row["mac"], subject_id=row["subject_id"], change_type=row["change_type"],
+            occurred_at=_parse_dt(row["occurred_at"]), signal=row["signal"], subject=row["subject"],
+            previous=json.loads(row["previous"]), current=json.loads(row["current"]),
+            evidence=json.loads(row["evidence"]), source=row["source"], significance=row["significance"],
+            risk_before=row["risk_before"], risk_after=row["risk_after"], suppressed=bool(row["suppressed"]),
+            review_state=row["review_state"], review_note=row["review_note"],
+            reviewed_at=_dt(row["reviewed_at"]), snoozed_until=_dt(row["snoozed_until"]),
+            policy_id=row["policy_id"], alerted_at=_dt(row["alerted_at"]),
+        )
+
+    def get_change_event(self, event_id: int) -> ChangeEvent | None:
+        row = self._conn.execute("SELECT * FROM change_events WHERE id = ?", (event_id,)).fetchone()
+        return self._row_to_change_event(row) if row else None
+
+    def change_events(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        mac: str | None = None,
+        change_types: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[ChangeEvent]:
+        """Changes, newest first - an indexed range query. Further
+        filtering (significance, review state, trust, category) is cheap
+        and done by callers on this bounded result."""
+
+        clauses: list[str] = []
+        params: list[object] = []
+        if since is not None:
+            clauses.append("occurred_at >= ?")
+            params.append(_iso(since))
+        if until is not None:
+            clauses.append("occurred_at <= ?")
+            params.append(_iso(until))
+        if mac is not None:
+            clauses.append("mac = ?")
+            params.append(normalize_mac(mac))
+        if change_types:
+            clauses.append(f"change_type IN ({','.join('?' * len(change_types))})")
+            params.extend(change_types)
+        sql = "SELECT * FROM change_events"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY occurred_at DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [self._row_to_change_event(row) for row in self._conn.execute(sql, params).fetchall()]
+
+    def update_change_review(
+        self,
+        event_id: int,
+        *,
+        review_state: str,
+        now: datetime,
+        note: str | None | object = _UNSET,
+        snoozed_until: datetime | None = None,
+    ) -> ChangeEvent | None:
+        """Set one change's review state (``note`` left unchanged unless
+        given). ``None`` if no such change."""
+
+        current = self.get_change_event(event_id)
+        if current is None:
+            return None
+        new_note = current.review_note if note is _UNSET else note
+        self._conn.execute(
+            "UPDATE change_events SET review_state = ?, review_note = ?, reviewed_at = ?, snoozed_until = ? "
+            "WHERE id = ?",
+            (
+                review_state, new_note, _iso(now),
+                _iso(snoozed_until) if snoozed_until else None, event_id,
+            ),
+        )
+        self._conn.commit()
+        return self.get_change_event(event_id)
+
+    def set_change_policy(self, event_id: int, policy_id: str | None, *, alerted_at: datetime | None) -> None:
+        self._conn.execute(
+            "UPDATE change_events SET policy_id = ?, alerted_at = ? WHERE id = ?",
+            (policy_id, _iso(alerted_at) if alerted_at else None, event_id),
+        )
+        self._conn.commit()
+
+    # --- Know When It Changes: cursors over append-only tables ----------
+
+    def get_cursor(self, name: str) -> int | None:
+        row = self._conn.execute("SELECT position FROM change_cursors WHERE name = ?", (name,)).fetchone()
+        return int(row["position"]) if row else None
+
+    def set_cursor(self, name: str, position: int) -> None:
+        self._conn.execute(
+            "INSERT INTO change_cursors (name, position) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET position = excluded.position",
+            (name, position),
+        )
+        self._conn.commit()
+
+    def max_event_id(self) -> int:
+        return int(self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0])
+
+    def events_after_id(self, event_id: int, *, limit: int = 1000) -> list[tuple[int, DeviceEvent]]:
+        """Lifecycle events with ``id > event_id``, oldest first, each with
+        its row id - for the change detector's cursor."""
+
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?", (event_id, limit)
+        ).fetchall()
+        return [
+            (
+                row["id"],
+                DeviceEvent(
+                    mac=row["mac"], event_type=row["event_type"], timestamp=_parse_dt(row["timestamp"]),
+                    ip=row["ip"], hostname=row["hostname"],
+                ),
+            )
+            for row in rows
+        ]
+
+    def last_event_before(self, mac: str, event_id: int, *, event_type: str) -> DeviceEvent | None:
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE mac = ? AND id < ? AND event_type = ? ORDER BY id DESC LIMIT 1",
+            (normalize_mac(mac), event_id, event_type),
+        ).fetchone()
+        if row is None:
+            return None
+        return DeviceEvent(
+            mac=row["mac"], event_type=row["event_type"], timestamp=_parse_dt(row["timestamp"]),
+            ip=row["ip"], hostname=row["hostname"],
+        )
+
+    def max_dhcp_server_finding_id(self) -> int:
+        return int(self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM dhcp_server_findings").fetchone()[0])
+
+    def dhcp_server_findings_after_id(self, finding_id: int, *, limit: int = 1000) -> list[sqlite3.Row]:
+        """Unapproved DHCP-server findings with ``id > finding_id``, oldest
+        first, as raw rows - for the change detector's cursor."""
+
+        return self._conn.execute(
+            "SELECT * FROM dhcp_server_findings WHERE id > ? AND approved_at_observation = 0 "
+            "ORDER BY id ASC LIMIT ?",
+            (finding_id, limit),
+        ).fetchall()
+
+    def dhcp_server_source_macs_since(self, since: datetime) -> set[str]:
+        """MACs that sent an unapproved DHCP server reply since ``since`` -
+        a risk factor for that device (see :mod:`lanfence.risk`)."""
+
+        rows = self._conn.execute(
+            "SELECT DISTINCT source_mac FROM dhcp_server_findings "
+            "WHERE approved_at_observation = 0 AND observed_at >= ? AND source_mac IS NOT NULL",
+            (_iso(since),),
+        ).fetchall()
+        macs = set()
+        for row in rows:
+            try:
+                macs.add(normalize_mac(row["source_mac"]))
+            except ValueError:
+                continue
+        return macs
+
+    # --- Know When It Changes: baselines ---------------------------------
+
+    @staticmethod
+    def _row_to_baseline(row: sqlite3.Row) -> DeviceBaseline:
+        return DeviceBaseline(
+            mac=row["mac"], started_at=_parse_dt(row["started_at"]),
+            established_at=_parse_dt(row["established_at"]) if row["established_at"] else None,
+            excluded_signals=json.loads(row["excluded_signals"]), ipv4=row["ipv4"], hostname=row["hostname"],
+            identity_category=row["identity_category"], identity_manufacturer=row["identity_manufacturer"],
+            trusted=bool(row["trusted"]),
+            inspection_at=_parse_dt(row["inspection_at"]) if row["inspection_at"] else None,
+            unknown_present_event_id=row["unknown_present_event_id"],
+        )
+
+    def get_baseline(self, mac: str) -> DeviceBaseline | None:
+        row = self._conn.execute(
+            "SELECT * FROM device_baselines WHERE mac = ?", (normalize_mac(mac),)
+        ).fetchone()
+        return self._row_to_baseline(row) if row else None
+
+    def all_baselines(self) -> dict[str, DeviceBaseline]:
+        rows = self._conn.execute("SELECT * FROM device_baselines").fetchall()
+        return {row["mac"]: self._row_to_baseline(row) for row in rows}
+
+    def save_baseline(self, baseline: DeviceBaseline, *, now: datetime) -> None:
+        self._conn.execute(
+            "INSERT INTO device_baselines (mac, started_at, established_at, excluded_signals, ipv4, hostname, "
+            "identity_category, identity_manufacturer, trusted, inspection_at, unknown_present_event_id, "
+            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(mac) DO UPDATE SET started_at = excluded.started_at, "
+            "established_at = excluded.established_at, excluded_signals = excluded.excluded_signals, "
+            "ipv4 = excluded.ipv4, hostname = excluded.hostname, "
+            "identity_category = excluded.identity_category, "
+            "identity_manufacturer = excluded.identity_manufacturer, trusted = excluded.trusted, "
+            "inspection_at = excluded.inspection_at, "
+            "unknown_present_event_id = excluded.unknown_present_event_id, updated_at = excluded.updated_at",
+            (
+                normalize_mac(baseline.mac), _iso(baseline.started_at),
+                _iso(baseline.established_at) if baseline.established_at else None,
+                json.dumps(sorted(set(baseline.excluded_signals))), baseline.ipv4, baseline.hostname,
+                baseline.identity_category, baseline.identity_manufacturer, int(baseline.trusted),
+                _iso(baseline.inspection_at) if baseline.inspection_at else None,
+                baseline.unknown_present_event_id, _iso(now),
+            ),
+        )
+        self._conn.commit()
+
+    def delete_baseline(self, mac: str) -> None:
+        """Forget what's normal for ``mac`` (both tables) so it's learned
+        again from scratch. Change history is kept."""
+
+        mac = normalize_mac(mac)
+        self._conn.execute("DELETE FROM device_baselines WHERE mac = ?", (mac,))
+        self._conn.execute("DELETE FROM baseline_items WHERE mac = ?", (mac,))
+        self._conn.commit()
+
+    @staticmethod
+    def _row_to_baseline_item(row: sqlite3.Row) -> BaselineItem:
+        return BaselineItem(
+            mac=row["mac"], signal=row["signal"], value=row["value"], in_baseline=bool(row["in_baseline"]),
+            origin=row["origin"], present=bool(row["present"]), first_seen=_parse_dt(row["first_seen"]),
+            last_seen=_parse_dt(row["last_seen"]),
+            removed_at=_parse_dt(row["removed_at"]) if row["removed_at"] else None,
+        )
+
+    def baseline_items(self, mac: str | None = None) -> list[BaselineItem]:
+        if mac is None:
+            rows = self._conn.execute("SELECT * FROM baseline_items ORDER BY mac, signal, value").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM baseline_items WHERE mac = ? ORDER BY signal, value", (normalize_mac(mac),)
+            ).fetchall()
+        return [self._row_to_baseline_item(row) for row in rows]
+
+    def save_baseline_item(self, item: BaselineItem) -> None:
+        mac = normalize_mac(item.mac)
+        self._conn.execute(
+            "INSERT INTO baseline_items (mac, signal, value, in_baseline, origin, present, first_seen, last_seen, "
+            "removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(mac, signal, value) DO UPDATE SET in_baseline = excluded.in_baseline, "
+            "origin = excluded.origin, present = excluded.present, last_seen = excluded.last_seen, "
+            "removed_at = excluded.removed_at",
+            (
+                mac, item.signal, item.value, int(item.in_baseline), item.origin, int(item.present),
+                _iso(item.first_seen), _iso(item.last_seen), _iso(item.removed_at) if item.removed_at else None,
+            ),
+        )
+        self._conn.execute(
+            "DELETE FROM baseline_items WHERE mac = ? AND rowid NOT IN (SELECT rowid FROM baseline_items "
+            "WHERE mac = ? ORDER BY in_baseline DESC, present DESC, last_seen DESC LIMIT ?)",
+            (mac, mac, _MAX_BASELINE_ITEMS_PER_MAC),
+        )
+        self._conn.commit()
+
+    # --- Know When It Changes: current risk --------------------------------
+
+    @staticmethod
+    def _row_to_risk(row: sqlite3.Row) -> RiskAssessment:
+        return RiskAssessment(
+            score=row["score"], level=row["level"],
+            contributions=[RiskContribution(**c) for c in json.loads(row["contributions"])],
+            recommendation=row["recommendation"], assessed_at=_parse_dt(row["assessed_at"]),
+        )
+
+    def get_risk(self, mac: str) -> RiskAssessment | None:
+        row = self._conn.execute("SELECT * FROM device_risk WHERE mac = ?", (normalize_mac(mac),)).fetchone()
+        return self._row_to_risk(row) if row else None
+
+    def all_risk(self) -> dict[str, RiskAssessment]:
+        return {row["mac"]: self._row_to_risk(row) for row in self._conn.execute("SELECT * FROM device_risk")}
+
+    def save_risk(self, mac: str, assessment: RiskAssessment, *, now: datetime) -> None:
+        self._conn.execute(
+            "INSERT INTO device_risk (mac, score, level, contributions, recommendation, assessed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(mac) DO UPDATE SET score = excluded.score, "
+            "level = excluded.level, contributions = excluded.contributions, "
+            "recommendation = excluded.recommendation, assessed_at = excluded.assessed_at",
+            (
+                normalize_mac(mac), assessment.score, assessment.level,
+                json.dumps([c.model_dump() for c in assessment.contributions], separators=(",", ":")),
+                assessment.recommendation, _iso(now),
+            ),
+        )
+        self._conn.commit()
+
+    def all_inspections(self) -> dict[str, InspectionResult]:
+        return {
+            row["mac"]: InspectionResult(
+                mac=row["mac"], ip=row["ip"], method=row["method"], observed_at=_parse_dt(row["observed_at"]),
+                open_ports=[InspectedPort(**p) for p in json.loads(row["open_ports"])],
+                platform_guess=row["platform_guess"], platform_confidence=row["platform_confidence"],
+                platform_reasons=json.loads(row["platform_reasons"]),
+            )
+            for row in self._conn.execute("SELECT * FROM device_inspections")
+        }

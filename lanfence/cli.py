@@ -708,6 +708,8 @@ def monitor(
         max_evidence_rows_per_mac=cfg.retention.max_evidence_rows_per_mac,
         max_dhcp_server_findings=cfg.retention.max_dhcp_server_findings,
         max_discovery_rows_per_table=cfg.retention.max_discovery_rows_per_table,
+        max_change_events=cfg.retention.max_change_events,
+        change_event_retention=timedelta(days=cfg.retention.change_event_retention_days),
     )
     alert_worker = AlertDeliveryWorker(
         cfg.resolved_db_path(), site_name=cfg.site.name, site_location=cfg.site.location,

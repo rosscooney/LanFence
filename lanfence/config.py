@@ -537,12 +537,53 @@ class RetentionConfig(BaseModel):
     #: oldest (by last_seen) pruned first, on top of (not instead of) the
     #: existing time-based expiry.
     max_discovery_rows_per_table: int = 5000
+    #: Max change events kept (see "What Changed?") - oldest pruned first.
+    max_change_events: int = 20000
+    #: Change events older than this are pruned.
+    change_event_retention_days: int = 365
 
-    @field_validator("max_evidence_rows_per_mac", "max_dhcp_server_findings", "max_discovery_rows_per_table")
+    @field_validator(
+        "max_evidence_rows_per_mac", "max_dhcp_server_findings", "max_discovery_rows_per_table",
+        "max_change_events", "change_event_retention_days",
+    )
     @classmethod
     def _at_least_one(cls, value: int) -> int:
         if value < 1:
             raise ValueError("must be at least 1")
+        return value
+
+
+class ChangesConfig(BaseModel):
+    """Know When It Changes - see :mod:`lanfence.baseline`. Every duration
+    here is deliberately coarse: baselines are about days of behaviour,
+    not seconds."""
+
+    model_config = {"extra": "forbid"}
+
+    #: Detect changes at all (on every active sweep of `scan`/`monitor`).
+    enabled: bool = True
+    #: How long a new baseline learns before it's "established". While
+    #: learning, ordinary new services are absorbed quietly; remote-admin
+    #: services (SSH, RDP, ...) always need explicit acceptance.
+    learning_days: float = 7.0
+    #: A device unseen this long has a "stale" baseline.
+    stale_days: float = 30.0
+    #: A trusted device returning after at least this long away is
+    #: flagged as an unusual return.
+    long_absence_days: float = 14.0
+    #: An untrusted, unreviewed device online this long is flagged once.
+    unknown_device_minutes: float = 60.0
+    #: An mDNS/SSDP service must be missing this long, while its device is
+    #: online, before it counts as removed (advertisements come and go).
+    service_removal_hours: float = 6.0
+
+    @field_validator(
+        "learning_days", "stale_days", "long_absence_days", "unknown_device_minutes", "service_removal_hours",
+    )
+    @classmethod
+    def _positive(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("must be a positive number")
         return value
 
 
@@ -565,6 +606,7 @@ class Config(BaseModel):
     dhcp_servers: DhcpServerConfig = Field(default_factory=DhcpServerConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    changes: ChangesConfig = Field(default_factory=ChangesConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     #: Where the persistent device database lives.
     db_path: Path = Path("~/.local/share/lanfence/lanfence.db")

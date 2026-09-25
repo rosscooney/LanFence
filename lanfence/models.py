@@ -804,3 +804,182 @@ class InspectionResult(BaseModel):
     @property
     def is_known_platform(self) -> bool:
         return self.platform_confidence is not None
+
+
+# --- Know When It Changes: baselines, change events, risk -------------------
+
+#: What kind of change a :class:`ChangeEvent` records. The first three
+#: mirror :data:`EventType` (a lifecycle event, re-expressed as a change);
+#: the rest come from comparing a device against its baseline (see
+#: :mod:`lanfence.baseline`), from DHCP-server monitoring, or from risk
+#: re-assessment.
+ChangeType = Literal[
+    "new_device", "reappeared", "disconnected",
+    "ip_changed", "ipv6_prefix_new", "hostname_changed", "identity_changed", "trust_changed",
+    "service_new", "service_removed",
+    "mdns_service_new", "mdns_service_removed",
+    "ssdp_service_new", "ssdp_service_removed",
+    "baseline_established", "baseline_reset",
+    "unknown_device_present", "dhcp_server_unexpected", "risk_changed",
+]
+CHANGE_TYPES: tuple[str, ...] = (
+    "new_device", "reappeared", "disconnected",
+    "ip_changed", "ipv6_prefix_new", "hostname_changed", "identity_changed", "trust_changed",
+    "service_new", "service_removed",
+    "mdns_service_new", "mdns_service_removed",
+    "ssdp_service_new", "ssdp_service_removed",
+    "baseline_established", "baseline_reset",
+    "unknown_device_present", "dhcp_server_unexpected", "risk_changed",
+)
+
+#: How much a change matters, lowest first - a prioritisation aid, never a
+#: verdict. Distinct from :data:`Severity` (what an *alert* is sent at,
+#: decided by a policy - see :mod:`lanfence.policy`).
+Significance = Literal["info", "low", "medium", "high", "critical"]
+SIGNIFICANCES: tuple[str, ...] = ("info", "low", "medium", "high", "critical")
+
+#: Where a change stands in the operator's review. "accepted" means
+#: "expected - fold it into the baseline" (history is kept either way).
+ChangeReviewState = Literal["unreviewed", "reviewed", "investigating", "snoozed", "accepted"]
+CHANGE_REVIEW_STATES: tuple[str, ...] = ("unreviewed", "reviewed", "investigating", "snoozed", "accepted")
+
+#: Set-valued observations tracked as :class:`BaselineItem` rows. Scalar
+#: observations (IPv4, hostname, identity, trust) live on
+#: :class:`DeviceBaseline` itself.
+BaselineSignal = Literal["port", "mdns", "ssdp", "ipv6_prefix"]
+BASELINE_SIGNALS: tuple[str, ...] = ("port", "mdns", "ssdp", "ipv6_prefix")
+#: Every signal an operator may exclude from alerting for one device -
+#: the set-valued ones above plus the scalar ones.
+EXCLUDABLE_SIGNALS: tuple[str, ...] = (*BASELINE_SIGNALS, "ip", "hostname", "identity")
+
+
+class ChangeEvent(BaseModel):
+    """One structured, reviewable change - see :mod:`lanfence.baseline`.
+    ``previous``/``current`` hold the before/after state as data, never only
+    prose; human wording is generated at display time (see
+    :func:`lanfence.changes.describe`). ``mac`` is ``None`` for a
+    network-level change (e.g. an unexpected DHCP server), identified by
+    ``subject_id`` instead, exactly like :class:`Finding`."""
+
+    id: int | None = None
+    mac: str | None = None
+    subject_id: str | None = None
+    change_type: ChangeType
+    occurred_at: datetime
+    #: The baseline signal involved (see :data:`EXCLUDABLE_SIGNALS`), if any.
+    signal: str | None = None
+    #: The specific thing that changed within that signal, e.g. "tcp/22".
+    subject: str | None = None
+    previous: dict = Field(default_factory=dict)
+    current: dict = Field(default_factory=dict)
+    evidence: list[str] = Field(default_factory=list)
+    #: What observed it: "lifecycle", "mdns", "ssdp", "inspection", "arp",
+    #: "dhcp", "identity", "allowlist", "baseline", "risk".
+    source: str
+    significance: Significance = "info"
+    risk_before: int | None = None
+    risk_after: int | None = None
+    #: The signal is excluded from alerting for this device: kept as
+    #: history, never alerted or counted as needing attention.
+    suppressed: bool = False
+    review_state: ChangeReviewState = "unreviewed"
+    review_note: str | None = None
+    reviewed_at: datetime | None = None
+    snoozed_until: datetime | None = None
+    #: The policy that matched this change (see :mod:`lanfence.policy`), if
+    #: any, and when an alert actually went out for it.
+    policy_id: str | None = None
+    alerted_at: datetime | None = None
+
+    @field_validator("mac")
+    @classmethod
+    def _normalize_mac(cls, value: str | None) -> str | None:
+        return normalize_mac(value) if value is not None else None
+
+    @field_validator("subject_id", "signal", "subject", "source", "policy_id")
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=256) if value is not None else None
+
+    @field_validator("review_note")
+    @classmethod
+    def _clean_note(cls, value: str | None) -> str | None:
+        return clean_text(value, max_len=2000) if value is not None else None
+
+    @field_validator("evidence")
+    @classmethod
+    def _clean_evidence(cls, value: list[str]) -> list[str]:
+        return [clean_text(v, max_len=1000) for v in value]
+
+    def needs_attention(self, *, now: datetime) -> bool:
+        """Still waiting on the operator: not suppressed, not reviewed or
+        accepted, and not inside an active snooze."""
+
+        if self.suppressed or self.review_state in ("reviewed", "accepted"):
+            return False
+        if self.review_state == "snoozed" and self.snoozed_until is not None and self.snoozed_until > now:
+            return False
+        return True
+
+
+class DeviceBaseline(BaseModel):
+    """What LAN Fence has learned is normal for one device - see
+    :mod:`lanfence.baseline`. Scalar observations are kept here; set-valued
+    ones as :class:`BaselineItem` rows."""
+
+    mac: str
+    started_at: datetime
+    established_at: datetime | None = None
+    excluded_signals: list[str] = Field(default_factory=list)
+    ipv4: str | None = None
+    hostname: str | None = None
+    identity_category: str | None = None
+    identity_manufacturer: str | None = None
+    trusted: bool = False
+    inspection_at: datetime | None = None
+    unknown_present_event_id: int | None = None
+
+
+class BaselineItem(BaseModel):
+    """One set-valued observation for a device (an open port, an mDNS or
+    SSDP service type, an IPv6 /64 prefix). ``in_baseline`` is whether it's
+    part of the expected baseline (learned during the learning period, or
+    accepted by the operator) or still pending review."""
+
+    mac: str
+    signal: BaselineSignal
+    value: str
+    in_baseline: bool
+    #: "initial" (present when the baseline began), "learned" (absorbed
+    #: during learning), "accepted" (the operator accepted it) or
+    #: "observed" (appeared later and awaits review).
+    origin: Literal["initial", "learned", "accepted", "observed"]
+    present: bool = True
+    first_seen: datetime
+    last_seen: datetime
+    removed_at: datetime | None = None
+
+
+RiskLevel = Literal["low", "moderate", "high", "critical"]
+RISK_LEVELS: tuple[str, ...] = ("low", "moderate", "high", "critical")
+
+
+class RiskContribution(BaseModel):
+    """One factor's contribution to a device's risk score - see
+    :mod:`lanfence.risk`."""
+
+    factor: str
+    label: str
+    points: int
+
+
+class RiskAssessment(BaseModel):
+    """A device's security risk score: a bounded 0-100 prioritisation aid,
+    separate from identity confidence and never a verdict - see
+    :mod:`lanfence.risk`."""
+
+    score: int = 0
+    level: RiskLevel = "low"
+    contributions: list[RiskContribution] = Field(default_factory=list)
+    recommendation: str = ""
+    assessed_at: datetime | None = None
