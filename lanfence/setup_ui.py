@@ -52,6 +52,10 @@ SECTIONS = {
     # No generic fields - scan.interfaces is edited only through the
     # step-through edit_interfaces action below.
     "Network interfaces": [],
+    "Change detection": [
+        "changes.enabled", "changes.learning_days", "changes.stale_days", "changes.long_absence_days",
+        "changes.unknown_device_minutes", "changes.service_removal_hours",
+    ],
 }
 MISSING = object()
 
@@ -513,7 +517,8 @@ def render_overview(console, draft):
                  f"mDNS={cfg.discovery.mdns} · SSDP={cfg.discovery.ssdp}",
                  ", ".join(cfg.digest.channels) or "no destinations", "Paths only; no data migration",
                  f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s", web_summary,
-                 site_summary, interfaces_summary]
+                 site_summary, interfaces_summary,
+                 f"enabled={cfg.changes.enabled} · learns for {cfg.changes.learning_days:g} days"]
     for i, (section, summary) in enumerate(zip(["Communications", *SECTIONS], summaries), 1):
         table.add_row(str(i), section, Text(clean_text(summary, max_len=300)))
     console.print(Panel(table, title="LAN Fence setup"))

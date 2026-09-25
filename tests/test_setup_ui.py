@@ -496,3 +496,10 @@ def test_web_portal_password_change_while_running_notes_restart_needed(tmp_path)
          patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/'):
         result, _ = run_setup(path, '9\n3\nnewpassword\nnewpassword\nback\nsave\nexit\n')
     assert "will be restarted when you exit setup" in result.output
+
+
+def test_change_detection_section_sets_learning_period(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, '12\n2\n14\nback\nsave\nexit\n')
+    assert 'learns for 7 days' in result.output
+    assert yaml.safe_load(path.read_text())['changes']['learning_days'] == 14
