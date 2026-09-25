@@ -133,9 +133,15 @@ def test_unknown_top_level_key_rejected(tmp_path: Path):
 
 def test_bad_severity_rejected(tmp_path: Path):
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump({"alerts": {"min_severity": "critical"}}), encoding="utf-8")
+    path.write_text(yaml.safe_dump({"alerts": {"min_severity": "severe"}}), encoding="utf-8")
     with pytest.raises(Exception):
         Config.load(path)
+
+
+def test_critical_min_severity_accepted(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"alerts": {"min_severity": "critical"}}), encoding="utf-8")
+    assert Config.load(path).alerts.min_severity == "critical"
 
 
 def test_resolved_paths_expand_user():

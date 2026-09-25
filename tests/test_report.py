@@ -816,3 +816,12 @@ def test_render_digest_omits_context_parens_when_no_owner_or_group():
     digest = _digest(new_devices=DigestSection(items=[entry], total_count=1))
     text = render_digest(digest, plain=True)
     assert "()" not in text
+
+
+def test_critical_severity_outranks_high_everywhere():
+    from lanfence.report import SEVERITY_EXIT_CODES, highest_severity
+
+    findings = [_finding("high"), _finding("critical")]
+    assert highest_severity(findings) == "critical"
+    assert ScanResult(started_at=_now(), ended_at=_now(), findings=findings).highest_severity == "critical"
+    assert SEVERITY_EXIT_CODES["critical"] > SEVERITY_EXIT_CODES["high"]

@@ -41,13 +41,13 @@ except ImportError:  # pragma: no cover
         return value
 
 
-_SEVERITY_STYLE = {"high": "bold red", "medium": "yellow", "info": "dim"}
+_SEVERITY_STYLE = {"critical": "bold white on red", "high": "bold red", "medium": "yellow", "info": "dim"}
 
-SEVERITY_EXIT_CODES = {None: 0, "info": 0, "medium": 10, "high": 20}
+SEVERITY_EXIT_CODES = {None: 0, "info": 0, "medium": 10, "high": 20, "critical": 30}
 
 
 def highest_severity(findings: list[Finding]) -> str | None:
-    for sev in ("high", "medium", "info"):
+    for sev in ("critical", "high", "medium", "info"):
         if any(f.severity == sev for f in findings):
             return sev
     return None

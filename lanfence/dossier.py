@@ -255,7 +255,7 @@ def review_priority(dossier: DeviceDossier) -> tuple[int, str]:
     """
 
     severities = {m.severity for m in dossier.fingerprint_matches}
-    if "high" in severities or "medium" in severities:
+    if severities & {"critical", "high", "medium"}:
         # An existing rogue-device signature match at meaningful severity -
         # the strongest available signal.
         rank = 0

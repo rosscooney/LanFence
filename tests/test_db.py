@@ -207,6 +207,18 @@ def test_due_for_alert_true_when_severity_escalates_within_cooldown(tmp_path: Pa
         ) is True
 
 
+def test_due_for_alert_critical_escalates_past_high_within_cooldown(tmp_path: Path):
+    with DeviceStore(tmp_path / "db.sqlite") as store:
+        t0 = _now()
+        assert store.due_for_alert("aa:bb:cc:dd:ee:ff", "high", now=t0, cooldown_seconds=900) is True
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "critical", now=t0 + timedelta(seconds=5), cooldown_seconds=900
+        ) is True
+        assert store.due_for_alert(
+            "aa:bb:cc:dd:ee:ff", "high", now=t0 + timedelta(seconds=10), cooldown_seconds=900
+        ) is False
+
+
 def test_due_for_alert_zero_cooldown_always_true(tmp_path: Path):
     with DeviceStore(tmp_path / "db.sqlite") as store:
         t0 = _now()

@@ -24,7 +24,7 @@ from lanfence.netutil import normalize_mac
 
 log = get_logger("engine")
 
-_SEVERITY_RANK = {"info": 0, "medium": 1, "high": 2}
+_SEVERITY_RANK = {"info": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def utcnow() -> datetime:

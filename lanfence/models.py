@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field, field_validator
 from lanfence.netutil import normalize_mac
 from lanfence.sanitize import clean_text
 
-Severity = Literal["info", "medium", "high"]
-SEVERITIES: tuple[str, ...] = ("info", "medium", "high")
+Severity = Literal["info", "medium", "high", "critical"]
+SEVERITIES: tuple[str, ...] = ("info", "medium", "high", "critical")
 
 EventType = Literal["new_device", "reappeared", "disconnected"]
 
@@ -454,7 +454,7 @@ class ScanResult(BaseModel):
 
     @property
     def highest_severity(self) -> Severity | None:
-        for sev in ("high", "medium", "info"):
+        for sev in reversed(SEVERITIES):
             if any(f.severity == sev for f in self.findings):
                 return sev
         return None

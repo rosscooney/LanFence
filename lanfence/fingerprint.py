@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml
 
 from lanfence.logging_config import get_logger
-from lanfence.models import Severity
+from lanfence.models import SEVERITIES, Severity
 from lanfence.netutil import is_locally_administered
 from lanfence.vendor import lookup_vendor
 
@@ -49,7 +49,7 @@ def _parse_keywords(rows: list[dict]) -> list[_Keyword]:
     for row in rows or []:
         try:
             severity = str(row.get("severity") or "info")
-            if severity not in ("info", "medium", "high"):
+            if severity not in SEVERITIES:
                 raise ValueError(f"signature {row.get('match')!r} has bad severity {severity!r}")
             out.append(
                 _Keyword(

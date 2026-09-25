@@ -21,6 +21,15 @@ def _finding(severity="high", mac="aa:bb:cc:dd:ee:ff", title="Unknown device con
 # --- formatting helpers ------------------------------------------------
 
 
+
+def test_critical_is_the_top_severity_for_alert_thresholds():
+    cfg = AlertConfig()
+    cfg.min_severity = "high"
+    findings = [_finding("medium"), _finding("high"), _finding("critical")]
+    assert [f.severity for f in alerts.findings_to_alert(findings, cfg)] == ["high", "critical"]
+    cfg.min_severity = "critical"
+    assert [f.severity for f in alerts.findings_to_alert(findings, cfg)] == ["critical"]
+
 def test_format_findings_text_includes_heading_and_fields():
     text = alerts._format_findings_text([_finding()], heading="LAN Fence")
     assert "LAN Fence: 1 finding(s)" in text

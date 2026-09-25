@@ -246,7 +246,7 @@ class AlertConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     #: Minimum severity that triggers an alert dispatch.
-    min_severity: Literal["info", "medium", "high"] = "medium"
+    min_severity: Literal["info", "medium", "high", "critical"] = "medium"
     #: Minimum time between alert dispatches for the same MAC, unless a new
     #: finding's severity is higher than what was last alerted for it (an
     #: escalation always bypasses the cooldown). 0 disables rate limiting -

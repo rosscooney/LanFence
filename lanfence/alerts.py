@@ -33,7 +33,7 @@ from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
 
 log = get_logger("alerts")
 
-_SEVERITY_RANK = {"info": 0, "medium": 1, "high": 2}
+_SEVERITY_RANK = {"info": 0, "medium": 1, "high": 2, "critical": 3}
 
 _SYSLOG_FACILITIES = {
     "user": syslog.LOG_USER,
@@ -49,6 +49,7 @@ _SYSLOG_FACILITIES = {
 }
 
 _SYSLOG_SEVERITY = {
+    "critical": syslog.LOG_CRIT,
     "high": syslog.LOG_ALERT,
     "medium": syslog.LOG_WARNING,
     "info": syslog.LOG_INFO,
@@ -150,7 +151,7 @@ def _format_findings_compact(findings: list[Finding], *, max_len: int) -> str:
 #: Severity → accent colour for the HTML email's per-finding panel border
 #: and badge. Not part of `branding.COLORS` (that palette has no reds/ambers
 #: of its own) - chosen to read clearly against the dark panel background.
-_SEVERITY_COLORS = {"high": "#f87171", "medium": "#fbbf24", "info": branding.COLORS["accent2"]}
+_SEVERITY_COLORS = {"critical": "#ef4444", "high": "#f87171", "medium": "#fbbf24", "info": branding.COLORS["accent2"]}
 
 
 def _html_finding_panel(finding: Finding) -> str:

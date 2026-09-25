@@ -603,12 +603,12 @@ def _emit_findings(
         for finding in findings:
             activity.add(_finding_activity_entry(finding))
     else:
-        colour = {"high": "red", "medium": "yellow", "info": "cyan"}
+        colour = {"critical": "red", "high": "red", "medium": "yellow", "info": "cyan"}
         for finding in findings:
             subject = finding.mac or finding.subject_id or "[no device]"
             typer.secho(
                 f"[{finding.severity.upper()}] {finding.title} (mac={subject})",
-                fg=colour.get(finding.severity, "white"), bold=(finding.severity == "high"),
+                fg=colour.get(finding.severity, "white"), bold=(finding.severity in ("high", "critical")),
             )
             if finding.rationale:
                 typer.echo(f"    {finding.rationale}")
