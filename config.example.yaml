@@ -25,7 +25,7 @@ scan:
   always_on_ping: true         # ping an always-on device (IPv4 + IPv6, 3 tries) before marking it offline
 
 alerts:
-  min_severity: medium         # info | medium | high - dispatch threshold
+  min_severity: medium         # info | medium | high | critical - dispatch threshold
   rate_limit_seconds: 900      # per-MAC cooldown between alerts; 0 = alert every time
   syslog:
     enabled: false
@@ -95,6 +95,22 @@ web:
   # Binds only to this host's own detected LAN address, never 0.0.0.0 - see README's
   # "Web portal" section. `lanfence web` starts what this section describes; there is
   # no separate enable/set-password command.
+
+changes:
+  enabled: true                 # learn device baselines and detect changes on each sweep
+  learning_days: 7              # how long a new baseline learns before it's established
+  stale_days: 30                # a device unseen this long has a stale baseline
+  long_absence_days: 14         # a trusted device back after this long is flagged
+  unknown_device_minutes: 60    # an untrusted, unreviewed device present this long is flagged
+  service_removal_hours: 6      # an advertised service must be gone this long to count as removed
+
+# Alert policies: which changes alert, and how urgently. Leave unset for the
+# built-in defaults (`lanfence policy --list`); setting it replaces them all.
+# policies:
+#   - id: ssh-on-anything
+#     triggers: [service_new, mdns_service_new]
+#     conditions: {services: ["tcp/22", "_ssh._tcp"]}
+#     severity: critical
 
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml

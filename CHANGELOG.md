@@ -15,6 +15,49 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- **Know When It Changes**: LAN Fence now learns what's normal for each
+  device and tells you when that changes. Each device gets a behaviour
+  baseline (learning, established or stale) covering its advertised mDNS
+  and SSDP services, ports from `lanfence inspect`, address, hostname,
+  IPv6 networks, identity and trust. Baselines start silently, so
+  upgrading doesn't flood you with things that were always there. While
+  learning (7 days by default) ordinary new services are absorbed, but a
+  remote-administration service never is; once established, anything new
+  stays pending until you accept it. Time alone never makes a change
+  trusted.
+- Changes are recorded once each as structured change events (new and
+  removed services, IP, hostname, IPv6 network, identity and trust
+  changes, new, returning and disconnected devices, unapproved DHCP
+  servers, long-present unknown devices, long-absence returns and rising
+  risk), with plain-language explanations such as "New service detected:
+  SSH / TCP 22" alongside the device's previous baseline.
+- An explainable 0-100 risk score per device (LOW, MODERATE, HIGH,
+  CRITICAL), shown with every factor's points and a recommended action.
+  It's a prioritisation aid, kept separate from identity confidence, and
+  never a claim that a device is compromised.
+- Declarative alert policies (`policies:` in the config, with sensible
+  built-in defaults) decide which changes alert and how urgently, through
+  the existing notification channels, cooldowns and caps. A new
+  `critical` severity sits above `high` (exit code 30 with
+  `--fail-on-findings`).
+- New commands: `lanfence changes` (list, filter, explain and review
+  changes: accept as expected, investigate, snooze, mark reviewed, note),
+  `lanfence baseline` (view, compare with a past point, accept pending,
+  exclude noisy signals, reset), `lanfence risk` and `lanfence policy`.
+  `lanfence device` shows a device's risk and baseline.
+- The web portal gains a What Changed? page with filters and a page per
+  change with its review actions; Risk, Changes, Services and Baseline
+  sections on the device page; a Network security panel on the dashboard
+  with clickable counts; and a Risk column and filter in the inventory.
+- The daily digest lists significant changes and high-risk devices, and
+  counts informational changes.
+- `lanfence setup` has a Change detection section. New settings:
+  `changes.*`, `policies`, `retention.max_change_events` and
+  `retention.change_event_retention_days`. The database gains new tables
+  for change events, baselines and risk, added automatically.
+
 ### Changed
 
 - The separate "friendly name" is gone: a device's trusted name (the

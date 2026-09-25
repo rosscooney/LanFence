@@ -203,6 +203,10 @@ lanfence digest                 # preview a 24h summary; add --send to deliver i
 lanfence digest --verbose       # also list every event/finding in the window (formerly `lanfence report`)
 lanfence digest --since 7d --send --channel email
 lanfence dhcp-servers            # observed DHCP servers and their approval status
+lanfence changes                # what changed recently; review, accept or snooze a change
+lanfence baseline <MAC>         # a device's learned baseline; compare, accept, exclude, reset
+lanfence risk [MAC]             # devices ranked by risk, or why one device scores what it does
+lanfence policy --list          # the alert policies in effect
 lanfence setup                  # interactive setup: communications and application settings
 lanfence web                    # run the local web portal (enable/configure it via `lanfence setup` first)
 lanfence check                  # verify permissions, scapy, nmap, interface, storage
@@ -655,6 +659,207 @@ its inventory page adds Category/Confidence columns plus a "Know Your
 Network" overview panel (device counts by asset type, and how many devices
 still need review or have an uncertain/unknown identity) - see that section
 for details.
+
+## Know When It Changes: baselines, changes and risk
+
+Knowing what's on your network is half the job; the other half is noticing
+when something *changes*. LAN Fence learns what's normal for each device,
+compares every sweep against it, explains what changed in plain language,
+assesses how much it matters, and alerts only when a policy says it
+should: observe, baseline, compare, explain, assess, alert. It runs
+entirely on this host, never sends traffic of its own to do it, never
+inspects packet contents, and never claims a device is compromised - a
+change is a reason to look, not a verdict.
+
+### Baselines
+
+Each device gets a behaviour baseline the first time it's evaluated (for
+an existing installation, the first sweep after upgrading). It's seeded
+silently from what's observed right then, so upgrading never floods you
+with things that were always there. A baseline covers:
+
+- advertised mDNS and SSDP services, and open ports from an explicit
+  `lanfence inspect` (LAN Fence never port-scans to build a baseline);
+- its IPv4 address, hostname and IPv6 networks (by /64 prefix, so rotating
+  privacy addresses don't count as changes);
+- its inferred identity and trust.
+
+A baseline is in one of three states:
+
+| State | Meaning |
+|---|---|
+| **Learning** | The first `changes.learning_days` (default 7). Ordinary new services are quietly added to the baseline. A remote-administration service (SSH, Telnet, RDP, VNC and similar) is never added without your approval, even while learning. |
+| **Established** | Learning is over. Anything new is recorded as a change and stays *pending* until you accept it. Time alone never makes a change trusted. |
+| **Stale** | The device hasn't been seen for `changes.stale_days` (default 30). Nothing is thrown away; the baseline is used again when it returns. |
+
+### What counts as a change
+
+New and removed services (ports, mDNS, SSDP), a new IPv6 network, IP
+address and hostname changes, identity and trust changes, new, returning
+and disconnected devices, an unapproved DHCP server, an untrusted device
+that stays on the network unreviewed for `changes.unknown_device_minutes`
+(default 60), a trusted device returning after `changes.long_absence_days`
+(default 14), and a device's risk level rising. Each is recorded once, as
+a structured change event (what, when, which device, before and after,
+evidence, significance, review state), and never again just because the
+new state persists.
+
+It's deliberately quiet: an IP change within the same network is
+informational; an advertised service is only judged removed while its
+device is online and after it's been gone for
+`changes.service_removal_hours` (default 6), since advertisements come and
+go; and you can exclude a noisy signal for one device (below).
+
+### What Changed?
+
+```text
+lanfence changes                           # the last 7 days, newest first, grouped by day
+lanfence changes --since 24h --severity high
+lanfence changes --mac <MAC> --type service_new
+lanfence changes --unreviewed              # only what still needs attention
+lanfence changes 42                        # one change, explained, with its evidence
+lanfence changes 42 --accept --note "Enabled SSH for backups"
+lanfence changes 42 --investigate | --reviewed | --snooze 24h | --unreview
+```
+
+The web portal's **What Changed?** page shows the same list with filters
+for period, device, change type, significance, review state, trust and
+category, and each change has its own page explaining it (for example
+"New service detected: SSH / TCP 22", with the device's previous baseline
+and how long it has been monitored) with the review actions as buttons.
+
+### Reviewing changes
+
+| Action | Effect |
+|---|---|
+| **Accept as expected** | Adds the item to the device's baseline, so it's no longer new. The change stays in the history. |
+| **Investigate** | Flags it (and adds to the device's risk) until you decide. |
+| **Snooze** | Hides it from "needs attention" for a day, a week, or `--snooze` any duration. |
+| **Mark reviewed** | You've seen it; nothing else changes. |
+| **Note** | Adds or replaces a note on the change. |
+
+### Managing a baseline
+
+```text
+lanfence baseline <MAC>                    # state, what's expected, what's pending
+lanfence baseline <MAC> --compare 7d       # now against a week ago (or 24h, 30d, 'baseline')
+lanfence baseline <MAC> --accept-pending   # accept everything pending at once
+lanfence baseline <MAC> --exclude hostname # stop alerting on a noisy signal; still recorded
+lanfence baseline <MAC> --include hostname # undo that
+lanfence baseline <MAC> --reset            # forget what's normal and learn it again; history is kept
+```
+
+The signals you can exclude are `port`, `mdns`, `ssdp`, `ipv6_prefix`,
+`ip`, `hostname` and `identity`. The web device page has the same
+controls under **Baseline**, alongside **Risk**, **Changes** and
+**Services** (each service shown as expected, accepted by you, new and
+pending review, or no longer seen).
+
+### Risk score
+
+Every device gets an explainable 0-100 risk score, reassessed on each
+sweep and after each review action. It's a plain sum of weighted factors,
+each shown with its points, so you can always see why:
+
+```text
+Risk score:   60 / 100  HIGH
+Why:
+   +25  Device is not trusted
+   +25  New administrative service: SSH / TCP 22
+   +10  Device first seen in the last 24 hours
+    +5  Device identity uncertain
+    -5  Known manufacturer (Raspberry Pi Foundation)
+Recommended:  This deserves investigation. Check whether SSH / TCP 22 was enabled deliberately - if it was, accept the change as expected.
+```
+
+| Score | Level |
+|---|---|
+| 0-19 | LOW |
+| 20-39 | MODERATE |
+| 40-74 | HIGH |
+| 75-100 | CRITICAL |
+
+Factors include trust, being under investigation, how recently the device
+first appeared, a private (randomised) MAC address (barely counted for a
+phone, tablet or computer, where it's normal), rogue-device signature
+matches, an unknown or uncertain identity, new and new administrative
+services, unexpected changes against an established baseline, an identity
+change, untrusted network infrastructure, acting as a DHCP server, an
+always-on device being missing, returning after a long absence, and
+several recent changes. A known manufacturer lowers it slightly.
+
+`lanfence risk` ranks every device; `lanfence risk <MAC>` explains one.
+The web inventory has a sortable Risk column and filter.
+
+The risk score is a way to decide what to look at first. It isn't a
+vulnerability scan (there's no CVE matching), it doesn't know what a
+device is doing inside its encrypted traffic, and a high score doesn't
+mean a device is compromised; a low one doesn't mean it's safe. It's kept
+separate from identity confidence: LAN Fence can be very sure what a
+device is and still rate it high risk, or the other way round.
+
+### Alert policies
+
+What gets alerted is decided by a short list of declarative policies,
+checked in order; the first match wins. Without a `policies:` section in
+your config the built-in defaults apply (`lanfence policy --list` shows
+them):
+
+| Policy | When | Severity |
+|---|---|---|
+| `new-infrastructure-device` | A new untrusted device that looks like network infrastructure | critical |
+| `new-unknown-device` | Any other new untrusted device | high |
+| `unapproved-dhcp-server` | An unapproved DHCP server answers | critical |
+| `new-remote-admin-service` | A new SSH, Telnet, RDP, VNC or similar service | high |
+| `new-service-on-trusted-server` | A new service on a trusted server, NAS or infrastructure device | medium |
+| `unknown-device-present` | An untrusted, unreviewed device has been on the network for over an hour | high |
+| `risk-high` | A device's risk rises to high or critical | high |
+| `identity-changed` | A device's identity changes | medium |
+| `informational-changes` | Everything else of at least low significance | digest only |
+
+Setting `policies:` replaces the defaults entirely, so copy the ones you
+want to keep:
+
+```yaml
+policies:
+  - id: ssh-on-anything
+    description: SSH appearing anywhere
+    triggers: [service_new, mdns_service_new]
+    conditions:
+      services: ["tcp/22", "_ssh._tcp"]
+    severity: critical
+    cooldown_seconds: 86400         # at most one alert a day per device and service
+  - id: quiet-guest-changes
+    triggers: [ip_changed, hostname_changed]
+    conditions:
+      categories: [Phone, Tablet]
+    severity: info
+    action: none                    # record it, but don't alert or put it in the digest
+```
+
+`triggers` are change types (see `lanfence changes --type`). The
+`conditions`, all optional and all of which must hold, are `trusted`,
+`categories`, `min_significance`, `admin_service`, `services`,
+`risk_levels` and `rising`. `action` is `alert` (the default), `digest`
+or `none`. There's no expression language and nothing in a policy is ever
+executed; an unknown key or value is rejected when the config loads.
+
+Policies send nothing themselves: alerts go through the same channels,
+`alerts.min_severity`, snooze, per-subject cooldown and global cap as
+every other LAN Fence alert. Each change has its own cooldown lane (SSH
+flapping on one device doesn't re-alert within the cooldown, while a
+different service on the same device still does). For the things LAN
+Fence already alerted on before policies existed (a new or returning
+device, an always-on device going missing, an unapproved DHCP server) a
+matching policy changes that existing alert's severity, or makes it
+digest-only, rather than sending a second one. Significant changes and
+high-risk devices also appear in the daily digest, and the web dashboard
+summarises them in its **Network security** panel.
+
+Change detection can be switched off with `changes.enabled: false`, and
+its thresholds adjusted under **Change detection** in `lanfence setup`.
+Change history is kept for `retention.change_event_retention_days`
+(default 365), capped at `retention.max_change_events` (default 20000).
 
 ## Active device inspection
 
@@ -1724,7 +1929,7 @@ scan:
   passive_queue_maxsize: 2000  # cap per passive processing queue; excess is dropped (counted), never blocks capture
 
 alerts:
-  min_severity: medium         # info | medium | high - dispatch threshold
+  min_severity: medium         # info | medium | high | critical - dispatch threshold
   rate_limit_seconds: 900      # per-MAC cooldown between alerts; 0 = alert every time
   global_rate_limit_max: 20            # cap on total alert dispatches per window, across every MAC/subject
   global_rate_limit_window_seconds: 60 # ...within this many seconds; 0 (either field) disables it
@@ -1785,6 +1990,18 @@ retention:
   max_evidence_rows_per_mac: 100      # retained address/name evidence rows kept per MAC; oldest pruned first
   max_dhcp_server_findings: 5000      # total DHCP-server-finding rows retained; oldest pruned first
   max_discovery_rows_per_table: 5000  # total rows per mDNS/SSDP table; oldest pruned first (on top of TTL expiry)
+  max_change_events: 20000            # total change events kept; oldest pruned first
+  change_event_retention_days: 365    # change events older than this are pruned
+
+changes:
+  enabled: true                 # learn baselines and detect changes on each sweep
+  learning_days: 7              # how long a new baseline learns before it's established
+  stale_days: 30                # a device unseen this long has a stale baseline
+  long_absence_days: 14         # a trusted device back after this long is flagged
+  unknown_device_minutes: 60    # an untrusted, unreviewed device present this long is flagged
+  service_removal_hours: 6      # an advertised service must be gone this long (device online) to count as removed
+
+policies: null                  # null = the built-in defaults; see "Know When It Changes"
 
 db_path: ~/.local/share/lanfence/lanfence.db
 allowlist_file: ~/.config/lanfence/allowlist.yaml
@@ -1842,6 +2059,7 @@ never affected by whether delivery itself succeeded.
 | none / info | 0 |
 | medium | 10 |
 | high | 20 |
+| critical | 30 |
 
 ## Privacy and security
 
@@ -1897,8 +2115,13 @@ never affected by whether delivery itself succeeded.
   inventory, evidence, or identity is ever transmitted anywhere. It only
   ever reasons over evidence already gathered passively (or from a
   previous, explicit `lanfence inspect`) - it never triggers its own scan
-  or probe just to identify a device, and it never introduces a network-
-  wide security/risk score.
+  or probe just to identify a device.
+- **Know When It Changes is local and never inspects content.** Baselines,
+  change detection, risk scores and policies use only the metadata above
+  (addresses, names, advertised services, ports from an explicit
+  `lanfence inspect`); no packet payloads are read, no LLM or cloud
+  service is used, and a risk score is a prioritisation aid, never a
+  claim that a device is compromised.
 - **The example systemd service runs as a dedicated, unprivileged
   account**, not root - see [`packaging/lanfence.service`](packaging/lanfence.service),
   which grants only `CAP_NET_RAW` (the one capability scanning needs,
