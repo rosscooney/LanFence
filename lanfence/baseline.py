@@ -495,6 +495,27 @@ def _reassess_risk(
 # --- operator actions ------------------------------------------------------
 
 
+def assess_device(
+    store: DeviceStore, allowlist: Allowlist, cfg: Config, mac: str, *,
+    signatures: SignatureSet, identity_rules: IdentityRuleSet, now: datetime,
+) -> RiskAssessment | None:
+    """One device's risk right now, without storing or recording anything
+    - for showing it (`lanfence risk`, the web device page)."""
+
+    dossier = build_device_dossier(
+        store, allowlist, mac, signatures=signatures, identity_rules=identity_rules,
+        vendor_file=cfg.vendor_file, now=now,
+    )
+    if dossier is None:
+        return None
+    return assess(gather_inputs(
+        dossier, now=now, baseline=store.get_baseline(mac), items=store.baseline_items(mac),
+        events=store.change_events(since=now - _RISK_EVENT_WINDOW, mac=mac),
+        dhcp_server=dossier.device.mac in store.dhcp_server_source_macs_since(now - _DHCP_RISK_WINDOW),
+        long_absence_days=cfg.changes.long_absence_days,
+    ), now=now)
+
+
 def reassess_device(
     store: DeviceStore, allowlist: Allowlist, cfg: Config, mac: str, *,
     signatures: SignatureSet, identity_rules: IdentityRuleSet, now: datetime,

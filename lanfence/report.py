@@ -7,13 +7,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from lanfence.changes import day_heading, describe, format_time, service_label, significance_label
 from lanfence.classify import DeviceClassification
 from lanfence.dossier import DeviceDossier, TriageSummary
 from lanfence.identity import DeviceIdentity
 from lanfence.models import (
     AddressEvidence,
     AdvertisedService,
+    BaselineItem,
+    ChangeEvent,
     Device,
+    DeviceBaseline,
     DeviceEvent,
     DeviceMetadata,
     Digest,
@@ -21,6 +25,7 @@ from lanfence.models import (
     Finding,
     InspectionResult,
     NameEvidence,
+    RiskAssessment,
     ScanResult,
     format_datetime,
 )
@@ -1181,3 +1186,168 @@ def render_digest(digest: Digest, *, plain: bool = False) -> str:
             console.print(f"[dim]... and {section.omitted_count} more[/dim]")
 
     return text
+
+
+# --- Know When It Changes -------------------------------------------------
+
+
+def change_line(event: ChangeEvent, label: str) -> str:
+    """One compact line for a change list: time, device, what changed,
+    significance, and where it stands in review."""
+
+    text = describe(event)
+    review = "" if event.review_state == "unreviewed" else f"  [{event.review_state}]"
+    muted = "  (excluded from alerting)" if event.suppressed else ""
+    return (
+        f"#{event.id:<5} {format_time(event.occurred_at)}  {label:<28}  {text.title}  "
+        f"{significance_label(event.significance)}{review}{muted}"
+    )
+
+
+def render_changes(events: list[ChangeEvent], labels: dict[str, str], *, now: datetime) -> str:
+    """Changes grouped under Today / Yesterday / date headings."""
+
+    if not events:
+        return "No changes match."
+    lines: list[str] = []
+    heading = None
+    for event in events:
+        day = day_heading(event.occurred_at, now=now)
+        if day != heading:
+            if heading is not None:
+                lines.append("")
+            lines.append(day)
+            heading = day
+        lines.append("  " + change_line(event, _change_subject(event, labels)))
+    return "\n".join(lines)
+
+
+def _change_subject(event: ChangeEvent, labels: dict[str, str]) -> str:
+    if event.mac:
+        return labels.get(event.mac, event.mac)
+    return event.subject_id or "network"
+
+
+def render_change_detail(
+    event: ChangeEvent, labels: dict[str, str], *, policy_description: str | None = None,
+) -> str:
+    """Everything about one change: what, when, why it matters, what it
+    was before, which policy handled it, and where review stands."""
+
+    text = describe(event)
+    lines = [
+        f"Change #{event.id}: {text.title}",
+        f"Device:       {_change_subject(event, labels)}" + (f" ({event.mac})" if event.mac else ""),
+        f"When:         {format_datetime(event.occurred_at)}",
+        f"Significance: {significance_label(event.significance)}",
+        f"Observed by:  {event.source}",
+    ]
+    lines.extend(f"  {detail}" for detail in text.details)
+    if event.previous or event.current:
+        lines.append("")
+        lines.append("Technical detail (before -> after, as recorded):")
+        for key in sorted(set(event.previous) | set(event.current)):
+            if key in ("contributions",):
+                continue
+            lines.append(f"  {key}: {event.previous.get(key, '-')} -> {event.current.get(key, '-')}")
+    if event.risk_before is not None or event.risk_after is not None:
+        lines.append(f"Risk:         {event.risk_before} -> {event.risk_after}")
+    lines.append("")
+    if event.policy_id:
+        alerted = f"alert sent {format_datetime(event.alerted_at)}" if event.alerted_at else "no alert sent"
+        described = f" - {policy_description}" if policy_description else ""
+        lines.append(f"Policy:       {event.policy_id}{described} ({alerted})")
+    else:
+        lines.append("Policy:       none matched - recorded for review only")
+    if event.suppressed:
+        lines.append("This signal is excluded from alerting for this device; kept as history.")
+    review = event.review_state
+    if review == "snoozed" and event.snoozed_until:
+        review += f" until {format_datetime(event.snoozed_until)}"
+    lines.append(f"Review:       {review}")
+    if event.review_note:
+        lines.append(f"Note:         {event.review_note}")
+    if event.evidence:
+        lines.append("Evidence:")
+        lines.extend(f"  - {item}" for item in event.evidence)
+    return "\n".join(lines)
+
+
+def risk_lines(assessment: RiskAssessment) -> list[str]:
+    """The risk block: score, level, every contribution, and what to do."""
+
+    lines = [f"Risk score:   {assessment.score} / 100  {assessment.level.upper()}"]
+    if assessment.contributions:
+        lines.append("Why:")
+        for contribution in assessment.contributions:
+            lines.append(f"  {contribution.points:+4d}  {contribution.label}")
+    lines.append(f"Recommended:  {assessment.recommendation}")
+    lines.append("A prioritisation aid, not a verdict - separate from identity confidence.")
+    return lines
+
+
+def render_baseline(
+    label: str,
+    mac: str,
+    baseline: DeviceBaseline | None,
+    items: list[BaselineItem],
+    *,
+    maturity: str,
+    now: datetime,
+    comparison: list | None = None,
+    comparison_label: str | None = None,
+) -> str:
+    if baseline is None:
+        return f"{label} ({mac}): no baseline yet - it starts on the next scan or monitor sweep."
+    days = (now - baseline.started_at).total_seconds() / 86400
+    lines = [
+        f"Baseline for {label} ({mac})",
+        f"Status:        {maturity}",
+        f"Learning since {format_datetime(baseline.started_at)} ({days:.0f} day(s) of monitoring)",
+    ]
+    if baseline.established_at:
+        lines.append(f"Established:   {format_datetime(baseline.established_at)}")
+    lines.append(f"IPv4:          {baseline.ipv4 or '-'}")
+    lines.append(f"Hostname:      {baseline.hostname or '-'}")
+    identity = " ".join(p for p in (baseline.identity_manufacturer, baseline.identity_category) if p)
+    lines.append(f"Identity:      {identity or '-'}")
+    if baseline.excluded_signals:
+        lines.append(f"Excluded from alerting: {', '.join(baseline.excluded_signals)}")
+    groups = (
+        ("Expected", [i for i in items if i.in_baseline and i.present]),
+        ("Pending review", [i for i in items if not i.in_baseline and i.present]),
+        ("No longer seen", [i for i in items if not i.present]),
+    )
+    for title, group in groups:
+        if not group:
+            continue
+        lines.append("")
+        lines.append(f"{title}:")
+        for item in group:
+            origin = {"initial": "", "learned": " (learned)", "accepted": " (accepted by you)",
+                      "observed": ""}[item.origin]
+            lines.append(f"  - {service_label(item.signal, item.value)}{origin}")
+    if comparison is not None:
+        lines.append("")
+        lines.append(f"{'NOW':<40} {comparison_label or 'THEN'}")
+        for row in comparison:
+            now_col = f"{row.label}" if row.now else "-"
+            then_col = f"{row.label}" if row.then else "-"
+            marker = {"new": "NEW", "removed": "REMOVED"}.get(row.status, "")
+            lines.append(f"{now_col:<32} {marker:<7} {then_col}")
+    return "\n".join(lines)
+
+
+def render_policies(policies: list, *, from_config: bool) -> str:
+    source = "your config file" if from_config else "built-in defaults (set `policies:` in config to replace)"
+    lines = [f"Alert policies - {source}. First match wins.", ""]
+    for number, policy in enumerate(policies, 1):
+        state = "" if policy.enabled else "  [disabled]"
+        lines.append(f"{number}. {policy.id}{state}: {policy.description or ''}".rstrip(": "))
+        lines.append(f"     when:     {', '.join(policy.triggers)}")
+        conditions = policy.conditions.model_dump(exclude_defaults=True)
+        if conditions:
+            lines.append("     if:       " + "; ".join(f"{k}={v}" for k, v in conditions.items()))
+        cooldown = f", cooldown {policy.cooldown_seconds:g}s" if policy.cooldown_seconds is not None else ""
+        lines.append(f"     then:     {policy.action} at {policy.severity.upper()}{cooldown}")
+    return "\n".join(lines)

@@ -27,7 +27,19 @@ import typer
 
 from lanfence import __version__, active_inspect, alerts, discovery, monitor_status, monitor_ui, scanner, web
 from lanfence.alert_worker import AlertDeliveryWorker
-from lanfence.baseline import run_change_detection, shape_findings
+from lanfence.baseline import (
+    accept_pending,
+    assess_device,
+    compare,
+    maturity,
+    reassess_device,
+    reset_baseline,
+    review_change,
+    run_change_detection,
+    set_excluded_signals,
+    shape_findings,
+)
+from lanfence.changes import describe, significance_at_least
 from lanfence.allowlist import Allowlist
 from lanfence.channels import (
     CHANNEL_FIELDS,
@@ -77,13 +89,26 @@ from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.fsutil import atomic_write
 from lanfence.identity import IdentityRuleSet
 from lanfence.logging_config import get_logger, setup_logging
-from lanfence.models import ASSET_TYPES, DEVICE_CATEGORIES, Finding, ScanResult, format_datetime
+from lanfence.models import (
+    ASSET_TYPES,
+    CHANGE_TYPES,
+    DEVICE_CATEGORIES,
+    EXCLUDABLE_SIGNALS,
+    SIGNIFICANCES,
+    Finding,
+    ScanResult,
+    format_datetime,
+)
+from lanfence.policy import effective_policies
 from lanfence.netutil import normalize_mac
 from lanfence.safe_errors import summarize_error
 from lanfence.report import (
     exit_code_for,
     exit_code_for_findings,
     render_advertised_services,
+    render_baseline,
+    render_change_detail,
+    render_changes,
     render_channels_table,
     render_device_detail,
     render_device_inventory,
@@ -92,8 +117,10 @@ from lanfence.report import (
     render_events,
     render_findings,
     render_inspection_result,
+    render_policies,
     render_scan_result,
     render_triage_summary,
+    risk_lines,
 )
 from lanfence.vendor import format_vendor_table, parse_ieee_oui_csv
 
@@ -1866,6 +1893,13 @@ def device(
             identity_rules=IdentityRuleSet.load(cfg.identity_rules_file),
             vendor_file=cfg.vendor_file, now=now, device=dev, addresses=addresses, names=names, services=services,
         )
+        device_risk = assess_device(
+            store, allowlist, cfg, norm_mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+            identity_rules=IdentityRuleSet.load(cfg.identity_rules_file), now=now,
+        )
+        device_baseline = store.get_baseline(norm_mac)
+        pending_items = sum(1 for i in store.baseline_items(norm_mac) if not i.in_baseline and i.present)
+        baseline_state = maturity(device_baseline, last_seen=dev.last_seen, now=now, stale_days=cfg.changes.stale_days)
 
     if output_format == "json":
         payload = {
@@ -1892,6 +1926,18 @@ def device(
             # script consuming output from more than one LAN Fence instance
             # tell them apart; both null when unset.
             "site": {"name": cfg.site.name, "location": cfg.site.location},
+            # Security risk (separate from identity confidence) and what
+            # LAN Fence has learned is normal - see `lanfence risk`/`baseline`.
+            "risk": device_risk.model_dump(mode="json") if device_risk else None,
+            "baseline": {
+                "maturity": baseline_state,
+                "started_at": device_baseline.started_at.isoformat() if device_baseline else None,
+                "established_at": (
+                    device_baseline.established_at.isoformat()
+                    if device_baseline and device_baseline.established_at else None
+                ),
+                "pending_review": pending_items,
+            },
         }
         typer.echo(json.dumps(payload, indent=2))
     else:
@@ -1900,6 +1946,329 @@ def device(
             addresses=addresses, names=names, services=services, classification=dossier.classification,
             identity=dossier.identity, inspection=dossier.inspection,
         )
+        if device_risk is not None:
+            typer.echo("")
+            typer.echo("\n".join(risk_lines(device_risk)))
+        typer.echo("")
+        pending_note = f"; {pending_items} item(s) pending review" if pending_items else ""
+        typer.echo(f"Baseline:     {baseline_state}{pending_note} - see `lanfence baseline {norm_mac}`")
+
+
+def _device_labels(store: DeviceStore, allowlist: Allowlist) -> dict[str, str]:
+    return {d.mac: d.allowlist_name or d.hostname or d.mac for d in build_inventory(store, allowlist)}
+
+
+def _change_json(event, labels: dict[str, str]) -> dict:
+    text = describe(event)
+    payload = event.model_dump(mode="json")
+    payload["title"] = text.title
+    payload["details"] = text.details
+    payload["device"] = labels.get(event.mac) if event.mac else None
+    return payload
+
+
+_REVIEW_FLAGS = ("reviewed", "investigating", "accepted", "unreviewed")
+
+
+@app.command()
+def changes(
+    change_id: Optional[int] = typer.Argument(
+        None, help="A change's number (#) to show in full, or to review with the options below."
+    ),
+    since: str = typer.Option("7d", "--since", help="How far back to list, e.g. 24h, 7d, 30d."),
+    mac: Optional[str] = typer.Option(None, "--mac", help="Only this device."),
+    change_type: list[str] = typer.Option([], "--type", help="Only this kind of change (repeatable), e.g. service_new."),
+    severity: Optional[str] = typer.Option(
+        None, "--severity", help="Only changes at least this significant: info, low, medium, high, critical."
+    ),
+    unreviewed: bool = typer.Option(False, "--unreviewed", help="Only changes still needing attention."),
+    reviewed: bool = typer.Option(False, "--reviewed", help="With a change #: mark it reviewed."),
+    investigate: bool = typer.Option(False, "--investigate", help="With a change #: mark it under investigation."),
+    accept: bool = typer.Option(
+        False, "--accept", help="With a change #: accept it as expected (updates the baseline, keeps history)."
+    ),
+    snooze: Optional[str] = typer.Option(None, "--snooze", help="With a change #: snooze it, e.g. 24h, 7d."),
+    unreview: bool = typer.Option(False, "--unreview", help="With a change #: back to unreviewed."),
+    note: Optional[str] = typer.Option(None, "--note", help="With a change #: add or replace a note."),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """What changed on the network: list changes, show one, or review it.
+
+    Without a change number, lists changes newest first, grouped by day
+    (default: the last 7 days). With one, shows everything about that
+    change - what it was before, why it matters, which policy handled it -
+    or, with an action option, reviews it. Accepting a change folds it
+    into the device's baseline; the change itself is always kept.
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if severity is not None and severity not in SIGNIFICANCES:
+        typer.secho(f"error: --severity must be one of {', '.join(SIGNIFICANCES)}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    unknown_types = [t for t in change_type if t not in CHANGE_TYPES]
+    if unknown_types:
+        typer.secho(
+            f"error: unknown change type(s) {', '.join(unknown_types)} - use one of: {', '.join(CHANGE_TYPES)}",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=2)
+    actions = [name for name, on in (("reviewed", reviewed), ("investigating", investigate),
+                                     ("accepted", accept), ("unreviewed", unreview)) if on]
+    if snooze is not None:
+        actions.append("snoozed")
+    if len(actions) > 1:
+        typer.secho("error: choose one review action at a time", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if (actions or note is not None) and change_id is None:
+        typer.secho("error: review actions need a change number, e.g. `lanfence changes 42 --accept`",
+                    fg="red", err=True)
+        raise typer.Exit(code=2)
+    snooze_for = None
+    if snooze is not None:
+        seconds = _duration_seconds(snooze)
+        if seconds is None or seconds <= 0:
+            typer.secho(f"error: could not parse --snooze {snooze!r} (expected e.g. 24h, 7d)", fg="red", err=True)
+            raise typer.Exit(code=2)
+        snooze_for = timedelta(seconds=seconds)
+
+    cfg = _load_config(config)
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
+    now = utcnow()
+    with _open_store(cfg.resolved_db_path()) as store:
+        labels = _device_labels(store, allowlist)
+        if change_id is not None:
+            event = store.get_change_event(change_id)
+            if event is None:
+                typer.secho(f"error: no change #{change_id}", fg="red", err=True)
+                raise typer.Exit(code=2)
+            if actions or note is not None:
+                event = review_change(
+                    store, change_id, actions[0] if actions else "note", now=now, note=note, snooze_for=snooze_for,
+                )
+                if event.mac:
+                    reassess_device(
+                        store, allowlist, cfg, event.mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+                        identity_rules=IdentityRuleSet.load(cfg.identity_rules_file), now=now,
+                    )
+                if output_format != "json":
+                    typer.secho(f"change #{change_id}: {event.review_state}", fg="green")
+            if output_format == "json":
+                typer.echo(json.dumps(_change_json(event, labels), indent=2))
+            else:
+                policy = next((p for p in effective_policies(cfg.policies) if p.id == event.policy_id), None)
+                typer.echo(render_change_detail(
+                    event, labels, policy_description=policy.description if policy else None,
+                ))
+            return
+
+        events = store.change_events(
+            since=_parse_since(since), mac=normalize_mac(mac) if mac else None, change_types=change_type or None,
+        )
+    if severity is not None:
+        events = [e for e in events if significance_at_least(e.significance, severity)]
+    if unreviewed:
+        events = [e for e in events if e.needs_attention(now=now)]
+    if output_format == "json":
+        typer.echo(json.dumps([_change_json(e, labels) for e in events], indent=2))
+    else:
+        typer.echo(render_changes(events, labels, now=now))
+
+
+@app.command(name="baseline")
+def baseline_command(
+    mac: str = typer.Argument(..., help="The device's MAC address."),
+    reset: bool = typer.Option(False, "--reset", help="Forget what's normal and learn it again (history is kept)."),
+    accept_pending_items: bool = typer.Option(
+        False, "--accept-pending", help="Accept everything pending review into the baseline."
+    ),
+    exclude: list[str] = typer.Option(
+        [], "--exclude", help=f"Stop alerting on a signal for this device (repeatable): {', '.join(EXCLUDABLE_SIGNALS)}."
+    ),
+    include: list[str] = typer.Option([], "--include", help="Undo --exclude for a signal (repeatable)."),
+    compare_with: Optional[str] = typer.Option(
+        None, "--compare", help="Compare now with a past point, e.g. 24h, 7d, 30d - or 'baseline'."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation for --reset."),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Show what LAN Fence has learned is normal for a device, and manage it.
+
+    You never build a baseline by hand: LAN Fence learns it, then flags
+    anything new for you to accept or investigate. `--reset` starts
+    learning again, `--accept-pending` accepts everything waiting for
+    review, and `--exclude` stops alerting on a signal that's naturally
+    unstable for this device (e.g. ip on a device that hops networks) -
+    changes to it are still kept as history.
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    bad = [s for s in (*exclude, *include) if s not in EXCLUDABLE_SIGNALS]
+    if bad:
+        typer.secho(f"error: unknown signal(s) {', '.join(bad)} - use: {', '.join(EXCLUDABLE_SIGNALS)}",
+                    fg="red", err=True)
+        raise typer.Exit(code=2)
+    try:
+        norm_mac = normalize_mac(mac)
+    except ValueError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+    since: Optional[datetime] = None
+    comparison_label = None
+    if compare_with is not None and compare_with != "baseline":
+        since = _parse_since(compare_with)
+        comparison_label = f"{compare_with.upper()} AGO"
+    elif compare_with == "baseline":
+        comparison_label = "BASELINE"
+
+    cfg = _load_config(config)
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
+    now = utcnow()
+    with _open_store(cfg.resolved_db_path()) as store:
+        device = build_device(store, allowlist, norm_mac)
+        if device is None:
+            typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
+            raise typer.Exit(code=2)
+        label = device.allowlist_name or device.hostname or norm_mac
+        if reset:
+            if not yes:
+                if not _stdin_is_interactive():
+                    typer.secho("error: --reset needs confirmation - pass --yes to run noninteractively.",
+                                fg="red", err=True)
+                    raise typer.Exit(code=2)
+                if not typer.confirm(f"Forget {label}'s baseline and learn it again? History is kept.",
+                                     default=False):
+                    typer.echo("cancelled - nothing changed.")
+                    return
+            reset_baseline(store, norm_mac, now=now)
+            typer.secho(f"{label}: baseline reset - it will be learned again from the next sweep.", fg="green")
+            return
+        if accept_pending_items:
+            count = accept_pending(store, norm_mac, now=now)
+            typer.secho(f"{label}: accepted {count} pending item(s) into the baseline.", fg="green")
+        if exclude or include:
+            current = store.get_baseline(norm_mac)
+            if current is None:
+                typer.secho("error: no baseline yet - it starts on the next scan or monitor sweep", fg="red", err=True)
+                raise typer.Exit(code=2)
+            signals = (set(current.excluded_signals) | set(exclude)) - set(include)
+            set_excluded_signals(store, norm_mac, sorted(signals), now=now)
+        baseline = store.get_baseline(norm_mac)
+        items = store.baseline_items(norm_mac)
+        state = maturity(baseline, last_seen=device.last_seen, now=now, stale_days=cfg.changes.stale_days)
+        rows = compare(store, norm_mac, since=since, now=now) if compare_with is not None else None
+
+    if output_format == "json":
+        payload = {
+            "mac": norm_mac, "device": label, "maturity": state,
+            "baseline": baseline.model_dump(mode="json") if baseline else None,
+            "items": [i.model_dump(mode="json") for i in items],
+        }
+        if rows is not None:
+            payload["comparison"] = {
+                "with": compare_with,
+                "rows": [{"signal": r.signal, "label": r.label, "now": r.now, "then": r.then, "status": r.status}
+                         for r in rows],
+            }
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo(render_baseline(
+        label, norm_mac, baseline, items, maturity=state, now=now, comparison=rows,
+        comparison_label=comparison_label,
+    ))
+
+
+@app.command()
+def risk(
+    mac: Optional[str] = typer.Argument(None, help="A device's MAC address. Omit to rank every device."),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """How much each device deserves a look - a 0-100 score with every reason.
+
+    With a MAC, shows that device's score, each contribution and a
+    recommended action. Without, ranks every device by its most recent
+    assessment. A prioritisation aid, not a verdict, and separate from how
+    confident LAN Fence is about what the device is.
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    cfg = _load_config(config)
+    allowlist = Allowlist.load(cfg.resolved_allowlist_file())
+    apply_self_trust(allowlist, interface=cfg.scan.interfaces or cfg.scan.interface)
+    now = utcnow()
+    with _open_store(cfg.resolved_db_path()) as store:
+        labels = _device_labels(store, allowlist)
+        if mac is None:
+            ranked = sorted(store.all_risk().items(), key=lambda kv: (-kv[1].score, kv[0]))
+            if output_format == "json":
+                typer.echo(json.dumps(
+                    [{"mac": m, "device": labels.get(m, m), **a.model_dump(mode="json")} for m, a in ranked], indent=2,
+                ))
+                return
+            if not ranked:
+                typer.echo("No risk assessments yet - they're made on each scan or monitor sweep.")
+                return
+            for device_mac, assessment in ranked:
+                top = assessment.contributions[0].label if assessment.contributions else ""
+                typer.echo(
+                    f"{assessment.score:>3}  {assessment.level.upper():<9} {labels.get(device_mac, device_mac):<28} "
+                    f"{device_mac}  {top}"
+                )
+            return
+        try:
+            norm_mac = normalize_mac(mac)
+        except ValueError as exc:
+            typer.secho(f"error: {exc}", fg="red", err=True)
+            raise typer.Exit(code=2) from exc
+        assessment = assess_device(
+            store, allowlist, cfg, norm_mac, signatures=SignatureSet.load(cfg.rogue_signatures_file),
+            identity_rules=IdentityRuleSet.load(cfg.identity_rules_file), now=now,
+        )
+    if assessment is None:
+        typer.secho(f"error: no device with MAC {norm_mac} has been observed", fg="red", err=True)
+        raise typer.Exit(code=2)
+    if output_format == "json":
+        typer.echo(json.dumps({"mac": norm_mac, "device": labels.get(norm_mac, norm_mac),
+                               **assessment.model_dump(mode="json")}, indent=2))
+        return
+    typer.echo(f"{labels.get(norm_mac, norm_mac)} ({norm_mac})")
+    typer.echo("\n".join(risk_lines(assessment)))
+
+
+@app.command()
+def policy(
+    list_policies: bool = typer.Option(True, "--list", help="List the alert policies in effect (the default)."),
+    output_format: str = typer.Option("table", "--format", "-f", help="table | json"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file."),
+) -> None:
+    """Show which changes alert, how urgently, and in what order.
+
+    Policies are set under `policies:` in the config file (replacing the
+    built-in defaults) - see README "Alert policies".
+    """
+
+    if output_format not in ("table", "json"):
+        typer.secho(f"error: --format must be 'table' or 'json', got {output_format!r}", fg="red", err=True)
+        raise typer.Exit(code=2)
+    cfg = _load_config(config)
+    policies = effective_policies(cfg.policies)
+    if output_format == "json":
+        typer.echo(json.dumps({
+            "source": "config" if cfg.policies is not None else "default",
+            "policies": [p.model_dump(mode="json") for p in policies],
+        }, indent=2))
+        return
+    typer.echo(render_policies(policies, from_config=cfg.policies is not None))
 
 
 @app.command()
