@@ -50,11 +50,12 @@ from lanfence.changes import is_admin_service, normalize_mdns_type, port_value, 
 from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.dossier import DeviceDossier, build_device_dossier
-from lanfence.engine import build_inventory, is_review_needed
+from lanfence.engine import _device_evidence_lines, build_inventory, is_review_needed
 from lanfence.fingerprint import SignatureSet
 from lanfence.identity import IdentityRuleSet
 from lanfence.logging_config import get_logger
-from lanfence.models import RISK_LEVELS, BaselineItem, ChangeEvent, DeviceBaseline, RiskAssessment
+from lanfence.models import RISK_LEVELS, BaselineItem, ChangeEvent, DeviceBaseline, Finding, RiskAssessment
+from lanfence.policy import BUILTIN_ALERTED, DeviceContext, change_alert, effective_policies, match, shape_builtin_finding
 from lanfence.risk import assess, gather_inputs
 
 log = get_logger("baseline")
@@ -619,3 +620,94 @@ def compare(store: DeviceStore, mac: str, *, since: datetime | None, now: dateti
             in_baseline=item.in_baseline, origin=item.origin,
         ))
     return sorted(rows, key=lambda r: (r.signal, r.label))
+
+
+# --- policies: which changes become alerts -----------------------------------
+
+
+def _device_context(dossier: DeviceDossier | None) -> DeviceContext:
+    if dossier is None:
+        return DeviceContext()
+    return DeviceContext(
+        trusted=dossier.device.allowlisted, category=dossier.effective_category, label=dossier.label,
+    )
+
+
+def run_change_detection(
+    store: DeviceStore,
+    allowlist: Allowlist,
+    cfg: Config,
+    *,
+    signatures: SignatureSet,
+    identity_rules: IdentityRuleSet,
+    now: datetime,
+) -> tuple[list[ChangeEvent], list[Finding]]:
+    """Detect changes, record which policy (if any) each one matched, and
+    return the recorded changes plus the alerts to send for them. Alerts
+    for change types LAN Fence already alerts on in its own right (see
+    :data:`lanfence.policy.BUILTIN_ALERTED`) are never duplicated here -
+    :func:`shape_findings` handles those."""
+
+    events = detect_changes(store, allowlist, cfg, signatures=signatures, identity_rules=identity_rules, now=now)
+    policies = effective_policies(cfg.policies)
+    alerts: list[Finding] = []
+    dossiers: dict[str, DeviceDossier | None] = {}
+    for event in events:
+        if event.suppressed:
+            continue
+        if event.mac is not None and event.mac not in dossiers:
+            dossiers[event.mac] = build_device_dossier(
+                store, allowlist, event.mac, signatures=signatures, identity_rules=identity_rules,
+                vendor_file=cfg.vendor_file, now=now, inspection=None,
+            )
+        dossier = dossiers.get(event.mac) if event.mac else None
+        policy = match(policies, event, _device_context(dossier))
+        if policy is None:
+            continue
+        store.set_change_policy(event.id, policy.id, alerted_at=None)
+        if policy.action != "alert" or event.change_type in BUILTIN_ALERTED:
+            continue
+        risk = store.get_risk(event.mac) if event.mac else None
+        device = dossier.device if dossier else None
+        evidence = _device_evidence_lines(
+            mac=device.mac, ip=device.ip, hostname=device.hostname, vendor=device.vendor,
+            allowlisted=device.allowlisted, allowlist_name=device.allowlist_name, metadata=device.metadata,
+        ) if device else []
+        recommendation = risk.recommendation if risk is not None and risk.level in ("high", "critical") else (
+            "Review this change in LAN Fence's What Changed? view, and accept it if it's expected."
+        )
+        alerts.append(change_alert(
+            event, policy, _device_context(dossier), evidence=evidence, recommendation=recommendation,
+        ))
+    return events, alerts
+
+
+def shape_findings(
+    findings: list[Finding],
+    store: DeviceStore,
+    allowlist: Allowlist,
+    cfg: Config,
+    *,
+    signatures: SignatureSet,
+    identity_rules: IdentityRuleSet,
+    now: datetime,
+) -> tuple[list[Finding], list[Finding]]:
+    """Apply alert policies to LAN Fence's built-in findings (new or
+    returning devices, always-on absence, unapproved DHCP servers).
+    Returns ``(shaped, to_dispatch)``: every finding with any
+    policy-adjusted severity, and the ones still to send now (a
+    digest-only or "none" policy holds a finding back)."""
+
+    policies = effective_policies(cfg.policies)
+    shaped: list[Finding] = []
+    to_dispatch: list[Finding] = []
+    for finding in findings:
+        dossier = build_device_dossier(
+            store, allowlist, finding.mac, signatures=signatures, identity_rules=identity_rules,
+            vendor_file=cfg.vendor_file, now=now, inspection=None,
+        ) if finding.mac and finding.change_type else None
+        result, dispatch = shape_builtin_finding(finding, policies, _device_context(dossier))
+        shaped.append(result)
+        if dispatch:
+            to_dispatch.append(result)
+    return shaped, to_dispatch

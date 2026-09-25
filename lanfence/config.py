@@ -21,6 +21,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from lanfence.policy import Policy, validate_policies
+
 
 class ScanConfig(BaseModel):
     """Network scan settings."""
@@ -607,6 +609,9 @@ class Config(BaseModel):
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     changes: ChangesConfig = Field(default_factory=ChangesConfig)
+    #: Alert policies (see lanfence/policy.py). Unset uses the built-in
+    #: defaults; a list here replaces them entirely.
+    policies: list[Policy] | None = None
     web: WebConfig = Field(default_factory=WebConfig)
     #: Where the persistent device database lives.
     db_path: Path = Path("~/.local/share/lanfence/lanfence.db")
@@ -618,6 +623,11 @@ class Config(BaseModel):
     rogue_signatures_file: Path | None = None
     #: Extra Know Your Network identity rules, merged with the packaged ones.
     identity_rules_file: Path | None = None
+
+    @field_validator("policies")
+    @classmethod
+    def _unique_policy_ids(cls, value: list[Policy] | None) -> list[Policy] | None:
+        return validate_policies(value) if value is not None else None
 
     @classmethod
     def load(cls, path: Path | str | None) -> "Config":

@@ -153,6 +153,7 @@ def process_dhcp_server_sighting(
     return Finding(
         mac=None,
         kind="network_service",
+        change_type="dhcp_server_unexpected",
         subject_id=f"{interface}/{sighting.server_id}",
         title="Unexpected DHCP server observed",
         severity="medium",

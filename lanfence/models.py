@@ -37,7 +37,7 @@ PresencePolicyName = Literal["unspecified", "intermittent", "always-on"]
 #: signal; "availability" is an always-on absence/recovery finding;
 #: "network_service" is about a network role (e.g. a DHCP server) rather
 #: than any one device - see :attr:`Finding.mac` being optional.
-FindingKind = Literal["security", "lifecycle", "availability", "network_service"]
+FindingKind = Literal["security", "lifecycle", "availability", "network_service", "change"]
 
 #: The device-category taxonomy used by the identity engine
 #: (:mod:`lanfence.identity`) and an operator's own category override (see
@@ -402,6 +402,19 @@ class Finding(BaseModel):
     #: instead of matching on ``title`` text. ``None`` for an ordinary
     #: device finding, where ``mac`` already is that identity.
     subject_id: str | None = None
+    #: The kind of change this finding is about (see :data:`ChangeType`) -
+    #: how alert policies recognise it (see :mod:`lanfence.policy`).
+    change_type: str | None = None
+    #: The alert policy that decided this finding's severity, if any.
+    policy_id: str | None = None
+    #: The recorded change this finding alerts on, if any.
+    change_event_id: int | None = None
+    #: A policy's own cooldown for this alert (``None``: the configured
+    #: ``alerts.rate_limit_seconds``). Internal - not part of JSON output.
+    cooldown_seconds: float | None = Field(default=None, exclude=True)
+    #: Its own cooldown lane (see :func:`lanfence.engine.filter_rate_limited`),
+    #: e.g. one per service per device for a change alert. Internal.
+    cooldown_key: str | None = Field(default=None, exclude=True)
 
     @field_validator("mac")
     @classmethod

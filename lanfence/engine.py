@@ -180,7 +180,7 @@ def build_findings(device: Device, event_type: EventType | None, matches: list[S
         # A first-ever discovery (kind="security" even when untrusted) and
         # any independent security evidence are never suppressed.
         result = [f for f in result if f.kind != "lifecycle"]
-    return result
+    return [f.model_copy(update={"change_type": event_type}) for f in result]
 
 
 def coalesce_sightings(sightings: list[scanner.ArpSighting]) -> list[scanner.ArpSighting]:
@@ -291,6 +291,7 @@ def process_sighting(
                 title="Always-on device recovered",
                 severity="info",
                 kind="availability",
+                change_type="reappeared",
                 rationale=(
                     "This device is policy'd as always-on and had been confirmed absent "
                     "long enough to trigger an availability alert; it has now reappeared."
@@ -348,6 +349,7 @@ def evaluate_availability(
                 title="Always-on device has been absent longer than expected",
                 severity="medium",
                 kind="availability",
+                change_type="disconnected",
                 rationale=(
                     "This device is policy'd as always-on and has not been seen for at "
                     f"least {delay:.0f}s since it was confirmed offline."
@@ -665,6 +667,8 @@ def _alert_cooldown_key(finding: Finding) -> str:
         return f"{finding.mac}#availability#{finding.severity}"
     if finding.kind == "network_service":
         return f"network_service#{finding.subject_id}#{finding.severity}"
+    if finding.cooldown_key is not None:
+        return finding.cooldown_key
     return finding.mac
 
 
@@ -696,8 +700,9 @@ def filter_rate_limited(
     ordered = sorted(findings, key=lambda f: -_SEVERITY_RANK[f.severity])
     result = []
     for finding in ordered:
+        cooldown = cfg.rate_limit_seconds if finding.cooldown_seconds is None else finding.cooldown_seconds
         if not store.due_for_alert(
-            finding.mac or "", finding.severity, now=now, cooldown_seconds=cfg.rate_limit_seconds,
+            finding.mac or "", finding.severity, now=now, cooldown_seconds=cooldown,
             key=_alert_cooldown_key(finding),
         ):
             continue

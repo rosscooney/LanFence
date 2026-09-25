@@ -21,12 +21,13 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
 
 from lanfence import __version__, active_inspect, alerts, discovery, monitor_status, monitor_ui, scanner, web
 from lanfence.alert_worker import AlertDeliveryWorker
+from lanfence.baseline import run_change_detection, shape_findings
 from lanfence.allowlist import Allowlist
 from lanfence.channels import (
     CHANNEL_FIELDS,
@@ -75,7 +76,7 @@ from lanfence.engine import (
 from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.fsutil import atomic_write
 from lanfence.identity import IdentityRuleSet
-from lanfence.logging_config import setup_logging
+from lanfence.logging_config import get_logger, setup_logging
 from lanfence.models import ASSET_TYPES, DEVICE_CATEGORIES, Finding, ScanResult, format_datetime
 from lanfence.netutil import normalize_mac
 from lanfence.safe_errors import summarize_error
@@ -95,6 +96,8 @@ from lanfence.report import (
     render_triage_summary,
 )
 from lanfence.vendor import format_vendor_table, parse_ieee_oui_csv
+
+log = get_logger("cli")
 
 app = typer.Typer(
     add_completion=False,
@@ -478,10 +481,20 @@ def scan(
             else:
                 typer.echo("scanning...")
                 result = _do_sweep()
+        now = utcnow()
+        _shaped, dispatchable = shape_findings(
+            result.findings, store, allowlist, cfg, signatures=signatures, identity_rules=identity_rules, now=now,
+        )
+        change_alerts: list[Finding] = []
+        if cfg.changes.enabled:
+            _changes, change_alerts = run_change_detection(
+                store, allowlist, cfg, signatures=signatures, identity_rules=identity_rules, now=now,
+            )
         if alert:
-            not_snoozed = filter_snoozed(result.findings, store, now=utcnow())
-            to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
+            not_snoozed = filter_snoozed(dispatchable + change_alerts, store, now=now)
+            to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=now)
             alerts.dispatch(to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location)
+            _mark_change_alerts_sent(store, to_send, now=now)
 
         if output_format != "json":
             # First-run/ongoing triage orientation over the *whole* known
@@ -572,7 +585,8 @@ def _emit_findings(
     findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore,
     activity: "monitor_ui.ActivityLog | None" = None, stats: "monitor_ui.MonitorStats | None" = None,
     alert_worker: "AlertDeliveryWorker | None" = None,
-) -> None:
+    shaper: "Callable[[list[Finding]], tuple[list[Finding], list[Finding]]] | None" = None,
+) -> list[Finding]:
     """Report ``findings`` to the operator, then dispatch alerts as usual.
 
     ``activity`` is given only by `lanfence monitor` in live mode - when
@@ -593,7 +607,16 @@ def _emit_findings(
     thread that owns ``store``, regardless of whether delivery itself is
     backgrounded. ``None`` (the default, and always the case for `scan`)
     dispatches synchronously exactly as before.
+
+    ``shaper`` applies alert policies (see
+    :func:`lanfence.baseline.shape_findings`): it returns the findings to
+    show (with any policy-set severity) and the ones still to send now.
+    Returns the findings actually handed off for delivery.
     """
+
+    dispatchable = findings
+    if shaper is not None and findings:
+        findings, dispatchable = shaper(findings)
 
     if stats is not None:
         for _finding in findings:
@@ -615,15 +638,23 @@ def _emit_findings(
             if finding.recommendation:
                 typer.secho(f"    Recommendation: {finding.recommendation}", fg="cyan")
 
-    if alert and findings:
-        not_snoozed = filter_snoozed(findings, store, now=utcnow())
-        to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
-        if not to_send:
-            pass
-        elif alert_worker is not None:
-            alert_worker.submit(to_send, cfg.alerts)
-        else:
-            alerts.dispatch(to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location)
+    if not (alert and dispatchable):
+        return []
+    not_snoozed = filter_snoozed(dispatchable, store, now=utcnow())
+    to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=utcnow())
+    if not to_send:
+        return []
+    if alert_worker is not None:
+        alert_worker.submit(to_send, cfg.alerts)
+    else:
+        alerts.dispatch(to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location)
+    return to_send
+
+
+def _mark_change_alerts_sent(store: DeviceStore, sent: list[Finding], *, now: datetime) -> None:
+    for finding in sent:
+        if finding.change_event_id is not None:
+            store.set_change_policy(finding.change_event_id, finding.policy_id, alerted_at=now)
 
 
 class _DropCountingQueue(queue.Queue):
@@ -702,6 +733,7 @@ def monitor(
     monitor_status.write_pid_file()
 
     signatures = SignatureSet.load(cfg.rogue_signatures_file)
+    identity_rules = IdentityRuleSet.load(cfg.identity_rules_file)
     allowlist = Allowlist.load(cfg.resolved_allowlist_file())
     store = _open_store(
         cfg.resolved_db_path(),
@@ -849,6 +881,31 @@ def monitor(
         review = sum(1 for d in build_inventory(store, allowlist) if is_review_needed(d, now=utcnow()))
         stats.set_inventory_counts(known=known, review=review)
 
+    def _shape(findings: list[Finding]) -> tuple[list[Finding], list[Finding]]:
+        return shape_findings(
+            findings, store, allowlist, cfg, signatures=signatures, identity_rules=identity_rules, now=utcnow(),
+        )
+
+    def _detect_changes() -> None:
+        """Compare devices with their baselines after a sweep and alert on
+        what policies say deserves it. Never allowed to stop monitoring."""
+
+        try:
+            now = utcnow()
+            _events, change_alerts = run_change_detection(
+                store, allowlist, cfg, signatures=signatures, identity_rules=identity_rules, now=now,
+            )
+            if not change_alerts:
+                return
+            sent = _emit_findings(
+                change_alerts, alert=alert, cfg=cfg, store=store,
+                activity=activity_log, stats=stats, alert_worker=alert_worker,
+            )
+            _mark_change_alerts_sent(store, sent or [], now=now)
+        except Exception as exc:  # noqa: BLE001 - change detection must never stop monitoring
+            log.exception("change detection failed")
+            _report_warning(f"change detection failed this sweep: {summarize_error(exc)}")
+
     def _loop() -> None:
         nonlocal net, subnet_by_iface
         last_sweep = 0.0
@@ -894,7 +951,7 @@ def monitor(
                     _report_lifecycle("RETURNED", mac=device.mac, hostname=device.hostname, ip=device.ip)
                 _emit_findings(
                     findings, alert=alert, cfg=cfg, store=store,
-                    activity=activity_log, stats=stats, alert_worker=alert_worker,
+                    activity=activity_log, stats=stats, alert_worker=alert_worker, shaper=_shape,
                 )
 
             # DHCP server observations are processed the same way, from
@@ -914,7 +971,7 @@ def monitor(
                 if finding is not None:
                     _emit_findings(
                         [finding], alert=alert, cfg=cfg, store=store,
-                        activity=activity_log, stats=stats, alert_worker=alert_worker,
+                        activity=activity_log, stats=stats, alert_worker=alert_worker, shaper=_shape,
                     )
 
             # Advertised-service evidence, same bounded-drain shape as
@@ -1007,8 +1064,10 @@ def monitor(
                     _report_error(err, label="SCAN")
                 _emit_findings(
                     result.findings, alert=alert, cfg=cfg, store=store,
-                    activity=activity_log, stats=stats, alert_worker=alert_worker,
+                    activity=activity_log, stats=stats, alert_worker=alert_worker, shaper=_shape,
                 )
+                if cfg.changes.enabled:
+                    _detect_changes()
                 if use_live:
                     _refresh_inventory_counts()
                     last_stats_refresh = now

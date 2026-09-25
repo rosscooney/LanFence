@@ -719,6 +719,31 @@ def test_scan_warns_that_subnet_is_ignored_across_several_interfaces(config_path
     assert result.exit_code == 0, result.output
     assert "can't apply to all of them" in result.output
 
+
+def test_scan_starts_learning_each_devices_baseline(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    sightings = [scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())]
+    result = _scan_with_sightings(config_path, monkeypatch, sightings, extra_args=["--format", "json"])
+    assert result.exit_code == 0, result.output
+    with DeviceStore(yaml.safe_load(config_path.read_text())["db_path"]) as store:
+        baseline = store.get_baseline("b8:e9:37:11:22:33")
+        assert baseline is not None and baseline.established_at is None
+        assert store.get_risk("b8:e9:37:11:22:33") is not None
+
+
+def test_change_detection_can_be_turned_off(config_path: Path, monkeypatch):
+    from lanfence import scanner as scanner_module
+
+    cfg_dict = yaml.safe_load(config_path.read_text())
+    cfg_dict["changes"] = {"enabled": False}
+    config_path.write_text(yaml.safe_dump(cfg_dict))
+    sightings = [scanner_module.ArpSighting(mac="b8:e9:37:11:22:33", ip="10.0.0.10", seen_at=_now())]
+    result = _scan_with_sightings(config_path, monkeypatch, sightings, extra_args=["--format", "json"])
+    assert result.exit_code == 0, result.output
+    with DeviceStore(cfg_dict["db_path"]) as store:
+        assert store.all_baselines() == {}
+
 def test_scan_table_output_shows_triage_summary(config_path: Path, monkeypatch):
     from lanfence import scanner as scanner_module
 
