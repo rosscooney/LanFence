@@ -182,3 +182,36 @@ def test_resetting_the_baseline_keeps_history(portal):
         assert store.get_baseline(NAS) is None
         assert store.get_change_event(portal["ssh"]) is not None
         assert any(e.change_type == "baseline_reset" for e in store.change_events(mac=NAS))
+
+
+# --- dashboard and inventory ------------------------------------------------------
+
+
+def _save_risk(portal, mac: str, score: int, level: str) -> None:
+    from lanfence.models import RiskAssessment
+
+    with DeviceStore(portal["cfg"].resolved_db_path()) as store:
+        store.save_risk(mac, RiskAssessment(score=score, level=level), now=datetime.now(timezone.utc))
+
+
+def test_dashboard_security_overview_counts_link_to_the_lists(portal):
+    _save_risk(portal, NAS, 57, "high")
+    _save_risk(portal, PHONE, 5, "low")
+    body = _get(portal, "/")
+    assert "Network security" in body
+    assert "1 normal" in body  # the phone: low risk, nothing awaiting review
+    assert '<a href="/changes?since=7d&amp;review=attention&amp;severity=low">1 need review</a>' in body
+    assert '<a href="/?risk=high">1 high risk</a>' in body
+    assert "1 changed behaviour</a>" in body
+    assert "1 service change(s)</a>" in body
+
+
+def test_inventory_risk_column_and_filter(portal):
+    _save_risk(portal, NAS, 57, "high")
+    _save_risk(portal, PHONE, 5, "low")
+    everything = _get(portal, "/")
+    assert "<th><a href=\"/?sort=risk" in everything
+    high = _get(portal, "/?risk=high")
+    assert NAS in high and PHONE not in high.split("<tbody>")[1]
+    by_risk = _get(portal, "/?sort=risk&dir=desc").split("<tbody>")[1]
+    assert by_risk.index(NAS) < by_risk.index(PHONE)

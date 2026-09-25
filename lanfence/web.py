@@ -89,6 +89,7 @@ from lanfence.models import (
     CHANGE_TYPES,
     DEVICE_CATEGORIES,
     EXCLUDABLE_SIGNALS,
+    RISK_LEVELS,
     SIGNIFICANCES,
     ChangeEvent,
     Device,
@@ -842,9 +843,16 @@ _DEVICE_LIST_COLUMNS: dict[str, tuple[str, object]] = {
     "status": ("Status", lambda dos: dos.device.status),
     "trust": ("Trust", lambda dos: "trusted" if dos.device.allowlisted else "untrusted"),
     "confidence": ("Confidence", lambda dos: dos.identity.confidence),
+    "risk": ("Risk", lambda dos: dos.risk.score if dos.risk else -1),
     "last_seen": ("Last seen", lambda dos: dos.device.last_seen),
 }
 _DEFAULT_SORT = "mac"
+
+
+def _risk_cell(risk: RiskAssessment | None) -> str:
+    if risk is None:
+        return '<span class="muted">-</span>'
+    return f'{_sig_badge(risk.level)} <span class="muted">{risk.score}</span>'
 
 
 def _render_device_list(
@@ -884,6 +892,7 @@ def _render_device_list(
                 f"<td>{_status_badge(device)}</td>"
                 f"<td>{_trust_badge(device)}</td>"
                 f"<td>{confidence}</td>"
+                f"<td>{_risk_cell(dossier.risk)}</td>"
                 f"<td>{html.escape(device.last_seen.strftime('%Y-%m-%d %H:%M'))}</td>"
                 "</tr>"
             )
@@ -912,7 +921,7 @@ def _render_device_list(
 #: shared between parsing the incoming request and building "preserve the
 #: current filters" links (sort headers, overview counts).
 _FILTER_PARAMS: tuple[str, ...] = (
-    "trust", "status", "category", "asset_type", "owner", "unknown", "uncertain", "no_owner", "review", "q",
+    "trust", "status", "category", "asset_type", "owner", "unknown", "uncertain", "no_owner", "review", "risk", "q",
 )
 
 
@@ -959,6 +968,10 @@ def _filter_dossiers(dossiers: list[DeviceDossier], filters: dict[str, str], *, 
             continue
         if filters["review"] == "1" and not is_review_needed(device, now=now):
             continue
+        if filters["risk"] in RISK_LEVELS and (
+            dossier.risk is None or RISK_LEVELS.index(dossier.risk.level) < RISK_LEVELS.index(filters["risk"])
+        ):
+            continue
         if q_needle:
             haystack = " ".join(
                 [dossier.label, device.mac, device.ip or "", _dossier_owner(dossier), device.vendor or ""]
@@ -982,6 +995,11 @@ def _render_filter_form(filters: dict[str, str], *, sort: str, direction: str) -
     review_checked = " checked" if filters["review"] == "1" else ""
     uncertain_checked = " checked" if filters["uncertain"] == "1" else ""
     no_owner_checked = " checked" if filters["no_owner"] == "1" else ""
+    risk_options = "".join(
+        f'<option value="{v}"{" selected" if v == filters["risk"] else ""}>{label}</option>'
+        for v, label in (("", "Any"), ("moderate", "Moderate or above"), ("high", "High or above"),
+                         ("critical", "Critical"))
+    )
 
     return f"""
 <form class="stack" method="get" action="/" style="flex-direction:row;flex-wrap:wrap;gap:0.75rem;align-items:end">
@@ -1006,6 +1024,10 @@ def _render_filter_form(filters: dict[str, str], *, sort: str, direction: str) -
 <div>
 <label for="asset_type">Asset type</label>
 <select id="asset_type" name="asset_type">{asset_type_options}</select>
+</div>
+<div>
+<label for="risk">Risk</label>
+<select id="risk" name="risk">{risk_options}</select>
 </div>
 <div>
 <label for="owner">Owner</label>
@@ -1073,6 +1095,59 @@ def _render_network_overview(dossiers: list[DeviceDossier], *, now: datetime) ->
 <h2>Know Your Network</h2>
 <p>{' &middot; '.join(count_parts)}</p>
 {attention_html}
+"""
+
+
+def _render_security_overview(
+    dossiers: list[DeviceDossier], recent: list[ChangeEvent], *, now: datetime,
+) -> str:
+    """The dashboard's "network security" panel: how many devices look
+    normal, need a look, are high risk or changed behaviour, and what
+    happened in the last day - every count links to the matching list.
+    ``recent`` is the last week's changes."""
+
+    def _link(count: int, text: str, href: str) -> str:
+        return f'<a href="{href}">{count} {html.escape(text)}</a>'
+
+    # Informational changes (an address renewal, say) never make a device
+    # "need review" - they'd drown out the ones that matter.
+    attention_macs = {
+        e.mac for e in recent
+        if e.mac and e.needs_attention(now=now) and significance_at_least(e.significance, "low")
+    }
+    high_risk = sum(1 for d in dossiers if d.risk and d.risk.level in ("high", "critical"))
+    changed_macs = {e.mac for e in recent if e.mac and e.change_type in _BEHAVIOUR_CHANGES}
+    normal = sum(
+        1 for d in dossiers
+        if d.device.mac not in attention_macs and (d.risk is None or d.risk.level == "low")
+    )
+    behaviour_query = "&amp;".join(f"type={t}" for t in _BEHAVIOUR_CHANGES)
+    headline = [
+        f"{normal} normal",
+        _link(len(attention_macs), "need review", "/changes?since=7d&amp;review=attention&amp;severity=low"),
+        _link(high_risk, "high risk", "/?risk=high"),
+        _link(len(changed_macs), "changed behaviour", f"/changes?since=7d&amp;{behaviour_query}"),
+    ]
+
+    day = [e for e in recent if e.occurred_at >= now - timedelta(days=1)]
+    service_query = "&amp;".join(f"type={t}" for t in _SERVICE_CHANGES)
+    last_day = [
+        (sum(1 for e in day if e.change_type == "new_device"), "new device(s)",
+         "/changes?since=24h&amp;type=new_device"),
+        (sum(1 for e in day if e.change_type in _SERVICE_CHANGES), "service change(s)",
+         f"/changes?since=24h&amp;{service_query}"),
+        (sum(1 for e in day if e.change_type == "dhcp_server_unexpected"), "unapproved DHCP server(s)",
+         "/changes?since=24h&amp;type=dhcp_server_unexpected"),
+        (sum(1 for e in day if e.significance == "info"), "informational change(s)",
+         "/changes?since=24h&amp;upto=info"),
+    ]
+    day_parts = [_link(count, text, href) for count, text, href in last_day if count]
+    day_html = (" &middot; ".join(day_parts) if day_parts else '<span class="muted">nothing changed</span>')
+    return f"""
+<h2>Network security</h2>
+<p>{" &middot; ".join(headline)}</p>
+<p><strong>Last 24 hours:</strong> {day_html}</p>
+<p class="muted">Risk is a prioritisation aid, not a verdict. <a href="/changes">What Changed? &rarr;</a></p>
 """
 
 
@@ -1949,10 +2024,17 @@ def _make_handler(context: _WebContext) -> type[BaseHTTPRequestHandler]:
                     )
                     for d in inventory
                 ]
+                risks = store.all_risk()
+                for dossier in dossiers:
+                    dossier.risk = risks.get(dossier.device.mac)
+                recent = store.change_events(since=now - timedelta(days=7), limit=_MAX_LISTED_CHANGES * 4)
             filtered = _filter_dossiers(dossiers, filters, now=now)
             extra_query = _filters_query_string(filters)
             body = f"""
 <h1>Devices</h1>
+<div class="panel">
+{_render_security_overview(dossiers, recent, now=now)}
+</div>
 <div class="panel">
 {_render_network_overview(dossiers, now=now)}
 </div>

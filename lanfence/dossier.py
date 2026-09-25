@@ -37,7 +37,15 @@ from lanfence.db import DeviceStore
 from lanfence.engine import build_device, is_review_needed
 from lanfence.fingerprint import SignatureSet, fingerprint_device
 from lanfence.identity import DeviceIdentity, IdentityEvidence, IdentityRuleSet, infer_identity
-from lanfence.models import AddressEvidence, AdvertisedService, Device, InspectionResult, NameEvidence, Severity
+from lanfence.models import (
+    AddressEvidence,
+    AdvertisedService,
+    Device,
+    InspectionResult,
+    NameEvidence,
+    RiskAssessment,
+    Severity,
+)
 from lanfence.netutil import is_locally_administered
 from lanfence.sanitize import clean_text
 
@@ -86,6 +94,10 @@ class DeviceDossier(BaseModel):
     #: found nothing" (an empty ``open_ports`` list on a real result means
     #: that).
     inspection: Optional[InspectionResult] = None
+    #: The device's last stored risk assessment (see :mod:`lanfence.risk`),
+    #: when a caller attached it - the web inventory does, for its Risk
+    #: column. Not serialised: `lanfence device` reports risk itself.
+    risk: Optional[RiskAssessment] = Field(default=None, exclude=True)
 
     @property
     def label(self) -> str:
