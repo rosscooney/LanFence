@@ -3257,13 +3257,16 @@ def test_setup_twilio_not_offered_digest(config_path: Path):
 
 
 def test_setup_configure_another_channel_loop(config_path: Path):
+    from lanfence.setup_ui import SECTIONS
+
+    comms = list(SECTIONS).index("Communications") + 1
     with patch("lanfence.cli._stdin_is_interactive", return_value=True):
         result = runner.invoke(
             app, ["setup", "--config", str(config_path)],
             input=(
-                "1\nslack\n"
+                f"{comms}\nslack\n"
                 "https://hooks.slack.com/services/x\n\ny\nn\n"
-                "1\ndiscord\n"
+                f"{comms}\ndiscord\n"
                 "https://discord.com/api/webhooks/x\n\ny\nn\n"
                 "save\ny\nn\nn\nexit\n"
             ),

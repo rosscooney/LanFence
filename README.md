@@ -1354,26 +1354,42 @@ lanfence setup --config /etc/lanfence/config.yaml
 lanfence setup slack              # go directly to Slack's own setup wizard
 ```
 
-`lanfence setup` (no argument) opens a numbered application setup menu.
-Choose Communications to edit destinations, or Scanning, Offline detection,
-DHCP servers, Service discovery, Daily digest, Storage, or Alert delivery.
-All sections share an unsaved draft: **Review** shows a redacted before/after
-summary; **Save** validates everything and asks for confirmation; **Discard**
-restores the last saved configuration. Exit with unsaved edits offers Save,
-Discard, or Return. Ctrl+C/EOF discards only edits since the last save.
-Opening setup, reviewing changes, or saving never scans or sends messages.
+`lanfence setup` (no argument) opens a numbered menu, ordered from where
+LAN Fence runs to how it tells you:
 
-Fields show their effective value and whether it is explicit or inherited.
-Blank keeps a value; `reset` removes the override; nullable fields accept
-`null` for explicit auto/unset. Time fields accept seconds or durations such
-as `5m`. Enumerations show their choices; digest destinations are a
-comma-separated list. Cross-setting warnings identify inactive discovery and
+1. Site identity
+2. Network interfaces
+3. Scanning
+4. Offline detection
+5. Service discovery
+6. DHCP servers
+7. Change detection
+8. Communications
+9. Alert delivery
+10. Daily digest
+11. Web portal
+12. Storage
+
+Each section opens with a line saying what it's for, then lists its
+settings by name with their current value, marked `(default)` until you
+change them. Every menu takes `b` to go back. All sections share an
+unsaved draft: once something has changed, the main menu offers `s`
+(**Save**: validates everything and asks for confirmation), `r`
+(**Review**: a redacted before/after summary) and `d` (**Discard**: back to
+the last saved configuration). `q` exits; with unsaved edits it asks
+whether to save, discard or return. Ctrl+C/EOF discards only edits since
+the last save. Opening setup, reviewing changes, or saving never scans or
+sends messages.
+
+Opening a setting shows its config key, current value and default. Blank
+keeps a value; `reset` returns it to the default; settings that can be
+unset accept `null`. Time settings accept seconds or durations such as
+`5m`. Choices are listed; digest destinations are a comma-separated list. Cross-setting warnings identify inactive discovery and
 disabled digest destinations. Save does not rewrite a file when nothing changed.
 
-The DHCP server section includes a numbered **Approved DHCP servers** entry
-(after its own listed settings, same convention as every other numbered
-section), with Add, Observed, Reset, and Back actions always offered - Edit
-and Remove only appear once at least one server is approved. Observed opens
+The DHCP servers section includes a numbered **Approved servers** entry
+after its own settings, with Add, Observed and Clear all always offered -
+Edit and Delete only appear once at least one server is approved. Observed opens
 a read-only inventory: select a server, review its identifier/interface and
 explicitly confirm approval. Its `server_ip` is option 54, not necessarily
 the source or relay IP. VLAN interfaces such as `eth0.20` have separate
@@ -1515,8 +1531,7 @@ lanfence web         # start the already-configured portal (foreground)
 
 There is no separate `lanfence web enable`/`set-password` command -
 everything is configured through `lanfence setup`'s **Web portal** section
-(`web.enabled`, `web.port`, and a "Set/change password" action listed
-alongside them). `lanfence web` only starts what that section already
+(enable it, its port, and a **Password** entry listed alongside them). `lanfence web` only starts what that section already
 describes, and refuses to start if the portal isn't enabled or no password
 has been set yet. Right after enabling it and setting a password, `setup`
 checks for an active local firewall (`ufw`/`firewalld`) that could block
@@ -1649,8 +1664,8 @@ LAN Fence never auto-approves the first responder, and an existing device
 allowlist entry never implies DHCP server approval either; they're
 independent trust decisions, checked separately.
 
-`lanfence setup`'s DHCP servers section (`1` to enable, `a` for Approved
-DHCP servers) is the guided way to manage approvals - add one by hand
+`lanfence setup`'s DHCP servers section (`1` to enable, `3` for Approved
+servers) is the guided way to manage approvals - add one by hand
 (name, interface, the DHCP option 54 server identifier), or use its
 `o` **Observed** action to pick one from servers `monitor` has actually
 seen on the wire (`lanfence dhcp-servers` shows the same read-only list

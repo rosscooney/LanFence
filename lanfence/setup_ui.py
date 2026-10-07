@@ -65,6 +65,70 @@ SECTIONS = {
     "Web portal": ["web.enabled", "web.port"],
     "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file", "identity_rules_file"],
 }
+#: One line under each section's heading, saying what it's for.
+SECTION_HELP = {
+    "Site identity": "A name and location shown on alerts, digests and the web portal, so you can tell sites apart.",
+    "Network interfaces": "Which interfaces LAN Fence watches. Pick several (a VLAN such as eth0.10 appears as its "
+                          "own interface), or leave it on auto to use one.",
+    "Scanning": "How often LAN Fence sweeps the network, and what it listens for in between.",
+    "Offline detection": "How long a device can go quiet before it's marked offline.",
+    "Service discovery": "Listen for devices announcing services, such as printers, speakers and media servers. "
+                         "Needs passive capture (under Scanning).",
+    "DHCP servers": "Alert when a DHCP server that isn't approved answers - a rogue or misconfigured one can "
+                    "redirect new clients. Needs passive capture and DHCP snooping (under Scanning).",
+    "Change detection": "Learn what's normal for each device and report when it changes.",
+    "Communications": "Where alerts are sent: email, Slack, Discord, Teams, ntfy, a webhook, SMS or syslog.",
+    "Alert delivery": "Which findings are sent, and how often, so a noisy device can't flood you.",
+    "Daily digest": "Which destinations get the daily summary (sent by `lanfence digest --send`).",
+    "Web portal": "A password-protected view of your devices in a browser, on this host's LAN address.",
+    "Storage": "Where LAN Fence keeps its files. Changing a path doesn't move existing data.",
+}
+
+#: Plain names for settings in menus. The config key is shown when a
+#: setting is opened, to match it up with the README and config file.
+LABELS = {
+    "site.name": "Site name",
+    "site.location": "Location",
+    "scan.interface": "Interface when none are picked",
+    "scan.subnet": "Subnet (single interface only)",
+    "scan.scan_interval_seconds": "Sweep interval",
+    "scan.active_scan_timeout_seconds": "Sweep timeout",
+    "scan.passive": "Passive capture between sweeps",
+    "scan.ipv6": "IPv6 discovery",
+    "scan.dhcp_snooping": "DHCP hostname snooping",
+    "scan.resolve_hostnames": "Reverse DNS lookups",
+    "scan.dns_timeout_seconds": "Reverse DNS timeout",
+    "scan.passive_queue_maxsize": "Passive queue size",
+    "scan.offline_grace_seconds": "Grace period",
+    "scan.offline_after_missed_scans": "Missed sweeps before offline",
+    "scan.offline_retry_probe": "Re-probe before marking offline",
+    "scan.offline_retry_timeout_seconds": "Re-probe timeout",
+    "scan.always_on_ping": "Ping always-on devices first",
+    "discovery.mdns": "mDNS / Bonjour",
+    "discovery.ssdp": "SSDP / UPnP",
+    "dhcp_servers.enabled": "Detect unexpected DHCP servers",
+    "dhcp_servers.alert_cooldown_seconds": "Alert cooldown per server",
+    "changes.enabled": "Detect changes",
+    "changes.learning_days": "Learning period",
+    "changes.stale_days": "Baseline stale after",
+    "changes.long_absence_days": "Long absence",
+    "changes.unknown_device_minutes": "Flag unknown devices after",
+    "changes.service_removal_hours": "Service removal grace",
+    "alerts.min_severity": "Minimum severity",
+    "alerts.rate_limit_seconds": "Cooldown per device",
+    "alerts.global_rate_limit_max": "Alert cap (0 = none)",
+    "alerts.global_rate_limit_window_seconds": "Alert cap window",
+    "digest.channels": "Destinations",
+    "digest.send_when_empty": "Send when empty",
+    "web.enabled": "Web portal",
+    "web.port": "Port",
+    "db_path": "Database",
+    "allowlist_file": "Allowlist",
+    "vendor_file": "Extra vendor table",
+    "rogue_signatures_file": "Extra rogue signatures",
+    "identity_rules_file": "Extra identity rules",
+}
+
 MISSING = object()
 #: Every menu and prompt in setup accepts these to go back a level.
 BACK = ("b", "back")
@@ -103,6 +167,36 @@ def field_info(path):
         field = model.model_fields[part]
         model = field.annotation
     return field
+
+
+def _plural(number, unit):
+    return f"{number:g} {unit}" + ("" if number == 1 else "s")
+
+
+def _duration(seconds):
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size and seconds % size == 0:
+            return f"{seconds / size:g}{unit}"
+    return f"{seconds:g}s"
+
+
+def display_value(path, value):
+    """A setting's value as a person would write it: on/off, 15m, 7 days."""
+
+    if value is None:
+        return "auto" if path in _INTERFACE_FIELDS else "not set"
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, list):
+        return ", ".join(clean_text(str(v), max_len=100) for v in value) or "none"
+    if isinstance(value, (int, float)):
+        for suffix, unit in (("_days", "day"), ("_hours", "hour"), ("_minutes", "minute")):
+            if path.endswith(suffix):
+                return _plural(value, unit)
+        if path.endswith("_seconds"):
+            return _duration(value)
+        return f"{value:g}"
+    return clean_text(str(value), max_len=300)
 
 
 def safe_value(value):
@@ -212,9 +306,11 @@ def parse_field(path, text):
 
 def edit_field(raw, path):
     cfg = Config.model_validate(raw).model_dump(mode="json")
-    typer.echo(f"{path}: {safe_value(value_at(cfg, path))}")
-    typer.echo("Origin: " + ("inherited default" if value_at(raw, path) is MISSING else "explicit configuration"))
     field = field_info(path)
+    default = field.get_default(call_default_factory=True)
+    origin = "the default" if value_at(raw, path) is MISSING else f"default {display_value(path, default)}"
+    typer.echo(f"\n{LABELS[path]}  ({path})")
+    typer.echo(f"Currently {display_value(path, value_at(cfg, path))} ({origin})")
     if path.endswith("seconds"):
         typer.echo("Seconds; also accepts durations such as 30s, 5m, 2h. Zero only where supported.")
     if field.annotation is int:
@@ -227,13 +323,12 @@ def edit_field(raw, path):
         detected = scanner.available_interfaces()
         typer.echo("Detected interfaces: " + (", ".join(detected) if detected else "(none detected)"))
     if type(None) in get_args(field.annotation):
-        typer.echo("Type null for explicit auto/unset; reset removes the key to inherit its default.")
-    typer.echo(f"Default: {safe_value(field.get_default(call_default_factory=True))}")
+        typer.echo("Type null to leave it unset; reset returns it to the default.")
     if path in SECTIONS["Storage"]:
         typer.echo("Changing a path does not move or copy data. No files are created until normal use.")
     if field.annotation is bool:
         hint = "Y/n" if value_at(cfg, path) else "y/N"
-        prompt_label = f"{path.split('.')[-1]} [{hint}]"
+        prompt_label = f"{LABELS[path]} [{hint}]"
     else:
         prompt_label = "Value"
     while True:
@@ -264,7 +359,7 @@ def edit_web_password(raw):
     configured = value_at(raw, "web.password_hash") not in (MISSING, None)
     typer.echo("Web portal password: " + ("already configured" if configured else "not set"))
     answer = typer.prompt(
-        "New password (blank keeps it" + (", clear removes it" if configured else "") + ") or b [Back]",
+        "New password (blank keeps it, clear removes it) or b [Back]" if configured else "New password or b [Back]",
         default="", show_default=False, hide_input=True,
     )
     if not answer or answer in BACK:
@@ -429,29 +524,24 @@ def _menu_items(raw, section):
         items.insert(0, (f"Enabled interfaces: {', '.join(enabled) or 'auto (single interface)'}", edit_interfaces))
     elif section == "DHCP servers":
         count = len(value_at(raw, "dhcp_servers.approved", []) or [])
-        items.append((f"Approved DHCP servers ({count} approved)", edit_approvals))
+        items.append((f"Approved servers: {count}", edit_approvals))
     elif section == "Web portal":
         configured = value_at(raw, "web.password_hash") not in (MISSING, None)
-        items.append((f"Set/change password ({'configured' if configured else 'not set'})", edit_web_password))
+        items.append((f"Password: {'set' if configured else 'not set'}", edit_web_password))
     return items
 
 
 def edit_section(raw, section):
     while True:
         cfg = Config.model_validate(raw).model_dump(mode="json")
-        if section == "DHCP servers":
-            typer.echo(
-                "Detects a DHCP server that isn't on your approved list below (a rogue or "
-                "misconfigured server can silently redirect new clients) - see README's "
-                "\"Unexpected DHCP servers\". Needs Scanning's passive capture and DHCP snooping "
-                "both on to see anything at all."
-            )
+        typer.echo(f"\n{section}\n{SECTION_HELP[section]}")
         items = _menu_items(raw, section)
+        width = len(str(len(items)))
         for i, (label, _handler) in enumerate(items, 1):
             if label in SECTIONS[section]:
-                origin = "default" if value_at(raw, label) is MISSING else "explicit"
-                label = f"{label}: {safe_value(value_at(cfg, label))} ({origin})"
-            typer.echo(f"{i}  {label}")
+                origin = " (default)" if value_at(raw, label) is MISSING else ""
+                label = f"{LABELS[label]}: {display_value(label, value_at(cfg, label))}{origin}"
+            typer.echo(f"{i:>{width}}  {label}")
         choice = typer.prompt(
             f"Choose a setting [1-{len(items)}] or b [Back]", default="b", show_default=False
         ).lower()
@@ -467,6 +557,7 @@ def stage_channel(raw):
     # Reuse channel prompts and validators, including secret keep/clear behavior.
     from lanfence import cli
     cfg = Config.model_validate(raw)
+    typer.echo(f"\nCommunications\n{SECTION_HELP['Communications']}")
     cli.render_channels_table(list_channel_statuses(cfg))
     channel = typer.prompt("Channel name or b [Back]", default="b", show_default=False).lower()
     if channel in BACK:
@@ -499,34 +590,50 @@ def stage_channel(raw):
     return candidate
 
 
+def overview_summaries(raw, cfg):
+    """One short line per section for the main menu, all in one style:
+    lower case, on/off, values written as a person would."""
+
+    def on_off(value):
+        return "on" if value else "off"
+
+    scan = cfg.scan
+    site = " · ".join(v for v in (cfg.site.name, cfg.site.location) if v) or "not set"
+    if scan.interfaces:
+        interfaces = ", ".join(scan.interfaces)
+    else:
+        interfaces = f"{scan.interface} only" if scan.interface else "auto (single interface)"
+    dhcp = (f"on · {len(cfg.dhcp_servers.approved)} approved" if cfg.dhcp_servers.enabled else "off")
+    changes = (f"on · learns for {_plural(cfg.changes.learning_days, 'day')}" if cfg.changes.enabled else "off")
+    web_summary = "off"
+    if cfg.web.enabled:
+        web_summary = f"on · port {cfg.web.port} · " + ("password set" if cfg.web.password_hash else "no password")
+    custom_paths = any(value_at(raw, path) is not MISSING for path in SECTIONS["Storage"])
+    return {
+        "Site identity": site,
+        "Network interfaces": interfaces,
+        "Scanning": f"every {_duration(scan.scan_interval_seconds)} · passive capture {on_off(scan.passive)}",
+        "Offline detection": f"after {_duration(scan.offline_grace_seconds)} and "
+                             f"{scan.offline_after_missed_scans} missed sweeps",
+        "Service discovery": f"mDNS {on_off(cfg.discovery.mdns)} · SSDP {on_off(cfg.discovery.ssdp)}",
+        "DHCP servers": dhcp,
+        "Change detection": changes,
+        "Communications": ", ".join(n for n in CHANNEL_NAMES if getattr(cfg.alerts, n).enabled) or "none enabled",
+        "Alert delivery": f"{cfg.alerts.min_severity} and above · "
+                          f"{_duration(cfg.alerts.rate_limit_seconds)} cooldown",
+        "Daily digest": ", ".join(cfg.digest.channels) or "no destinations",
+        "Web portal": web_summary,
+        "Storage": "custom locations" if custom_paths else "default locations",
+    }
+
+
 def render_overview(console, draft):
     cfg = Config.model_validate(draft)
     table = Table(expand=True, box=None)
     table.add_column("Choice", no_wrap=True)
     table.add_column("Section")
     table.add_column("Effective settings")
-    enabled = ", ".join(n for n in CHANNEL_NAMES if getattr(cfg.alerts, n).enabled) or "none enabled"
-    web_summary = "disabled"
-    if cfg.web.enabled:
-        web_summary = f"enabled, port {cfg.web.port} · " + ("password set" if cfg.web.password_hash else "no password")
-    site_summary = cfg.site.name or "not set"
-    if cfg.site.location:
-        site_summary += f" · {cfg.site.location}"
-    interfaces_summary = ", ".join(cfg.scan.interfaces) or "auto (single interface)"
-    summaries = {
-        "Site identity": site_summary,
-        "Network interfaces": interfaces_summary,
-        "Scanning": f"every {cfg.scan.scan_interval_seconds:g}s",
-        "Offline detection": f"{cfg.scan.offline_grace_seconds:g}s · {cfg.scan.offline_after_missed_scans} misses",
-        "Service discovery": f"mDNS={cfg.discovery.mdns} · SSDP={cfg.discovery.ssdp}",
-        "DHCP servers": f"enabled={cfg.dhcp_servers.enabled} · {len(cfg.dhcp_servers.approved)} approved",
-        "Change detection": f"enabled={cfg.changes.enabled} · learns for {cfg.changes.learning_days:g} days",
-        "Communications": enabled,
-        "Alert delivery": f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s",
-        "Daily digest": ", ".join(cfg.digest.channels) or "no destinations",
-        "Web portal": web_summary,
-        "Storage": "Paths only; no data migration",
-    }
+    summaries = overview_summaries(draft, cfg)
     for i, section in enumerate(SECTIONS, 1):
         table.add_row(str(i), section, Text(clean_text(summaries[section], max_len=300)))
     console.print(Panel(table, title="LAN Fence setup"))

@@ -55,7 +55,7 @@ def test_open_and_noop_save_never_create_file(tmp_path):
 def test_boolean_field_prompt_shows_yn_hint_for_current_value(tmp_path):
     path = tmp_path / 'config.yaml'
     result, _ = run_setup(path, f'{DHCP}\n1\nback\nback\nexit\n')
-    assert 'enabled [y/N]' in result.output
+    assert 'Detect unexpected DHCP servers [y/N]' in result.output
 
 
 def test_shared_draft_channel_and_scanning(tmp_path):
@@ -527,13 +527,13 @@ def test_network_interfaces_section_offers_picker_then_single_interface_settings
     path = tmp_path / 'config.yaml'
     result, _ = run_setup(path, f'{IFACES}\nb\nexit\n')
     picker = result.output.index('1  Enabled interfaces')
-    assert picker < result.output.index('2  scan.interface') < result.output.index('3  scan.subnet')
+    assert picker < result.output.index('2  Interface when none are picked: auto (default)') < result.output.index('3  Subnet')
 
 
 def test_b_goes_back_from_a_text_field_rather_than_becoming_its_value(tmp_path):
     path = tmp_path / 'config.yaml'
     result, _ = run_setup(path, f'{SITE}\n1\nb\nb\nexit\n')
-    assert 'site.name: null' in result.output
+    assert 'Site name: not set (default)' in result.output
     assert not path.exists()
 
 
@@ -556,3 +556,27 @@ def test_communications_goes_back_with_b(tmp_path):
     path = tmp_path / 'config.yaml'
     result, _ = run_setup(path, f'{COMMS}\nb\nexit\n')
     assert 'Unknown channel' not in result.output
+
+
+def test_settings_are_shown_with_plain_labels_and_readable_values(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml.safe_dump({'alerts': {'rate_limit_seconds': 600}}))
+    result, _ = run_setup(path, f'{_section("Alert delivery")}\n2\nb\nb\nexit\n')
+    assert 'Which findings are sent' in result.output
+    assert '1  Minimum severity: medium (default)' in result.output
+    assert '2  Cooldown per device: 10m\n' in result.output  # set in the config, so no "(default)"
+    assert 'Cooldown per device  (alerts.rate_limit_seconds)' in result.output
+    assert 'Currently 10m (default 15m)' in result.output
+
+
+def test_overview_summaries_share_one_style():
+    from lanfence.setup_ui import overview_summaries
+
+    raw = {'dhcp_servers': {'enabled': True}, 'changes': {'learning_days': 1}, 'db_path': '/tmp/x.db'}
+    summaries = overview_summaries(raw, Config.model_validate(raw))
+    assert summaries['DHCP servers'] == 'on · 0 approved'
+    assert summaries['Change detection'] == 'on · learns for 1 day'
+    assert summaries['Service discovery'] == 'mDNS off · SSDP off'
+    assert summaries['Offline detection'] == 'after 3m and 3 missed sweeps'
+    assert summaries['Storage'] == 'custom locations'
+    assert not any('=' in s for s in summaries.values())

@@ -13,6 +13,27 @@ Each release is also published to
 [PyPI](https://pypi.org/project/lanfence/) and tagged on
 [GitHub](https://github.com/rosscooney/lanfence/releases).
 
+## [Unreleased]
+
+### Changed
+
+- `lanfence setup` is easier to find your way around. Its sections run in
+  a logical order (site, interfaces, scanning, detection, communications,
+  alerts, digest, web portal, storage), with every interface setting in
+  one place. Settings are shown by name with readable values (`15m`,
+  `on`, `7 days`) rather than raw config keys, each section says what
+  it's for, and the overview uses one style throughout. Every menu takes
+  `b` to go back, and save, review and discard are offered on the main
+  menu once something has changed. Alert delivery gains the global alert
+  cap settings.
+
+### Fixed
+
+- Typing `b` in a `lanfence setup` text setting (a site name, say) saved
+  the letter b instead of going back.
+- `scan.always_on_ping` was listed under both Scanning and Offline
+  detection in `lanfence setup`.
+
 ## [0.7.0] - 2026-09-25
 
 ### Added
