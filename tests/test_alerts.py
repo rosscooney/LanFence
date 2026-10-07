@@ -753,3 +753,44 @@ def test_send_ntfy_logs_never_contain_a_crafted_http_reason(caplog):
         with patch("lanfence.alerts.urllib.request.urlopen", side_effect=exc):
             alerts.send_ntfy([_finding()], cfg)
     assert _SENTINEL not in caplog.text
+
+
+def _sent_parts(portal_url):
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    cfg.email.from_addr = "lanfence@example.com"
+    cfg.email.to_addrs = ["me@example.com"]
+    with patch("lanfence.alerts.smtplib.SMTP") as mock_smtp:
+        instance = mock_smtp.return_value.__enter__.return_value
+        alerts.send_email([_finding()], cfg, portal_url=portal_url)
+    msg = instance.send_message.call_args.args[0]
+    text = next(p for p in msg.walk() if p.get_content_type() == "text/plain").get_content()
+    body = next(p for p in msg.walk() if p.get_content_type() == "text/html").get_content()
+    return text, body
+
+
+def test_alert_email_links_to_the_web_portal_like_the_digest():
+    text, body = _sent_parts("https://192.168.1.5:8080/")
+    assert text.splitlines()[1] == "Manage devices: https://192.168.1.5:8080/"
+    assert '<a href="https://192.168.1.5:8080/"' in body
+
+
+def test_alert_email_says_when_the_web_portal_is_not_running():
+    from lanfence.branding import PORTAL_NOT_RUNNING_NOTE
+
+    text, body = _sent_parts(None)
+    assert PORTAL_NOT_RUNNING_NOTE in text
+    assert "Web portal is not running" in body
+
+
+def test_portal_link_is_only_added_to_email():
+    text = alerts._format_findings_text([_finding()], heading="LAN Fence")
+    assert "Manage devices" not in text and "Web portal" not in text
+
+
+def test_dispatch_passes_the_portal_link_to_email():
+    cfg = AlertConfig()
+    cfg.email.enabled = True
+    with patch("lanfence.alerts.send_email") as send_email:
+        alerts.dispatch([_finding()], cfg, portal_url="https://192.168.1.5:8080/")
+    assert send_email.call_args.kwargs["portal_url"] == "https://192.168.1.5:8080/"

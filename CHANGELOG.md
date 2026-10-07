@@ -15,6 +15,14 @@ Each release is also published to
 
 ## [Unreleased]
 
+### Added
+
+- Alert emails and the channel test email now link to the web portal,
+  in the same format as the digest: "Manage devices: <link>" while the
+  portal is running, or a note saying it isn't and how to enable it. The
+  link is worked out when each email is sent, so it follows the portal
+  being started or stopped and the host's address changing.
+
 ### Changed
 
 - `lanfence setup` is easier to find your way around. Its sections run in

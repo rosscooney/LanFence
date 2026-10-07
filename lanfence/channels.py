@@ -588,7 +588,7 @@ _TEST_BODY = (
 )
 
 
-def _test_message_html() -> str:
+def _test_message_html(portal_url: str | None = None) -> str:
     """Branded HTML alternative for the test email - same shared look as
     the digest (:func:`lanfence.digest.format_digest_html`) and finding
     alert (:func:`lanfence.alerts.format_findings_html`) emails, built
@@ -611,6 +611,7 @@ def _test_message_html() -> str:
 <tr><td style="padding:16px 20px 0;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{branding.EMAIL_PANEL_STYLE}">
     <tr><td style="font-size:14px;">{html.escape(_TEST_BODY)}</td></tr>
+    <tr><td style="padding-top:6px;font-size:13px;">{branding.portal_html(portal_url)}</td></tr>
   </table>
 </td></tr>
 <tr><td style="padding:20px 20px 28px;{branding.EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
@@ -684,12 +685,15 @@ def send_channel_test_message(channel: str, cfg: Config) -> tuple[bool, str]:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return False, f"ntfy server rejected the request: {summarize_error(exc)}"
     if channel == "email":
+        from lanfence.web import build_portal_url  # deferred: lanfence.web pulls in far more than test messages need
+
+        portal_url = build_portal_url(cfg)
         msg = EmailMessage()
         msg["Subject"] = _TEST_TITLE
         msg["From"] = channel_cfg.from_addr
         msg["To"] = ", ".join(channel_cfg.to_addrs)
-        msg.set_content(_TEST_BODY)
-        msg.add_alternative(_test_message_html(), subtype="html")
+        msg.set_content(f"{_TEST_BODY}\n\n{branding.portal_text(portal_url)}\n")
+        msg.add_alternative(_test_message_html(portal_url), subtype="html")
         html_part = msg.get_payload()[-1]
         html_part.add_related(
             branding.render_logo_png(64), maintype="image", subtype="png", cid="<lanfence-logo>",

@@ -882,3 +882,14 @@ def test_digest_with_only_informational_changes_is_empty(tmp_path: Path):
 
     assert digest.informational_change_count == 1
     assert digest.is_empty
+
+
+def test_every_email_uses_the_same_portal_line():
+    from lanfence import branding
+
+    assert branding.portal_text("https://192.168.1.5:8080/") == "Manage devices: https://192.168.1.5:8080/"
+    assert branding.portal_text(None) == branding.PORTAL_NOT_RUNNING_NOTE
+    assert branding.portal_html('https://x/"><script>') == (
+        f'<a href="https://x/&quot;&gt;&lt;script&gt;" style="color:{branding.COLORS["accent2"]};">'
+        'https://x/&quot;&gt;&lt;script&gt;</a>'
+    )

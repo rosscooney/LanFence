@@ -18,7 +18,7 @@ def test_submit_delivers_in_the_background_not_on_the_caller_thread(tmp_path: Pa
     calls = []
     release = threading.Event()
 
-    def fake_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
+    def fake_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None, portal_url=None):
         calls.append((findings, threading.current_thread()))
         release.set()
         return findings
@@ -40,7 +40,7 @@ def test_submit_never_blocks_when_queue_is_full(tmp_path: Path):
     block = threading.Event()
     started = threading.Event()
 
-    def blocking_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
+    def blocking_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None, portal_url=None):
         started.set()
         block.wait(timeout=5.0)
         return findings
@@ -86,7 +86,7 @@ def test_dropped_counter_only_increments_on_overflow(tmp_path: Path):
 def test_delivery_exception_does_not_kill_the_worker_thread(tmp_path: Path):
     calls = []
 
-    def flaky_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
+    def flaky_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None, portal_url=None):
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("simulated transport failure")
@@ -120,7 +120,7 @@ def test_worker_uses_its_own_devicestore_connection_not_the_callers(tmp_path: Pa
     db_path = tmp_path / "db.sqlite"
     seen_stores = []
 
-    def capturing_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None):
+    def capturing_dispatch(findings, cfg, *, store=None, site_name=None, site_location=None, portal_url=None):
         seen_stores.append(store)
         return findings
 
@@ -174,3 +174,25 @@ def test_submit_is_robust_to_threading_thread_being_monkeypatched_elsewhere(tmp_
             assert dispatch_mock.called
     finally:
         worker.shutdown()
+
+
+def test_worker_looks_up_the_portal_link_for_each_delivery(tmp_path: Path):
+    links = iter(["https://10.0.0.1:8080/", None])
+    received = []
+    done = threading.Event()
+
+    def capture(findings, cfg, *, store=None, site_name=None, site_location=None, portal_url=None):
+        received.append(portal_url)
+        if len(received) == 2:
+            done.set()
+        return findings
+
+    worker = AlertDeliveryWorker(tmp_path / "db.sqlite", portal_url=lambda: next(links))
+    try:
+        with patch("lanfence.alert_worker.alerts.dispatch", side_effect=capture):
+            worker.submit([_finding()], AlertConfig())
+            worker.submit([_finding()], AlertConfig())
+            assert done.wait(timeout=5.0)
+    finally:
+        worker.shutdown()
+    assert received == ["https://10.0.0.1:8080/", None]

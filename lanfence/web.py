@@ -107,12 +107,9 @@ class WebError(Exception):
     """A `lanfence web` setup/runtime problem with a clear, user-facing message."""
 
 
-#: Shown in a digest (see ``lanfence/digest.py``'s ``format_digest_text``
-#: and ``lanfence/report.py``'s ``render_digest``) whenever
-#: :func:`build_portal_url` returns ``None`` - always one or the other, so
-#: a digest also serves as a reminder the feature exists even if you've
-#: never touched it.
-PORTAL_NOT_RUNNING_NOTE = "Web portal is not running - enable it with `lanfence setup`."
+#: Shown whenever :func:`build_portal_url` returns ``None`` - defined in
+#: :mod:`lanfence.branding` alongside the email link helpers.
+PORTAL_NOT_RUNNING_NOTE = branding.PORTAL_NOT_RUNNING_NOTE
 
 
 # --- password hashing ---------------------------------------------------
@@ -247,8 +244,8 @@ def portal_url(host: str, port: int) -> str:
 
 
 def build_portal_url(cfg: Config) -> str | None:
-    """URL to link to the web portal from a digest, or ``None`` if it isn't
-    actually reachable right now.
+    """URL to link to the web portal from an email (digest, alert or test
+    message), or ``None`` if it isn't actually reachable right now.
 
     Deliberately keyed off :func:`is_server_running`, not
     ``cfg.web.enabled`` - a config saying "enabled" with no process behind

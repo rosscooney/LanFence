@@ -10,6 +10,7 @@ feel. Constants only - no behavior, no dependencies beyond the stdlib.
 
 from __future__ import annotations
 
+import html
 import struct
 import zlib
 
@@ -142,6 +143,27 @@ def render_logo_png(size: int = 64) -> bytes:
     ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit depth, colour type 2 = truecolor
     idat = zlib.compress(bytes(raw), 9)
     return signature + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
+
+
+#: Shown in every email in place of the web portal link whenever the portal
+#: isn't running (see :func:`lanfence.web.build_portal_url`) - always one or
+#: the other, so an email also serves as a reminder the portal exists.
+PORTAL_NOT_RUNNING_NOTE = "Web portal is not running - enable it with `lanfence setup`."
+
+
+def portal_text(portal_url: str | None) -> str:
+    """The web portal line for a plain-text email body."""
+
+    return f"Manage devices: {portal_url}" if portal_url else PORTAL_NOT_RUNNING_NOTE
+
+
+def portal_html(portal_url: str | None) -> str:
+    """The web portal line for an HTML email: a link, or the not-running note."""
+
+    if not portal_url:
+        return html.escape(PORTAL_NOT_RUNNING_NOTE)
+    url = html.escape(portal_url)
+    return f'<a href="{url}" style="color:{COLORS["accent2"]};">{url}</a>'
 
 
 #: Plain-HTML copyright/license/repo footer, shared verbatim by the web

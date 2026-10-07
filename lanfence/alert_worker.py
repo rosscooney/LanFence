@@ -30,6 +30,7 @@ thread, fed by a small bounded queue:
 from __future__ import annotations
 
 import queue
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock, Thread
 
@@ -55,6 +56,7 @@ class AlertDeliveryWorker:
     def __init__(
         self, db_path: Path | str, *, maxsize: int = _DEFAULT_MAXSIZE,
         site_name: str | None = None, site_location: str | None = None,
+        portal_url: Callable[[], str | None] | None = None,
     ) -> None:
         self._db_path = db_path
         # Static for the life of this worker (one instance per `monitor`
@@ -62,6 +64,9 @@ class AlertDeliveryWorker:
         # once rather than threaded through every submit()/queue item.
         self._site_name = site_name
         self._site_location = site_location
+        # Looked up per delivery, not once: the portal can be started or
+        # stopped, and the host's address change, while monitor runs.
+        self._portal_url = portal_url
         self._queue: "queue.Queue[tuple[list[Finding], AlertConfig] | None]" = queue.Queue(maxsize=maxsize)
         self._dropped = 0
         self._lock = Lock()
@@ -119,6 +124,7 @@ class AlertDeliveryWorker:
                         alerts.dispatch(
                             findings, cfg, store=store,
                             site_name=self._site_name, site_location=self._site_location,
+                            portal_url=self._portal_url() if self._portal_url else None,
                         )
                     except Exception:  # noqa: BLE001 - a delivery failure must never kill this thread
                         log.exception("unexpected error in background alert delivery")

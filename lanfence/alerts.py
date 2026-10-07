@@ -103,7 +103,7 @@ def _site_line(site_name: str | None, site_location: str | None) -> str | None:
 
 def _format_findings_text(
     findings: list[Finding], *, heading: str | None, site_name: str | None = None,
-    site_location: str | None = None,
+    site_location: str | None = None, portal_line: str | None = None,
 ) -> str:
     """A multi-line human-readable summary, shared by every text-based channel.
 
@@ -123,6 +123,9 @@ def _format_findings_text(
         lines.append(site_line)
     if heading:
         lines.append(f"{heading}: {len(findings)} finding(s)")
+    if portal_line:
+        lines.append(portal_line)
+    if heading or portal_line:
         lines.append("")
     for finding in findings:
         lines.append(f"[{finding.severity.upper()}] {finding.title}")
@@ -194,7 +197,7 @@ def _html_finding_panel(finding: Finding) -> str:
 
 def format_findings_html(
     findings: list[Finding], *, heading: str = "LAN Fence", site_name: str | None = None,
-    site_location: str | None = None,
+    site_location: str | None = None, portal_url: str | None = None,
 ) -> str:
     """Branded HTML alternative to :func:`_format_findings_text`, sent
     alongside the plain-text body (see :func:`send_email`) - the same
@@ -204,6 +207,10 @@ def format_findings_html(
     title/rationale/recommendation) is HTML-escaped, the same as the
     digest - a device this tool is being suspicious of can set its own
     DHCP hostname, which can end up inside a finding's text.
+
+    ``portal_url`` is the web portal link (see
+    :func:`lanfence.web.build_portal_url`); ``None`` shows the same
+    "not running" note as the digest instead.
     """
 
     panels = "".join(_html_finding_panel(f) for f in findings)
@@ -228,6 +235,7 @@ def format_findings_html(
     <td style="font-size:18px;font-weight:700;">{html.escape(heading)}</td>
   </tr></table>
   <p style="{branding.EMAIL_MUTED_STYLE}font-size:13px;margin:8px 0 0;">{len(findings)} finding(s)</p>
+  <p style="font-size:13px;margin:6px 0 0;">{branding.portal_html(portal_url)}</p>
 </td></tr>
 {panels}
 <tr><td style="padding:20px 20px 28px;{branding.EMAIL_MUTED_STYLE}font-size:12px;border-top:1px solid {colors['border']};margin-top:8px;">
@@ -255,7 +263,7 @@ def _post_json(url: str, payload: dict, *, timeout: float, label: str) -> None:
 
 def send_email(
     findings: list[Finding], cfg: AlertConfig, *, site_name: str | None = None,
-    site_location: str | None = None,
+    site_location: str | None = None, portal_url: str | None = None,
 ) -> None:
     if not cfg.email.enabled or not findings:
         return
@@ -270,10 +278,13 @@ def send_email(
     msg["To"] = ", ".join(cfg.email.to_addrs)
     # Plain text first (the primary/fallback body for text-only clients),
     # HTML as the alternative - same structure as the digest email.
-    msg.set_content(
-        _format_findings_text(findings, heading="LAN Fence", site_name=site_name, site_location=site_location)
-    )
-    msg.add_alternative(format_findings_html(findings, site_name=site_name, site_location=site_location), subtype="html")
+    msg.set_content(_format_findings_text(
+        findings, heading="LAN Fence", site_name=site_name, site_location=site_location,
+        portal_line=branding.portal_text(portal_url),
+    ))
+    msg.add_alternative(format_findings_html(
+        findings, site_name=site_name, site_location=site_location, portal_url=portal_url,
+    ), subtype="html")
     # Content-ID-attached logo, not inline <svg> - see
     # lanfence.digest.send_digest_email's docstring note for why.
     html_part = msg.get_payload()[-1]
@@ -446,7 +457,7 @@ def send_twilio(findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore
 
 def dispatch(
     findings: list[Finding], cfg: AlertConfig, *, store: DeviceStore | None = None,
-    site_name: str | None = None, site_location: str | None = None,
+    site_name: str | None = None, site_location: str | None = None, portal_url: str | None = None,
 ) -> list[Finding]:
     """Send every finding at or above ``cfg.min_severity`` to every enabled
     channel. Returns the findings that were dispatched.
@@ -461,16 +472,17 @@ def dispatch(
     connection shared across threads.
 
     ``site_name``/``site_location`` (see :class:`lanfence.config.SiteConfig`)
-    are passed straight through to :func:`send_email` only - the other
-    channels here don't have an equivalent "top of message" convention to
-    put it in.
+    and ``portal_url`` (the web portal link, see
+    :func:`lanfence.web.build_portal_url`) are passed straight through to
+    :func:`send_email` only - the other channels here don't have an
+    equivalent "top of message" convention to put them in.
     """
 
     to_send = findings_to_alert(findings, cfg)
     if not to_send:
         return []
     send_syslog(to_send, cfg)
-    send_email(to_send, cfg, site_name=site_name, site_location=site_location)
+    send_email(to_send, cfg, site_name=site_name, site_location=site_location, portal_url=portal_url)
     send_webhook(to_send, cfg)
     send_slack(to_send, cfg)
     send_discord(to_send, cfg)

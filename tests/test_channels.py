@@ -653,3 +653,18 @@ def test_test_message_twilio_failure_logs_never_contain_recipient_number(caplog)
     assert sentinel not in caplog.text
     assert secret_number not in message
     assert sentinel not in message
+
+
+def test_test_email_links_to_the_web_portal():
+    cfg = Config(alerts={"email": {
+        "from_addr": "lanfence@example.com", "to_addrs": ["ops@example.com"], "enabled": True,
+    }})
+    with patch("lanfence.web.build_portal_url", return_value="https://192.168.1.5:8080/"), \
+         patch("lanfence.channels.send_smtp_message") as send:
+        ok, _ = send_channel_test_message("email", cfg)
+    assert ok is True
+    msg = send.call_args.args[0]
+    text = next(p for p in msg.walk() if p.get_content_type() == "text/plain").get_content()
+    body = next(p for p in msg.walk() if p.get_content_type() == "text/html").get_content()
+    assert "Manage devices: https://192.168.1.5:8080/" in text
+    assert '<a href="https://192.168.1.5:8080/"' in body

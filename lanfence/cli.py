@@ -520,7 +520,10 @@ def scan(
         if alert:
             not_snoozed = filter_snoozed(dispatchable + change_alerts, store, now=now)
             to_send = filter_rate_limited(not_snoozed, store, cfg.alerts, now=now)
-            alerts.dispatch(to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location)
+            alerts.dispatch(
+                to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location,
+                portal_url=_email_portal_url(cfg),
+            )
             _mark_change_alerts_sent(store, to_send, now=now)
 
         if output_format != "json":
@@ -608,6 +611,14 @@ def _finding_activity_entry(finding: Finding) -> "monitor_ui.ActivityEntry":
     )
 
 
+def _email_portal_url(cfg: Config) -> str | None:
+    """The web portal link for alert emails, looked up at send time (see
+    :func:`lanfence.web.build_portal_url`) - only when email alerts are on,
+    since no other channel shows it."""
+
+    return web.build_portal_url(cfg) if cfg.alerts.email.enabled else None
+
+
 def _emit_findings(
     findings: list[Finding], *, alert: bool, cfg: Config, store: DeviceStore,
     activity: "monitor_ui.ActivityLog | None" = None, stats: "monitor_ui.MonitorStats | None" = None,
@@ -674,7 +685,10 @@ def _emit_findings(
     if alert_worker is not None:
         alert_worker.submit(to_send, cfg.alerts)
     else:
-        alerts.dispatch(to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location)
+        alerts.dispatch(
+            to_send, cfg.alerts, store=store, site_name=cfg.site.name, site_location=cfg.site.location,
+            portal_url=_email_portal_url(cfg),
+        )
     return to_send
 
 
@@ -772,6 +786,7 @@ def monitor(
     )
     alert_worker = AlertDeliveryWorker(
         cfg.resolved_db_path(), site_name=cfg.site.name, site_location=cfg.site.location,
+        portal_url=lambda: _email_portal_url(cfg),
     )
 
     interfaces = resolve_scan_interfaces(cfg, interface)

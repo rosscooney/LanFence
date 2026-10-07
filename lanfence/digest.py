@@ -57,7 +57,6 @@ from lanfence.models import (
 from lanfence.policy import Policy, effective_policies
 from lanfence.safe_errors import summarize_error
 from lanfence.smtp_utils import SmtpAuthWithoutTlsError, send_smtp_message
-from lanfence.web import PORTAL_NOT_RUNNING_NOTE
 
 log = get_logger("digest")
 
@@ -329,7 +328,7 @@ def format_digest_text(digest: Digest) -> str:
     status_line = monitor_status_line(digest)
     if status_line:
         lines.append(status_line)
-    lines.append(f"Manage devices: {digest.portal_url}" if digest.portal_url else PORTAL_NOT_RUNNING_NOTE)
+    lines.append(branding.portal_text(digest.portal_url))
     lines.append("")
     lines += _format_section_plain("New devices", digest.new_devices)
     lines.append("")
@@ -487,11 +486,7 @@ def format_digest_html(digest: Digest) -> str:
         f"{html.escape(site_text)}</td></tr>"
         if site_text else ""
     )
-    portal_line = (
-        f'<a href="{html.escape(digest.portal_url)}" style="color:{colors["accent2"]};">'
-        f"{html.escape(digest.portal_url)}</a>"
-        if digest.portal_url else html.escape(PORTAL_NOT_RUNNING_NOTE)
-    )
+    portal_line = branding.portal_html(digest.portal_url)
     status_text = monitor_status_line(digest)
     monitor_row = ""
     if status_text:
