@@ -66,6 +66,8 @@ SECTIONS = {
     "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file", "identity_rules_file"],
 }
 MISSING = object()
+#: Every menu and prompt in setup accepts these to go back a level.
+BACK = ("b", "back")
 
 
 def value_at(raw, path, default=MISSING):
@@ -216,7 +218,7 @@ def edit_field(raw, path):
     if path.endswith("seconds"):
         typer.echo("Seconds; also accepts durations such as 30s, 5m, 2h. Zero only where supported.")
     if field.annotation is int:
-        typer.echo("Enter a whole number >= 1.")
+        typer.echo("Enter a whole number.")
     elif get_origin(field.annotation) is Literal:
         typer.echo("Allowed: " + ", ".join(get_args(field.annotation)))
     elif path == "digest.channels":
@@ -236,9 +238,9 @@ def edit_field(raw, path):
         prompt_label = "Value"
     while True:
         answer = typer.prompt(
-            f"{prompt_label} (blank keeps it; reset = default; back = return)", default="", show_default=False
+            f"{prompt_label} (blank keeps it, reset = default) or b [Back]", default="", show_default=False
         ).strip()
-        if not answer or answer == "back":
+        if not answer or answer.lower() in BACK:
             return raw
         try:
             candidate = patch_value(raw, path, MISSING if answer == "reset" else parse_field(path, answer))
@@ -262,10 +264,10 @@ def edit_web_password(raw):
     configured = value_at(raw, "web.password_hash") not in (MISSING, None)
     typer.echo("Web portal password: " + ("already configured" if configured else "not set"))
     answer = typer.prompt(
-        "New password [a-z|A-Z|0-9] or b [Back]",
+        "New password (blank keeps it" + (", clear removes it" if configured else "") + ") or b [Back]",
         default="", show_default=False, hide_input=True,
     )
-    if not answer or answer in ("back", "b"):
+    if not answer or answer in BACK:
         return raw
     if answer == "clear":
         raw = patch_value(raw, "web.password_hash")
@@ -323,7 +325,7 @@ def edit_approvals(raw):
         action_letter = typer.prompt(
             f"Choose an action [{'/'.join(actions)}] or b [Back]", default="b", show_default=False
         ).lower()
-        if action_letter in ("back", "b"):
+        if action_letter in BACK:
             return raw
         if action_letter not in actions:
             typer.echo("Choose a listed action.")
@@ -451,9 +453,9 @@ def edit_section(raw, section):
                 label = f"{label}: {safe_value(value_at(cfg, label))} ({origin})"
             typer.echo(f"{i}  {label}")
         choice = typer.prompt(
-            f"Choose a section [1-{len(items)}] or b [Back]", default="b", show_default=False
+            f"Choose a setting [1-{len(items)}] or b [Back]", default="b", show_default=False
         ).lower()
-        if choice in ("back", "b"):
+        if choice in BACK:
             return raw
         if choice.isdigit() and 1 <= int(choice) <= len(items):
             raw = items[int(choice) - 1][1](raw)
@@ -466,8 +468,8 @@ def stage_channel(raw):
     from lanfence import cli
     cfg = Config.model_validate(raw)
     cli.render_channels_table(list_channel_statuses(cfg))
-    channel = typer.prompt("Channel name (or back)", default="back").lower()
-    if channel == "back":
+    channel = typer.prompt("Channel name or b [Back]", default="b", show_default=False).lower()
+    if channel in BACK:
         return raw
     if channel not in CHANNEL_NAMES:
         typer.echo("Unknown channel.")
@@ -558,15 +560,21 @@ def run_setup(path, loaded):
 
     while True:
         render_overview(console, draft)
+        # Save/Review/Discard only mean anything once something has changed.
+        actions = ", s [Save], r [Review changes], d [Discard changes]" if draft != loaded.raw else ""
         choice = typer.prompt(
-            f"Choose a section [1-{len(sections)}] or q [Exit]", default="exit", show_default=False
+            f"Choose a section [1-{len(sections)}]{actions} or q [Exit]", default="q", show_default=False
         ).lower()
-        exiting = choice in ("exit", "q")
+        choice = {"s": "save", "r": "review", "d": "discard", "q": "exit"}.get(choice, choice)
+        exiting = choice == "exit"
         if exiting:
             if draft == loaded.raw:
                 _finish()
                 return
-            choice = typer.prompt("Unsaved changes: Save / Discard / Return", default="return").lower()
+            choice = typer.prompt(
+                "You have unsaved changes: s [Save], d [Discard] or r [Return]", default="r", show_default=False
+            ).lower()
+            choice = {"s": "save", "d": "discard", "r": "return"}.get(choice, choice)
             if choice == "discard":
                 _finish()
                 return

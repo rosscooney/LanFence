@@ -528,3 +528,31 @@ def test_network_interfaces_section_offers_picker_then_single_interface_settings
     result, _ = run_setup(path, f'{IFACES}\nb\nexit\n')
     picker = result.output.index('1  Enabled interfaces')
     assert picker < result.output.index('2  scan.interface') < result.output.index('3  scan.subnet')
+
+
+def test_b_goes_back_from_a_text_field_rather_than_becoming_its_value(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, f'{SITE}\n1\nb\nb\nexit\n')
+    assert 'site.name: null' in result.output
+    assert not path.exists()
+
+
+def test_save_review_and_discard_are_offered_once_something_changes(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, f'{SITE}\n1\nHome\nb\nr\ns\nq\n')
+    first, *later = result.output.split('Choose a section')
+    assert 's [Save]' not in later[0] and 's [Save]' in later[1]
+    assert 'site.name (added)' in result.output
+    assert yaml.safe_load(path.read_text()) == {'site': {'name': 'Home'}}
+
+
+def test_exiting_with_unsaved_changes_accepts_shortcuts(tmp_path):
+    path = tmp_path / 'config.yaml'
+    run_setup(path, f'{SITE}\n1\nHome\nb\nq\ns\n')
+    assert yaml.safe_load(path.read_text()) == {'site': {'name': 'Home'}}
+
+
+def test_communications_goes_back_with_b(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, f'{COMMS}\nb\nexit\n')
+    assert 'Unknown channel' not in result.output
