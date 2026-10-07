@@ -17,10 +17,21 @@ from lanfence.config import Config
 from lanfence.db import DeviceStore
 from lanfence.setup_ui import (
     patch_value, validation_errors, parse_field, diff_lines, render_overview,
-    warnings_for, observed_servers,
+    warnings_for, observed_servers, SECTIONS,
 )
 
 runner = CliRunner()
+
+
+def _section(name):
+    """A section's menu number, so tests don't depend on menu order."""
+    return str(list(SECTIONS).index(name) + 1)
+
+
+SITE, IFACES, SCAN, DHCP, CHANGES, COMMS, WEB = (_section(name) for name in (
+    'Site identity', 'Network interfaces', 'Scanning', 'DHCP servers', 'Change detection', 'Communications',
+    'Web portal',
+))
 
 
 def run_setup(path, answers):
@@ -43,14 +54,14 @@ def test_open_and_noop_save_never_create_file(tmp_path):
 
 def test_boolean_field_prompt_shows_yn_hint_for_current_value(tmp_path):
     path = tmp_path / 'config.yaml'
-    result, _ = run_setup(path, '4\n1\nback\nback\nexit\n')
+    result, _ = run_setup(path, f'{DHCP}\n1\nback\nback\nexit\n')
     assert 'enabled [y/N]' in result.output
 
 
 def test_shared_draft_channel_and_scanning(tmp_path):
     path = tmp_path / 'config.yaml'
     result, transport = run_setup(path,
-        '2\n3\n2m\nback\n1\nslack\nhttps://hooks.slack.com/SECRET\n\ny\nn\n'
+        f'{SCAN}\n1\n2m\nback\n{COMMS}\nslack\nhttps://hooks.slack.com/SECRET\n\ny\nn\n'
         'review\nsave\nn\nexit\n')
     raw = yaml.safe_load(path.read_text())
     assert raw['scan'] == {'scan_interval_seconds': 120}
@@ -65,7 +76,7 @@ def test_shared_draft_channel_and_scanning(tmp_path):
 def test_scan_interface_field_suggests_detected_interfaces(tmp_path):
     path = tmp_path / 'config.yaml'
     with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=['eth0', 'wlan0']):
-        result, _ = run_setup(path, '2\n1\nback\nback\nexit\n')
+        result, _ = run_setup(path, f'{IFACES}\n2\nback\nback\nexit\n')
     assert 'Detected interfaces: eth0, wlan0' in result.output
 
 
@@ -74,19 +85,19 @@ def test_unsaved_edits_leave_original_untouched(tmp_path, ending):
     path = tmp_path / 'config.yaml'
     original = '# keep this comment\nscan:\n  interface: eth0\n'
     path.write_text(original)
-    run_setup(path, '2\n1\neth1\nback\n' + ending)
+    run_setup(path, f'{IFACES}\n2\neth1\nback\n' + ending)
     assert path.read_text() == original
 
 
 def test_save_then_cancel_preserves_completed_save(tmp_path):
     path = tmp_path / 'config.yaml'
-    run_setup(path, '2\n1\neth1\nback\nsave\ny\n2\n1\neth2\n')
+    run_setup(path, f'{IFACES}\n2\neth1\nback\nsave\ny\n{IFACES}\n2\neth2\n')
     assert yaml.safe_load(path.read_text())['scan']['interface'] == 'eth1'
 
 
 def test_site_identity_section_sets_name_and_location(tmp_path):
     path = tmp_path / 'config.yaml'
-    run_setup(path, '10\n1\nMy Home LAN\n2\nLiving room\nback\nsave\nexit\n')
+    run_setup(path, f'{SITE}\n1\nMy Home LAN\n2\nLiving room\nback\nsave\nexit\n')
     saved = yaml.safe_load(path.read_text())
     assert saved['site']['name'] == 'My Home LAN'
     assert saved['site']['location'] == 'Living room'
@@ -99,7 +110,7 @@ _DETECTED = ['eth0', 'eth0.10', 'wlan0']
 def test_network_interfaces_step_through_enables_chosen_interfaces(tmp_path):
     path = tmp_path / 'config.yaml'
     with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=_DETECTED):
-        result, _ = run_setup(path, '11\n1\ny\ny\nn\nback\nsave\nexit\n')
+        result, _ = run_setup(path, f'{IFACES}\n1\ny\ny\nn\nback\nsave\nexit\n')
     assert 'Enable eth0.10?' in result.output
     assert yaml.safe_load(path.read_text())['scan']['interfaces'] == ['eth0', 'eth0.10']
 
@@ -108,7 +119,7 @@ def test_network_interfaces_enabling_none_falls_back_to_auto(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text(yaml.safe_dump({'scan': {'interfaces': ['eth0', 'wlan0']}}))
     with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=_DETECTED):
-        result, _ = run_setup(path, '11\n1\nn\nn\nn\nback\nsave\ny\nexit\n')
+        result, _ = run_setup(path, f'{IFACES}\n1\nn\nn\nn\nback\nsave\ny\nexit\n')
     assert 'auto-detect a single interface' in result.output
     assert 'interfaces' not in (yaml.safe_load(path.read_text()) or {}).get('scan', {})
 
@@ -118,14 +129,14 @@ def test_network_interfaces_defaults_to_currently_enabled(tmp_path):
     path.write_text(yaml.safe_dump({'scan': {'interfaces': ['wlan0']}}))
     with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=_DETECTED):
         # Blank answers accept each prompt's default, which reflects current state.
-        result, _ = run_setup(path, '11\n1\n\n\n\nback\nexit\n')
+        result, _ = run_setup(path, f'{IFACES}\n1\n\n\n\nback\nexit\n')
     assert 'Enabled interfaces: wlan0' in result.output
     assert 'Enabled: wlan0' in result.output
 
 
 def test_network_interfaces_not_listed_as_a_generic_scanning_field(tmp_path):
     path = tmp_path / 'config.yaml'
-    result, _ = run_setup(path, '2\nback\nexit\n')
+    result, _ = run_setup(path, f'{SCAN}\nback\nexit\n')
     assert 'scan.interfaces' not in result.output
 
 def test_site_identity_overview_shows_not_set_by_default(tmp_path):
@@ -137,7 +148,7 @@ def test_site_identity_overview_shows_not_set_by_default(tmp_path):
 def test_reset_and_null_have_distinct_persistence(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('scan:\n  interface: eth0\n  subnet: 192.168.1.0/24\n')
-    run_setup(path, '2\n1\nreset\n2\nnull\nback\nsave\ny\nexit\n')
+    run_setup(path, f'{IFACES}\n2\nreset\n3\nnull\nback\nsave\ny\nexit\n')
     assert yaml.safe_load(path.read_text()) == {'scan': {'subnet': None}}
 
 
@@ -180,7 +191,7 @@ def test_schema_unknown_keys_are_refused_without_discarding_data(tmp_path):
 def test_dhcp_add_edit_duplicate_remove(tmp_path):
     path = tmp_path / 'config.yaml'
     result, _ = run_setup(path,
-        '4\n3\na\nRouter\neth0\n192.168.1.1\ny\n'
+        f'{DHCP}\n3\na\nRouter\neth0\n192.168.1.1\ny\n'
         'a\nDuplicate\neth0\n192.168.1.1\n'
         'e\n1\nBackup\neth0.20\n192.168.20.1\ny\n'
         'a\nOther\neth1\n192.168.2.1\ny\nd\n2\ny\n'
@@ -192,7 +203,7 @@ def test_dhcp_add_edit_duplicate_remove(tmp_path):
 
 def test_dhcp_approvals_hides_edit_delete_when_empty(tmp_path):
     path = tmp_path / 'config.yaml'
-    result, _ = run_setup(path, '4\n3\ne\nb\nb\nexit\n')
+    result, _ = run_setup(path, f'{DHCP}\n3\ne\nb\nb\nexit\n')
     assert 'e  Edit' not in result.output
     assert 'd  Delete' not in result.output
     assert 'Choose a listed action' in result.output
@@ -201,7 +212,7 @@ def test_dhcp_approvals_hides_edit_delete_when_empty(tmp_path):
 def test_dhcp_approvals_suggests_detected_interfaces(tmp_path):
     path = tmp_path / 'config.yaml'
     with patch('lanfence.setup_ui.scanner.available_interfaces', return_value=['eth0', 'wlan0']):
-        result, _ = run_setup(path, '4\n3\na\nRouter\neth0\n192.168.1.1\nn\nb\nb\nexit\n')
+        result, _ = run_setup(path, f'{DHCP}\n3\na\nRouter\neth0\n192.168.1.1\nn\nb\nb\nexit\n')
     assert 'Detected interfaces: eth0, wlan0' in result.output
 
 
@@ -224,9 +235,9 @@ def test_observed_server_approval_requires_confirmation(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text(yaml.safe_dump({'db_path': str(db)}))
     before = path.read_bytes()
-    run_setup(path, '4\n3\no\n1\nRouter\n\n\nn\nb\nb\nexit\n')
+    run_setup(path, f'{DHCP}\n3\no\n1\nRouter\n\n\nn\nb\nb\nexit\n')
     assert path.read_bytes() == before
-    run_setup(path, '4\n3\no\n1\nRouter\n\n\ny\nb\nb\nsave\nexit\n')
+    run_setup(path, f'{DHCP}\n3\no\n1\nRouter\n\n\ny\nb\nb\nsave\nexit\n')
     assert yaml.safe_load(path.read_text())['dhcp_servers']['approved'][0]['server_ip'] == '192.168.1.1'
 
 
@@ -298,7 +309,7 @@ def test_concurrent_edit_not_overwritten(tmp_path):
         'lanfence.cli.save_channels_config_file', side_effect=concurrent_save
     ):
         result = runner.invoke(app, ['setup', '--config', str(path)],
-                               input='2\n1\neth1\nback\nsave\ny\n')
+                               input=f'{IFACES}\n2\neth1\nback\nsave\ny\n')
     assert result.exit_code == 2
     assert 'changed on disk' in result.output
     assert 'external' in path.read_text()
@@ -307,7 +318,7 @@ def test_concurrent_edit_not_overwritten(tmp_path):
 def test_optional_post_save_test(tmp_path):
     path = tmp_path / 'config.yaml'
     _, transport = run_setup(path,
-        '1\nslack\nhttps://hooks.slack.com/SECRET\n\ny\nn\nsave\ny\ny\nexit\n')
+        f'{COMMS}\nslack\nhttps://hooks.slack.com/SECRET\n\ny\nn\nsave\ny\ny\nexit\n')
     transport.assert_called_once()
     assert transport.call_args.args[0] == 'slack'
 
@@ -317,7 +328,7 @@ def test_symlink_save_refused_without_modifying_target(tmp_path):
     target.write_text('{}\n')
     link = tmp_path / 'config.yaml'
     link.symlink_to(target)
-    result, _ = run_setup(link, '2\n1\neth0\nback\nsave\nexit\ndiscard\n')
+    result, _ = run_setup(link, f'{IFACES}\n2\neth0\nback\nsave\nexit\ndiscard\n')
     assert 'symlink' in result.output
     assert link.is_symlink()
     assert target.read_text() == '{}\n'
@@ -327,7 +338,7 @@ def test_failed_save_retains_draft_without_partial_write(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('{}\n')
     with patch('lanfence.cli.save_channels_config_file', side_effect=PermissionError):
-        result, _ = run_setup(path, '2\n1\neth0\nback\nsave\ny\nreview\nexit\ndiscard\n')
+        result, _ = run_setup(path, f'{IFACES}\n2\neth0\nback\nsave\ny\nreview\nexit\ndiscard\n')
     assert 'Could not save' in result.output
     assert 'scan.interface (added)' in result.output
     assert path.read_text() == '{}\n'
@@ -337,7 +348,7 @@ def test_insecure_permissions_disclosed_before_save(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('{}\n')
     path.chmod(0o644)
-    result, _ = run_setup(path, '2\n1\neth0\nback\nsave\nexit\n')
+    result, _ = run_setup(path, f'{IFACES}\n2\neth0\nback\nsave\nexit\n')
     assert 'restrict this file' in result.output
     assert path.stat().st_mode & 0o777 == 0o600
 
@@ -369,7 +380,7 @@ def test_web_portal_enable_set_password_offers_and_starts(tmp_path):
          patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value=None):
         result, _ = run_setup(
-            path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n',
+            path, f'{WEB}\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n',
         )
     assert 'Web portal starting: https://192.168.1.5:8080/' in result.output
     start_mock.assert_called_once_with(path)
@@ -387,7 +398,7 @@ def test_web_portal_enable_offers_to_open_firewall_when_active(tmp_path):
          patch('lanfence.web.detect_active_firewall', return_value='ufw'), \
          patch('lanfence.web.allow_port_through_firewall', return_value=(True, 'firewall rule added (ufw)')) as allow_mock:
         result, _ = run_setup(
-            path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\ny\nexit\n',
+            path, f'{WEB}\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\ny\nexit\n',
         )
     assert 'ufw firewall is active' in result.output
     assert 'firewall rule added (ufw)' in result.output
@@ -401,7 +412,7 @@ def test_web_portal_enable_declining_firewall_prompt_skips_it(tmp_path):
          patch('lanfence.web.detect_active_firewall', return_value='ufw'), \
          patch('lanfence.web.allow_port_through_firewall') as allow_mock:
         result, _ = run_setup(
-            path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\nn\ny\nexit\n',
+            path, f'{WEB}\n1\ny\n3\nhunter22\nhunter22\nback\nsave\nn\ny\nexit\n',
         )
     assert 'ufw firewall is active' in result.output
     allow_mock.assert_not_called()
@@ -413,7 +424,7 @@ def test_web_portal_enable_no_firewall_prompt_when_none_detected(tmp_path):
          patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value=None), \
          patch('lanfence.web.allow_port_through_firewall') as allow_mock:
-        result, _ = run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n')
+        result, _ = run_setup(path, f'{WEB}\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n')
     assert 'firewall is active' not in result.output
     allow_mock.assert_not_called()
 
@@ -421,7 +432,7 @@ def test_web_portal_enable_no_firewall_prompt_when_none_detected(tmp_path):
 def test_web_portal_enable_without_password_does_not_offer_start(tmp_path):
     path = tmp_path / 'config.yaml'
     with patch('lanfence.web.start_background') as start_mock:
-        result, _ = run_setup(path, '9\n1\ny\nback\nsave\nexit\n')
+        result, _ = run_setup(path, f'{WEB}\n1\ny\nback\nsave\nexit\n')
     assert 'cannot start until you set one' in result.output
     start_mock.assert_not_called()
 
@@ -431,14 +442,14 @@ def test_web_portal_declining_start_does_not_call_start_background(tmp_path):
     with patch('lanfence.web.start_background') as start_mock, \
          patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value=None):
-        result, _ = run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\nn\nexit\n')
+        result, _ = run_setup(path, f'{WEB}\n1\ny\n3\nhunter22\nhunter22\nback\nsave\nn\nexit\n')
     start_mock.assert_not_called()
     assert result.exit_code == 0
 
 
 def test_web_portal_password_mismatch_leaves_it_unset(tmp_path):
     path = tmp_path / 'config.yaml'
-    result, _ = run_setup(path, '9\n3\nhunter1\nhunter2\nback\nexit\n')
+    result, _ = run_setup(path, f'{WEB}\n3\nhunter1\nhunter2\nback\nexit\n')
     assert 'did not match' in result.output.lower()
 
 
@@ -448,7 +459,7 @@ def test_web_portal_disable_stops_running_server(tmp_path):
         yaml.safe_dump({'web': {'enabled': True, 'password_hash': 'x' * 64, 'password_salt': 'y' * 32}})
     )
     with patch('lanfence.web.stop_server', return_value=True) as stop_mock:
-        result, _ = run_setup(path, '9\n1\nn\nback\nsave\nexit\n')
+        result, _ = run_setup(path, f'{WEB}\n1\nn\nback\nsave\nexit\n')
     assert 'Web portal stopped.' in result.output
     stop_mock.assert_called_once()
 
@@ -457,7 +468,7 @@ def test_web_portal_disable_stops_running_server(tmp_path):
 def test_exiting_setup_after_saving_restarts_a_running_web_portal(tmp_path):
     path = tmp_path / 'config.yaml'
     with patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/') as restart_mock:
-        result, _ = run_setup(path, '10\n1\nMy Home LAN\nback\nsave\nexit\n')
+        result, _ = run_setup(path, f'{SITE}\n1\nMy Home LAN\nback\nsave\nexit\n')
     restart_mock.assert_called_once_with(path)
     assert 'Web portal restarted: https://192.168.1.5:8080/ (to pick up your changes)' in result.output
 
@@ -475,7 +486,7 @@ def test_setup_does_not_restart_a_portal_it_just_started(tmp_path):
          patch('lanfence.web.resolve_bind_hosts', return_value=['192.168.1.5']), \
          patch('lanfence.web.detect_active_firewall', return_value=None), \
          patch('lanfence.web.restart_server') as restart_mock:
-        run_setup(path, '9\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n')
+        run_setup(path, f'{WEB}\n1\ny\n3\nhunter22\nhunter22\nback\nsave\ny\nexit\n')
     restart_mock.assert_not_called()
 
 
@@ -484,7 +495,7 @@ def test_restart_failure_on_exit_is_reported_not_fatal(tmp_path):
 
     path = tmp_path / 'config.yaml'
     with patch('lanfence.web.restart_server', side_effect=web.WebError('no LAN address')):
-        result, _ = run_setup(path, '10\n1\nMy Home LAN\nback\nsave\nexit\n')
+        result, _ = run_setup(path, f'{SITE}\n1\nMy Home LAN\nback\nsave\nexit\n')
     assert 'Could not restart the web portal: no LAN address' in result.output
 
 def test_web_portal_password_change_while_running_notes_restart_needed(tmp_path):
@@ -494,12 +505,26 @@ def test_web_portal_password_change_while_running_notes_restart_needed(tmp_path)
     )
     with patch('lanfence.web.is_server_running', return_value=True), \
          patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/'):
-        result, _ = run_setup(path, '9\n3\nnewpassword\nnewpassword\nback\nsave\nexit\n')
+        result, _ = run_setup(path, f'{WEB}\n3\nnewpassword\nnewpassword\nback\nsave\nexit\n')
     assert "will be restarted when you exit setup" in result.output
 
 
 def test_change_detection_section_sets_learning_period(tmp_path):
     path = tmp_path / 'config.yaml'
-    result, _ = run_setup(path, '12\n2\n14\nback\nsave\nexit\n')
+    result, _ = run_setup(path, f'{CHANGES}\n2\n14\nback\nsave\nexit\n')
     assert 'learns for 7 days' in result.output
     assert yaml.safe_load(path.read_text())['changes']['learning_days'] == 14
+
+
+def test_every_setting_appears_in_exactly_one_section():
+    paths = sum(SECTIONS.values(), [])
+    assert len(paths) == len(set(paths))
+    assert 'scan.always_on_ping' in SECTIONS['Offline detection']
+    assert {'scan.interface', 'scan.subnet'} <= set(SECTIONS['Network interfaces'])
+
+
+def test_network_interfaces_section_offers_picker_then_single_interface_settings(tmp_path):
+    path = tmp_path / 'config.yaml'
+    result, _ = run_setup(path, f'{IFACES}\nb\nexit\n')
+    picker = result.output.index('1  Enabled interfaces')
+    assert picker < result.output.index('2  scan.interface') < result.output.index('3  scan.subnet')

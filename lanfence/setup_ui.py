@@ -28,34 +28,42 @@ from lanfence.config import Config, ApprovedDhcpServer, DIGEST_CHANNELS
 from lanfence.sanitize import clean_text
 from lanfence import scanner, web
 
-# Only real model fields appear here; field types/defaults stay in config.py.
-# web.password_hash/password_salt are deliberately excluded - they're set
-# through the dedicated "Set/change password" action (edit_web_password
-# below, numbered after this section's listed fields), never edited as
-# plain text like an ordinary field.
+_OFFLINE_FIELDS = [
+    "scan.offline_grace_seconds", "scan.offline_after_missed_scans",
+    "scan.offline_retry_probe", "scan.offline_retry_timeout_seconds", "scan.always_on_ping",
+]
+_INTERFACE_FIELDS = ["scan.interface", "scan.subnet"]
+
+# The menu, in order: where LAN Fence runs, how it observes the network,
+# what it detects, how it tells you, then access and files. Only real
+# model fields appear here; field types/defaults stay in config.py.
+# Some sections add their own actions on top of these fields (see
+# _menu_items): the interface picker, DHCP approvals and the web portal
+# password - web.password_hash/password_salt are never edited as plain
+# text like an ordinary field. Communications is the channel editor and
+# has no generic fields.
 SECTIONS = {
+    "Site identity": ["site.name", "site.location"],
+    "Network interfaces": _INTERFACE_FIELDS,
     "Scanning": [
         f"scan.{name}" for name in type(Config().scan).model_fields
-        if not name.startswith("offline_") and name != "interfaces"
+        if f"scan.{name}" not in _OFFLINE_FIELDS + _INTERFACE_FIELDS and name != "interfaces"
     ],
-    "Offline detection": [
-        "scan.offline_grace_seconds", "scan.offline_after_missed_scans",
-        "scan.offline_retry_probe", "scan.offline_retry_timeout_seconds", "scan.always_on_ping",
-    ],
-    "DHCP servers": ["dhcp_servers.enabled", "dhcp_servers.alert_cooldown_seconds"],
+    "Offline detection": _OFFLINE_FIELDS,
     "Service discovery": ["discovery.mdns", "discovery.ssdp"],
-    "Daily digest": ["digest.channels", "digest.send_when_empty"],
-    "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file", "identity_rules_file"],
-    "Alert delivery": ["alerts.min_severity", "alerts.rate_limit_seconds"],
-    "Web portal": ["web.enabled", "web.port"],
-    "Site identity": ["site.name", "site.location"],
-    # No generic fields - scan.interfaces is edited only through the
-    # step-through edit_interfaces action below.
-    "Network interfaces": [],
+    "DHCP servers": ["dhcp_servers.enabled", "dhcp_servers.alert_cooldown_seconds"],
     "Change detection": [
         "changes.enabled", "changes.learning_days", "changes.stale_days", "changes.long_absence_days",
         "changes.unknown_device_minutes", "changes.service_removal_hours",
     ],
+    "Communications": [],
+    "Alert delivery": [
+        "alerts.min_severity", "alerts.rate_limit_seconds",
+        "alerts.global_rate_limit_max", "alerts.global_rate_limit_window_seconds",
+    ],
+    "Daily digest": ["digest.channels", "digest.send_when_empty"],
+    "Web portal": ["web.enabled", "web.port"],
+    "Storage": ["db_path", "allowlist_file", "vendor_file", "rogue_signatures_file", "identity_rules_file"],
 }
 MISSING = object()
 
@@ -409,6 +417,23 @@ def edit_interfaces(raw):
     return raw
 
 
+def _menu_items(raw, section):
+    """The numbered entries for one section: its fields plus any actions
+    of its own, as (label, handler) pairs where handler(raw) -> raw."""
+
+    items = [(path, lambda raw, path=path: edit_field(raw, path)) for path in SECTIONS[section]]
+    if section == "Network interfaces":
+        enabled = value_at(raw, "scan.interfaces", []) or []
+        items.insert(0, (f"Enabled interfaces: {', '.join(enabled) or 'auto (single interface)'}", edit_interfaces))
+    elif section == "DHCP servers":
+        count = len(value_at(raw, "dhcp_servers.approved", []) or [])
+        items.append((f"Approved DHCP servers ({count} approved)", edit_approvals))
+    elif section == "Web portal":
+        configured = value_at(raw, "web.password_hash") not in (MISSING, None)
+        items.append((f"Set/change password ({'configured' if configured else 'not set'})", edit_web_password))
+    return items
+
+
 def edit_section(raw, section):
     while True:
         cfg = Config.model_validate(raw).model_dump(mode="json")
@@ -419,44 +444,19 @@ def edit_section(raw, section):
                 "\"Unexpected DHCP servers\". Needs Scanning's passive capture and DHCP snooping "
                 "both on to see anything at all."
             )
-        for i, path in enumerate(SECTIONS[section], 1):
-            origin = "default" if value_at(raw, path) is MISSING else "explicit"
-            typer.echo(f"{i}  {path}: {safe_value(value_at(cfg, path))} ({origin})")
-        approvals_index = None
-        if section == "DHCP servers":
-            approvals_index = len(SECTIONS[section]) + 1
-            count = len(value_at(raw, "dhcp_servers.approved", []) or [])
-            typer.echo(f"{approvals_index}  Approved DHCP servers ({count} approved)")
-        password_index = None
-        if section == "Web portal":
-            password_index = len(SECTIONS[section]) + 1
-            configured = value_at(raw, "web.password_hash") not in (MISSING, None)
-            typer.echo(f"{password_index}  Set/change password ({'configured' if configured else 'not set'})")
-        interfaces_index = None
-        if section == "Network interfaces":
-            interfaces_index = len(SECTIONS[section]) + 1
-            enabled = value_at(raw, "scan.interfaces", []) or []
-            typer.echo(f"{interfaces_index}  Enabled interfaces: {', '.join(enabled) or 'auto (single interface)'}")
-        max_choice = len(SECTIONS[section])
-        if approvals_index is not None:
-            max_choice = approvals_index
-        if password_index is not None:
-            max_choice = password_index
-        if interfaces_index is not None:
-            max_choice = interfaces_index
+        items = _menu_items(raw, section)
+        for i, (label, _handler) in enumerate(items, 1):
+            if label in SECTIONS[section]:
+                origin = "default" if value_at(raw, label) is MISSING else "explicit"
+                label = f"{label}: {safe_value(value_at(cfg, label))} ({origin})"
+            typer.echo(f"{i}  {label}")
         choice = typer.prompt(
-            f"Choose a section [1-{max_choice}] or b [Back]", default="b", show_default=False
+            f"Choose a section [1-{len(items)}] or b [Back]", default="b", show_default=False
         ).lower()
         if choice in ("back", "b"):
             return raw
-        if approvals_index is not None and choice == str(approvals_index):
-            raw = edit_approvals(raw)
-        elif password_index is not None and choice == str(password_index):
-            raw = edit_web_password(raw)
-        elif interfaces_index is not None and choice == str(interfaces_index):
-            raw = edit_interfaces(raw)
-        elif choice.isdigit() and 1 <= int(choice) <= len(SECTIONS[section]):
-            raw = edit_field(raw, SECTIONS[section][int(choice) - 1])
+        if choice.isdigit() and 1 <= int(choice) <= len(items):
+            raw = items[int(choice) - 1][1](raw)
         else:
             typer.echo("Choose a listed setting.")
 
@@ -511,16 +511,22 @@ def render_overview(console, draft):
     if cfg.site.location:
         site_summary += f" · {cfg.site.location}"
     interfaces_summary = ", ".join(cfg.scan.interfaces) or "auto (single interface)"
-    summaries = [enabled, f"{cfg.scan.interface or 'auto'} · every {cfg.scan.scan_interval_seconds:g}s",
-                 f"{cfg.scan.offline_grace_seconds:g}s · {cfg.scan.offline_after_missed_scans} misses",
-                 f"enabled={cfg.dhcp_servers.enabled} · {len(cfg.dhcp_servers.approved)} approved",
-                 f"mDNS={cfg.discovery.mdns} · SSDP={cfg.discovery.ssdp}",
-                 ", ".join(cfg.digest.channels) or "no destinations", "Paths only; no data migration",
-                 f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s", web_summary,
-                 site_summary, interfaces_summary,
-                 f"enabled={cfg.changes.enabled} · learns for {cfg.changes.learning_days:g} days"]
-    for i, (section, summary) in enumerate(zip(["Communications", *SECTIONS], summaries), 1):
-        table.add_row(str(i), section, Text(clean_text(summary, max_len=300)))
+    summaries = {
+        "Site identity": site_summary,
+        "Network interfaces": interfaces_summary,
+        "Scanning": f"every {cfg.scan.scan_interval_seconds:g}s",
+        "Offline detection": f"{cfg.scan.offline_grace_seconds:g}s · {cfg.scan.offline_after_missed_scans} misses",
+        "Service discovery": f"mDNS={cfg.discovery.mdns} · SSDP={cfg.discovery.ssdp}",
+        "DHCP servers": f"enabled={cfg.dhcp_servers.enabled} · {len(cfg.dhcp_servers.approved)} approved",
+        "Change detection": f"enabled={cfg.changes.enabled} · learns for {cfg.changes.learning_days:g} days",
+        "Communications": enabled,
+        "Alert delivery": f"{cfg.alerts.min_severity} · cooldown {cfg.alerts.rate_limit_seconds:g}s",
+        "Daily digest": ", ".join(cfg.digest.channels) or "no destinations",
+        "Web portal": web_summary,
+        "Storage": "Paths only; no data migration",
+    }
+    for i, section in enumerate(SECTIONS, 1):
+        table.add_row(str(i), section, Text(clean_text(summaries[section], max_len=300)))
     console.print(Panel(table, title="LAN Fence setup"))
     for warning in warnings_for(cfg):
         console.print(Text("Warning: " + warning, style="yellow"))
@@ -543,7 +549,7 @@ def run_setup(path, loaded):
     from lanfence import cli
     console = Console()
     draft = deepcopy(loaded.raw)
-    sections = ["Communications", *SECTIONS]
+    sections = list(SECTIONS)
     restart_pending = False
 
     def _finish():
