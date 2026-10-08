@@ -514,9 +514,11 @@ def edit_interfaces(raw):
     return raw
 
 
-def _menu_items(raw, section):
+def _menu_items(raw, section, *, restart_portal=None):
     """The numbered entries for one section: its fields plus any actions
-    of its own, as (label, handler) pairs where handler(raw) -> raw."""
+    of its own, as (label, handler) pairs where handler(raw) -> raw.
+    ``restart_portal`` (from :func:`run_setup`) restarts or starts the web
+    portal; without it the Web portal section has no restart entry."""
 
     items = [(path, lambda raw, path=path: edit_field(raw, path)) for path in SECTIONS[section]]
     if section == "Network interfaces":
@@ -528,14 +530,22 @@ def _menu_items(raw, section):
     elif section == "Web portal":
         configured = value_at(raw, "web.password_hash") not in (MISSING, None)
         items.append((f"Password: {'set' if configured else 'not set'}", edit_web_password))
+        if restart_portal is not None:
+            label = "Restart web portal (running)" if web.is_server_running() else "Start web portal (not running)"
+
+            def _restart(raw):
+                restart_portal(raw)
+                return raw  # restarting changes nothing in the draft
+
+            items.append((label, _restart))
     return items
 
 
-def edit_section(raw, section):
+def edit_section(raw, section, *, restart_portal=None):
     while True:
         cfg = Config.model_validate(raw).model_dump(mode="json")
         typer.echo(f"\n{section}\n{SECTION_HELP[section]}")
-        items = _menu_items(raw, section)
+        items = _menu_items(raw, section, restart_portal=restart_portal)
         width = len(str(len(items)))
         for i, (label, _handler) in enumerate(items, 1):
             if label in SECTIONS[section]:
@@ -654,6 +664,32 @@ def restart_web_portal_after_changes(path):
         typer.echo(f"Web portal {outcome} (to pick up your changes).")
 
 
+def restart_web_portal_now(path, *, unsaved):
+    """The Web portal section's restart entry: restart the portal if it's
+    running, or offer to start it if not. Either way it runs from the
+    saved configuration file. Returns whether it was (re)started."""
+
+    if unsaved:
+        typer.echo("The web portal uses the saved settings - unsaved changes take effect once you save them.")
+    if web.is_server_running():
+        try:
+            outcome = web.restart_server(path)
+        except web.WebError as exc:
+            typer.echo(f"Could not restart the web portal: {exc}")
+            return False
+        typer.echo(f"Web portal {outcome}.")
+        return outcome is not None
+    if not typer.confirm("The web portal isn't running. Start it now?", default=True):
+        return False
+    try:
+        urls = web.start_background(path)
+    except web.WebError as exc:
+        typer.echo(f"Could not start the web portal: {exc}. Enable it, set a password and save first.")
+        return False
+    typer.echo(f"Web portal starting: {', '.join(urls)}")
+    return True
+
+
 def run_setup(path, loaded):
     from lanfence import cli
     console = Console()
@@ -664,6 +700,11 @@ def run_setup(path, loaded):
     def _finish():
         if restart_pending:
             restart_web_portal_after_changes(path)
+
+    def _restart_portal(current_draft):
+        nonlocal restart_pending
+        if restart_web_portal_now(path, unsaved=current_draft != loaded.raw):
+            restart_pending = False  # it's now running everything saved so far
 
     while True:
         render_overview(console, draft)
@@ -689,7 +730,10 @@ def run_setup(path, loaded):
                 continue
         if choice.isdigit() and 1 <= int(choice) <= len(sections):
             section = sections[int(choice) - 1]
-            draft = stage_channel(draft) if section == "Communications" else edit_section(draft, section)
+            if section == "Communications":
+                draft = stage_channel(draft)
+            else:
+                draft = edit_section(draft, section, restart_portal=_restart_portal)
         elif choice == "review":
             for line in diff_lines(loaded.raw, draft) or ["No changes."]:
                 typer.echo(line)

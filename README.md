@@ -1541,7 +1541,9 @@ immediately for convenience. Disabling the portal again stops whatever's
 currently running automatically. The portal reads its configuration only
 when it starts, so when you exit `setup` after saving any change, a
 portal that's already running (in the background or as the systemd unit)
-is restarted to pick it up.
+is restarted to pick it up. The section's last entry restarts the portal
+on demand (or, when it isn't running, offers to start it), always with
+the saved settings.
 
 **Security posture, by design:**
 

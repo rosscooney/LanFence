@@ -580,3 +580,54 @@ def test_overview_summaries_share_one_style():
     assert summaries['Offline detection'] == 'after 3m and 3 missed sweeps'
     assert summaries['Storage'] == 'custom locations'
     assert not any('=' in s for s in summaries.values())
+
+
+# --- restarting the web portal from setup -----------------------------------------
+
+
+def test_web_portal_section_restarts_a_running_portal(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.is_server_running', return_value=True), \
+         patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/') as restart:
+        result, _ = run_setup(path, f'{WEB}\n4\nb\nexit\n')
+    assert '4  Restart web portal (running)' in result.output
+    restart.assert_called_once_with(path)
+    assert 'Web portal restarted: https://192.168.1.5:8080/.' in result.output
+    assert 'unsaved changes' not in result.output
+
+
+def test_web_portal_section_offers_to_start_a_stopped_portal(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.is_server_running', return_value=False), \
+         patch('lanfence.web.start_background', return_value=['https://192.168.1.5:8080/']) as start:
+        result, _ = run_setup(path, f'{WEB}\n4\ny\nb\nexit\n')
+    assert '4  Start web portal (not running)' in result.output
+    start.assert_called_once_with(path)
+    assert 'Web portal starting: https://192.168.1.5:8080/' in result.output
+
+
+def test_starting_a_portal_that_is_not_set_up_explains_why_it_failed(tmp_path):
+    from lanfence import web
+
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.is_server_running', return_value=False), \
+         patch('lanfence.web.start_background', side_effect=web.WebError('the web portal is not enabled')):
+        result, _ = run_setup(path, f'{WEB}\n4\ny\nb\nexit\n')
+    assert 'Could not start the web portal: the web portal is not enabled. Enable it, set a password and save first.' \
+        in result.output
+
+
+def test_restarting_with_unsaved_changes_says_they_are_not_used_yet(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.is_server_running', return_value=True), \
+         patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/'):
+        result, _ = run_setup(path, f'{WEB}\n2\n9090\n4\nb\nexit\nd\n')
+    assert 'unsaved changes take effect once you save them' in result.output
+
+
+def test_restarting_after_a_save_means_no_second_restart_on_exit(tmp_path):
+    path = tmp_path / 'config.yaml'
+    with patch('lanfence.web.is_server_running', return_value=True), \
+         patch('lanfence.web.restart_server', return_value='restarted: https://192.168.1.5:8080/') as restart:
+        run_setup(path, f'{SITE}\n1\nHome\nb\ns\n{WEB}\n4\nb\nexit\n')
+    restart.assert_called_once_with(path)
